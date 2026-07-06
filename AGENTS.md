@@ -45,15 +45,18 @@ Do not lower the coverage threshold; run `uv run python -m coverage report` befo
 
 ## Commit & Pull Request Guidelines
 
-Use conventional commit prefixes seen in history, such as `feat:`, `fix:`, `test:`, `docs:`,
-and `chore:`. Keep messages imperative and concise, for example:
+Use conventional imperative-style commits with `feat:`, `fix:`, or `chore:`. Append `!` for
+breaking changes, for example `feat!:`. Keep messages concise, for example:
 
 ```bash
-git commit -m "test: cover trace imports"
+git commit -m "fix: cover trace imports"
 ```
 
-PRs should include a short summary, motivation, implementation notes, and a test plan. Link
-issues when applicable.
+PR labels mirror commit prefixes for release notes: prefer `feat`, `fix`, or `chore`. Add
+`breaking` when a PR changes user-facing behavior or install/API compatibility. Release notes also
+accept common aliases such as `feature`, `enhancement`, `bug`, `documentation`, `dependencies`, and
+`breaking-change`. PRs should include a short summary, motivation, implementation notes, and a test
+plan. Link issues when applicable.
 
 ## Security & Configuration Tips
 
