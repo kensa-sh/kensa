@@ -6,7 +6,13 @@ changelog:
     labels:
       - ignore-for-release
   categories:
+    - title: Breaking Changes
+      labels: [breaking, breaking-change]
     - title: Features
-      labels: [feature, enhancement]
+      labels: [feat, feature, enhancement]
     - title: Bug Fixes
-      labels: [bug, fix]
+      labels: [fix, bug]
+    - title: Chores
+      labels: [chore, documentation, dependencies]
+    - title: Other Changes
+      labels: ["*"]
