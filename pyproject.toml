@@ -113,7 +113,7 @@ known-first-party = ["kensa"]
 [dependency-groups]
 dev = [
     "build>=1.3",
-    "coverage>=7.14.1",
+    "coverage>=7.15.0",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.15",
     "ty>=0.0.40",
