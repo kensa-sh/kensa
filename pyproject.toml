@@ -50,16 +50,12 @@ kensa = "kensa.pytest_plugin"
 [project.optional-dependencies]
 redaction = [
   "detect-secrets==1.5.0",
-  "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
   "presidio-analyzer==2.2.362",
   "spacy>=3.8,<3.9",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kensa"]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
 only-include = [
