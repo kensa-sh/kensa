@@ -31,7 +31,7 @@ Examples of unacceptable behavior include:
 
 ## Enforcement
 
-Report unacceptable behavior to **satya.borg@gmail.com**. Reports will be reviewed and
+Report unacceptable behavior to **satya@kensa.sh**. Reports will be reviewed and
 investigated promptly and fairly.
 
 ## Attribution

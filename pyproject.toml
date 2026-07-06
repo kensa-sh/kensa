@@ -9,7 +9,7 @@ description = "Pytest-native evals harness for agent regression tests"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-authors = [{ name = "satyaborg", email = "satya.borg@gmail.com" }]
+authors = [{ name = "satyaborg", email = "satya@kensa.sh" }]
 keywords = ["pytest", "agents", "evals", "regression", "opentelemetry"]
 classifiers = [
   "Development Status :: 3 - Alpha",

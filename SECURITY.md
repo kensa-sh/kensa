@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in Kensa, report it privately.
 
-Do not open a public GitHub issue. Email **satya.borg@gmail.com** with:
+Do not open a public GitHub issue. Email **satya@kensa.sh** with:
 
 - A description of the vulnerability
 - Steps to reproduce
