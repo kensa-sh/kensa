@@ -1,7 +1,0 @@
-title = "Kensa gitleaks configuration"
-
-[allowlist]
-description = "Allow documented empty environment variable names."
-paths = [
-  '''^\.env\.example$''',
-]

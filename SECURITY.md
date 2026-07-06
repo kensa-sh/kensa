@@ -26,8 +26,7 @@ Security-relevant areas in this repo include:
 
 Kensa OSS should write local artifacts only.
 
-This repository runs gitleaks in GitHub Actions for pull requests, pushes to `main`, and weekly
-scheduled scans. Local `.env` files and `.kensa/` runtime outputs must remain uncommitted.
+Local `.env` files and `.kensa/` runtime outputs must remain uncommitted.
 
 ## Out Of Scope
 

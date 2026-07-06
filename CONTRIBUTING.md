@@ -147,7 +147,6 @@ Release with generated notes.
 ## Security Hygiene
 
 - `.env`, `.venv`, coverage files, build outputs, and `.kensa` runtime outputs are ignored.
-- GitHub Actions runs gitleaks on pull requests, pushes to `main`, and a weekly schedule.
 - If a secret is committed, revoke it before opening a cleanup PR.
 
 ## Pull Requests
