@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -446,14 +446,6 @@ wheels = [
 ]
 
 [[package]]
-name = "en-core-web-sm"
-version = "3.8.0"
-source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
-wheels = [
-    { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl", hash = "sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85" },
-]
-
-[[package]]
 name = "filelock"
 version = "3.29.4"
 source = { registry = "https://pypi.org/simple" }
@@ -638,7 +630,6 @@ dependencies = [
 [package.optional-dependencies]
 redaction = [
     { name = "detect-secrets" },
-    { name = "en-core-web-sm" },
     { name = "presidio-analyzer" },
     { name = "spacy" },
 ]
@@ -657,7 +648,6 @@ requires-dist = [
     { name = "any-llm-sdk", specifier = ">=1.19.0" },
     { name = "click", specifier = ">=8.4.2,<9" },
     { name = "detect-secrets", marker = "extra == 'redaction'", specifier = "==1.5.0" },
-    { name = "en-core-web-sm", marker = "extra == 'redaction'", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
     { name = "opentelemetry-api", specifier = ">=1.42.1" },
     { name = "opentelemetry-sdk", specifier = ">=1.43.0" },
     { name = "presidio-analyzer", marker = "extra == 'redaction'", specifier = "==2.2.362" },

@@ -210,6 +210,20 @@ optional.
 
 </details>
 
+<details>
+<summary>How do I enable strict value redaction?</summary>
+
+Install the extra and download the spaCy model it relies on:
+
+```bash
+uv add --dev "kensa[redaction]"
+uv run python -m spacy download en_core_web_sm
+```
+
+Without the model, imports fall back to key-only redaction.
+
+</details>
+
 ## Resources & contributing
 
 - Find a bug or request a feature in [GitHub Issues](https://github.com/kensa-sh/kensa/issues).
