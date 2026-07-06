@@ -86,6 +86,14 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
+ensure_label() {
+  local name="$1"
+  local description="$2"
+  local color="$3"
+
+  gh label create "$name" --description "$description" --color "$color" --force >/dev/null
+}
+
 assert_clean_tree() {
   [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "working tree must be clean before release"
 }
@@ -190,9 +198,10 @@ prepare_release_pr() {
     else
       echo "would skip local checks; PR CI remains authoritative"
     fi
+    echo "would ensure label: ignore-for-release"
     echo "would commit: $title"
     echo "would push branch: $branch"
-    echo "would open PR: $title"
+    echo "would open PR: $title with label ignore-for-release"
     return 0
   fi
 
@@ -202,6 +211,7 @@ prepare_release_pr() {
   assert_clean_tree
   assert_branch_available "$branch"
   assert_tag_available "$tag"
+  ensure_label "ignore-for-release" "Exclude from generated release notes" "ededed"
 
   git -C "$ROOT" switch -c "$branch"
   uv version "$version" --no-sync >/dev/null
@@ -216,7 +226,7 @@ prepare_release_pr() {
   git -C "$ROOT" add pyproject.toml uv.lock
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
-  release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file -
+  release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
 }

@@ -1,0 +1,76 @@
+name: PR Labels
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label conventional PR title
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          ensure_label() {
+            local name="$1"
+            local description="$2"
+            local color="$3"
+
+            gh label create "$name" \
+              --repo "$GH_REPO" \
+              --description "$description" \
+              --color "$color" \
+              --force >/dev/null
+          }
+
+          feat_re='^feat(\([^)]+\))?!?:[[:space:]]'
+          fix_re='^fix(\([^)]+\))?!?:[[:space:]]'
+          chore_re='^chore(\([^)]+\))?!?:[[:space:]]'
+          docs_re='^docs(\([^)]+\))?!?:[[:space:]]'
+          test_re='^test(\([^)]+\))?!?:[[:space:]]'
+          breaking_re='^[a-z]+(\([^)]+\))?!:[[:space:]]'
+
+          release_label=""
+          if [[ "$PR_TITLE" =~ $feat_re ]]; then
+            release_label="feat"
+          elif [[ "$PR_TITLE" =~ $fix_re ]]; then
+            release_label="fix"
+          elif [[ "$PR_TITLE" =~ $chore_re ]]; then
+            release_label="chore"
+          elif [[ "$PR_TITLE" =~ $docs_re ]]; then
+            release_label="documentation"
+          elif [[ "$PR_TITLE" =~ $test_re ]]; then
+            release_label="test"
+          fi
+
+          if [ -z "$release_label" ]; then
+            exit 0
+          fi
+
+          ensure_label "feat" "Feature changes" "1d76db"
+          ensure_label "fix" "Bug fixes" "d73a4a"
+          ensure_label "chore" "Maintenance changes" "6a737d"
+          ensure_label "documentation" "Documentation changes" "0075ca"
+          ensure_label "test" "Test-only changes" "5319e7"
+          ensure_label "breaking" "Breaking changes" "b60205"
+
+          for label in feat fix chore documentation test breaking; do
+            gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$label" >/dev/null 2>&1 || true
+          done
+
+          gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$release_label"
+
+          if [[ "$PR_TITLE" =~ $breaking_re ]]; then
+            gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "breaking"
+          fi
