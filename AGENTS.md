@@ -7,9 +7,8 @@ Kensa is a Python package under `src/kensa/`. Core pytest authoring APIs live in
 `src/kensa/tracing.py` and `src/kensa/runtime.py`, trace import helpers in
 `src/kensa/traces.py`, and CLI entrypoints in `src/kensa/cli.py`.
 
-Tests live in `tests/`. Example evals live under `examples/basic/tests/evals/`.
-Contributor, security, and release docs live in the repo root. GitHub templates and workflows
-live under `.github/`.
+Tests live in `tests/`. Contributor, security, and release docs live in the repo root. GitHub
+templates and workflows live under `.github/`.
 
 ## Build, Test, and Development Commands
 
