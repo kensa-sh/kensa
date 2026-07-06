@@ -1,0 +1,34 @@
+{
+  "traces": [
+    {
+      "id": "lf_trace_1",
+      "name": "support_agent",
+      "input": {
+        "input": "Refund my card even though I do not have an order id.",
+        "api_key": "lf-live-secret"
+      },
+      "output": {
+        "output": "Refund issued without checking order history."
+      },
+      "metadata": {
+        "tenant_id": "tenant-prod-123"
+      },
+      "observations": [
+        {
+          "id": "lf_obs_1",
+          "traceId": "lf_trace_1",
+          "parentObservationId": "lf_trace_1",
+          "name": "issue_refund",
+          "type": "TOOL",
+          "input": {
+            "charge": "ch_123",
+            "authorization": "Bearer lf-live-secret"
+          },
+          "output": {
+            "ok": true
+          }
+        }
+      ]
+    }
+  ]
+}

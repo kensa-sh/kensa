@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request
+
+import pytest
+
+from kensa import cli
+from kensa import traces as traces_module
+
+pytestmark = pytest.mark.live
+
+TRACE_VIEW_KEYS = {
+    "schema_version",
+    "id",
+    "name",
+    "source",
+    "started_at_unix_nano",
+    "ended_at_unix_nano",
+    "duration_ms",
+    "status",
+    "input",
+    "output",
+    "attributes",
+    "spans",
+    "raw",
+}
+TRACE_SOURCE_KEYS = {
+    "provider",
+    "import_run_id",
+    "imported_at",
+    "source_path",
+    "source_url",
+    "trace_url",
+}
+SPAN_VIEW_KEYS = {
+    "id",
+    "trace_id",
+    "parent_id",
+    "name",
+    "kind",
+    "tool_name",
+    "started_at_unix_nano",
+    "ended_at_unix_nano",
+    "duration_ms",
+    "status",
+    "status_message",
+    "input",
+    "output",
+    "attributes",
+    "events",
+    "raw",
+}
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        pytest.skip(f"{name} is not set")
+    return value
+
+
+def _live_since(provider: str) -> str:
+    return os.environ.get(f"{provider.upper()}_SINCE") or "7d"
+
+
+def _live_limit() -> int:
+    raw = os.environ.get("TRACE_IMPORT_LIMIT") or "10"
+    return max(1, int(raw))
+
+
+def _payload_size(payload: dict[str, Any]) -> int:
+    return max(1, len(json.dumps(payload, sort_keys=True).encode()))
+
+
+def _query(values: dict[str, Any]) -> str:
+    query = urlencode({key: value for key, value in values.items() if value is not None})
+    return f"?{query}" if query else ""
+
+
+def _assert_data_envelope(payload: dict[str, Any], *, provider: str) -> list[Any]:
+    data = payload.get("data")
+    assert isinstance(data, list), f"{provider} live response must include a data list"
+    return data
+
+
+def _assert_trace_view_shape(trace: dict[str, Any]) -> None:
+    assert set(trace) == TRACE_VIEW_KEYS
+    assert trace["schema_version"] == traces_module.TRACE_VIEW_SCHEMA_VERSION
+    assert set(trace["source"]) == TRACE_SOURCE_KEYS
+    for span in trace["spans"]:
+        assert set(span) == SPAN_VIEW_KEYS
+
+
+def _assert_non_empty_data(payload: dict[str, Any], *, provider: str) -> None:
+    if "data" in payload:
+        rows = _assert_data_envelope(payload, provider=provider)
+    else:
+        rows = payload.get("traces")
+        assert isinstance(rows, list), f"{provider} live response must include trace records"
+    assert rows, (
+        f"{provider} live response returned no records. "
+        f"Set {provider.upper()}_SINCE to a window with known trace data."
+    )
+
+
+def _import_live_payload(
+    *,
+    provider: str,
+    payload: dict[str, Any],
+    endpoint: str,
+    project: str | None,
+    since: str,
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / f"{provider}.jsonl"
+    result = cli._import_connected_payload(
+        provider=provider,
+        payload=payload,
+        out=out,
+        endpoint=endpoint,
+        project=project,
+        since=since,
+        limit=_live_limit(),
+        max_payload_bytes=_payload_size(payload),
+        redact="keys",
+    )
+
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert result.records_written > 0
+    assert len(rows) == result.records_written
+    for row in rows:
+        _assert_trace_view_shape(row)
+
+
+def test_live_langfuse_observations_endpoint_returns_official_envelope() -> None:
+    endpoint = _required_env("LANGFUSE_BASE_URL").rstrip("/")
+    public_key = _required_env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _required_env("LANGFUSE_SECRET_KEY")
+    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    query = _query(
+        {
+            "limit": 1,
+            "fromStartTime": cli._provider_start_time(_live_since("langfuse")),
+        }
+    )
+    payload = cli._read_json_response(
+        Request(
+            f"{endpoint}/api/public/v2/observations{query}",
+            headers={"Authorization": f"Basic {token}"},
+        )
+    )
+
+    _assert_data_envelope(payload, provider="langfuse")
+    assert isinstance(payload.get("meta"), dict)
+    cursor = payload["meta"].get("cursor")
+    assert cursor is None or isinstance(cursor, str)
+
+
+def test_live_langfuse_traces_endpoint_returns_official_envelope() -> None:
+    endpoint = _required_env("LANGFUSE_BASE_URL").rstrip("/")
+    public_key = _required_env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _required_env("LANGFUSE_SECRET_KEY")
+    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    query = _query(
+        {
+            "page": 1,
+            "limit": 1,
+            "fromTimestamp": cli._provider_start_time(_live_since("langfuse")),
+        }
+    )
+    payload = cli._read_json_response(
+        Request(
+            f"{endpoint}/api/public/traces{query}",
+            headers={"Authorization": f"Basic {token}"},
+        )
+    )
+
+    rows = _assert_data_envelope(payload, provider="langfuse")
+    assert isinstance(payload.get("meta"), dict)
+    for row in rows:
+        assert isinstance(row, dict)
+        assert row.get("id") or row.get("traceId") or row.get("trace_id")
+
+
+def test_live_langfuse_connected_import_writes_non_empty_records(tmp_path: Path) -> None:
+    endpoint = _required_env("LANGFUSE_BASE_URL")
+    public_key = _required_env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _required_env("LANGFUSE_SECRET_KEY")
+    since = _live_since("langfuse")
+
+    payload = cli._fetch_langfuse_connected_export(
+        endpoint=endpoint,
+        project=None,
+        since=since,
+        limit=_live_limit(),
+        public_key=public_key,
+        secret_key=secret_key,
+    )
+
+    _assert_non_empty_data(payload, provider="langfuse")
+    _import_live_payload(
+        provider="langfuse",
+        payload=payload,
+        endpoint=endpoint,
+        project=None,
+        since=since,
+        tmp_path=tmp_path,
+    )
