@@ -56,18 +56,29 @@ Run them in CI with the rest of your test suite. Catch regressions before they m
 
 ## Getting started
 
-### Paste this into your coding agent
+Paste this into your coding agent (Claude Code, Codex, Cursor):
 
-Open your coding agent and paste:
+```text
+Fetch https://kensa.sh/install and follow it.
+```
+
+Your agent installs Kensa, runs `kensa init`, then follows `kensa-evals`: setup, evidence import,
+inspection, approval, generation, and verification.
+
+<details>
+<summary>Agent can't fetch URLs? Paste this instead</summary>
 
 ```text
 Install `uv add --dev kensa`, run `uv run kensa init`, then use `kensa-evals`.
 ```
 
-Your agent installs Kensa, runs `kensa init`, then follows `kensa-evals`: setup, evidence import,
-inspection, approval, generation, and verification. Works with Claude Code, Codex, and Cursor.
+Same flow, hardcoded for uv. Use this only when your agent has no web access.
 
-### Or install yourself, then ask your agent
+</details>
+
+### Prefer to run it yourself
+
+Install, then hand off to your agent for `kensa-evals`.
 
 For uv projects:
 
@@ -83,19 +94,14 @@ python -m pip install kensa
 kensa init
 ```
 
-For projects that track dependencies with `requirements.txt`, add:
+For projects that track dependencies with `requirements.txt`, add `kensa`, then run `kensa init`.
 
-```text
-kensa
-```
-
-Then ask your coding agent to run `kensa-evals`.
 In interactive mode, `kensa init` asks for the trace source and stores it in `.kensa/settings.json`.
 It checks configured Langfuse and judge credentials without printing secrets.
 
-### Or CLI-only
+### CLI-only
 
-CLI-only flow:
+Drive the full lifecycle from the terminal:
 
 ```bash
 kensa init
