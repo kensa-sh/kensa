@@ -1,8 +1,8 @@
 <div align="center">
   <a href="https://kensa.sh">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/kensa-banner-dark.png">
-      <img src="assets/kensa-banner-light.png" width="540" height="auto" alt="Kensa">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/kensa-banner-dark.png">
+      <img src="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/kensa-banner-light.png" width="540" height="auto" alt="Kensa">
     </picture>
   </a>
 </div>
@@ -13,7 +13,7 @@
   <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kensa-sh/kensa/ci.yml?label=CI&style=flat-square" alt="CI"></a>
   <a href="https://pypi.org/project/kensa/"><img src="https://img.shields.io/pypi/v/kensa?style=flat-square" alt="PyPI"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Fkensa-sh%2Fkensa%2Fmain%2Fpyproject.toml&style=flat-square" alt="Python"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/kensa-sh/kensa?style=flat-square" alt="License"></a>
+  <a href="https://github.com/kensa-sh/kensa/blob/main/LICENSE"><img src="https://img.shields.io/github/license/kensa-sh/kensa?style=flat-square" alt="License"></a>
   <a href="https://pepy.tech/projects/kensa"><img src="https://img.shields.io/pepy/dt/kensa?style=flat-square" alt="Downloads"></a>
 </p>
 
