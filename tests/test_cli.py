@@ -1196,7 +1196,7 @@ def test_help_shows_primary_commands_in_order_and_hides_plumbing(capsys) -> None
 
 def test_readme_cli_quickstart_leads_with_setup_inspect_approve_eval_flow() -> None:
     readme = (REPO_ROOT / "README.md").read_text()
-    quickstart = readme.split("### Or CLI-only", 1)[1].split("## Core commands", 1)[0]
+    quickstart = readme.split("### CLI-only", 1)[1].split("## Core commands", 1)[0]
     commands = [
         "kensa init",
         "kensa doctor",
