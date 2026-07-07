@@ -1224,13 +1224,15 @@ def test_readme_header_centers_banner_tagline_and_badges() -> None:
         '  <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml">'
     )
     dark_source = (
-        '<source media="(prefers-color-scheme: dark)" srcset="assets/kensa-banner-dark.png">'
+        '<source media="(prefers-color-scheme: dark)" '
+        'srcset="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/kensa-banner-dark.png">'
     )
 
     assert '<a href="https://kensa.sh">' in header
     assert dark_source in header
     assert (
-        '<img src="assets/kensa-banner-light.png" width="540" height="auto" alt="Kensa">' in header
+        '<img src="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/'
+        'kensa-banner-light.png" width="540" height="auto" alt="Kensa">' in header
     )
     assert header.index('<div align="center">') < header.index(tagline)
     assert header.index(tagline) < header.index(badge_block)
