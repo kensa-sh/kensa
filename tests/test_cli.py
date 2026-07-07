@@ -2743,7 +2743,7 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    keys = iter(["k", "\r", "\r"])
+    keys = iter(["\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
     assert main(["init"]) == 0
@@ -2789,7 +2789,7 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: "/bin/codex")
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    keys = iter(["j", "j", "\r", "\r"])
+    keys = iter(["j", "j", "j", "\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
     assert main(["init"]) == 0
@@ -2803,7 +2803,7 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
         assert not (tmp_path / ".cursor" / "skills" / skill_name / "SKILL.md").exists()
 
 
-def test_init_interactive_keyboard_menu_selects_agent(
+def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2821,18 +2821,18 @@ def test_init_interactive_keyboard_menu_selects_agent(
     output = console.export_text()
     assert "Which coding agent?" in output
     assert "Use ↑/↓, then Enter." in output
-    assert "installed Codex instructions" in output
+    assert "installed Claude Code instructions" in output
     assert "Where should Kensa get traces from?" in output
     assert "Next steps:" in output
-    assert "1. Open Codex." in output
+    assert "1. Open Claude Code." in output
     assert (
-        '2. Paste this: "Use $kensa-evals to continue the Kensa lifecycle for this repo."' in output
+        '2. Paste this: "Use /kensa-evals to continue the Kensa lifecycle for this repo."' in output
     )
     assert "Copyable setup prompt" not in output
     assert "Prefer to do it yourself?" not in output
     assert _read_settings(tmp_path)["init"]["evidence_source"] == "langfuse"
     for skill_name in PACKAGED_SKILLS:
-        assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
+        assert (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
 
 
 def test_init_explicit_auto_agent_summary_uses_resolved_agent(
@@ -2863,7 +2863,7 @@ def test_select_agent_instruction_interactive_without_steps_uses_label_menu(
     monkeypatch,
 ) -> None:
     console = Console(record=True, highlight=False)
-    keys = iter(["j", "\r"])
+    keys = iter(["j", "j", "\r"])
     monkeypatch.setattr(cli_output, "CONSOLE", console)
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
@@ -2878,8 +2878,24 @@ def test_select_agent_instruction_interactive_without_steps_uses_label_menu(
     assert "Codex" in output
     assert "Cursor" in output
     assert "Other" in output
-    assert "All supported" in output
+    assert "All supported" not in output
     assert "None" not in output
+
+
+def test_select_interactive_choice_wraps_up_from_first_option(monkeypatch) -> None:
+    console = Console(record=True, highlight=False)
+    keys = iter(["k", "\r"])
+    monkeypatch.setattr(cli_output, "CONSOLE", console)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+
+    choice = cli._select_interactive_choice(
+        "Which coding agent?",
+        choices=cli._AGENT_INSTRUCTION_CHOICES,
+        default=cli._AGENT_INSTRUCTION_CHOICES[0],
+    )
+
+    assert choice == "other"
 
 
 def test_select_trace_source_interactive_without_steps_uses_label_menu(monkeypatch) -> None:
@@ -3680,9 +3696,9 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
     assert "Langfuse" in output
     assert "No traces? Capture local run" in output
     assert "Next steps:" in output
-    assert "1. Open Codex." in output
+    assert "1. Open Claude Code." in output
     assert (
-        '2. Paste this: "Use $kensa-evals to continue the Kensa lifecycle for this repo."' in output
+        '2. Paste this: "Use /kensa-evals to continue the Kensa lifecycle for this repo."' in output
     )
     assert "Selected trace source:" not in output
     assert "Copyable setup prompt" not in output

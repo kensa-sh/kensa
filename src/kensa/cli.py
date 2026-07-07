@@ -76,8 +76,8 @@ AgentInstructionChoice = Literal[
     "other",
     "all",
 ]
-_AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other", "all")
-_AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES)
+_AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other")
+_AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES, "all")
 _INTERACTIVE_CHOICE_LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
@@ -2105,7 +2105,7 @@ def _is_interactive() -> bool:
 
 
 def _default_agent_instruction_choice() -> str:
-    return _detected_agent_instruction_key() or "codex"
+    return _AGENT_INSTRUCTION_CHOICES[0]
 
 
 def _select_interactive_choice(
