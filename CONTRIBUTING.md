@@ -153,5 +153,7 @@ Release with generated notes.
 
 - Use a branch named `feat/...`, `fix/...`, or `chore/...`.
 - Use conventional commit prefixes: `feat:`, `fix:`, `test:`, `docs:`, or `chore:`.
+- GitHub release notes are grouped by PR labels; the PR Labels workflow applies those labels from
+  conventional PR titles.
 - Keep eval files constrained to `tests/evals/test_*.py`.
 - Include a short test plan in the PR.

@@ -13,6 +13,6 @@ changelog:
     - title: Bug Fixes
       labels: [fix, bug]
     - title: Chores
-      labels: [chore, documentation, dependencies]
+      labels: [chore, documentation, dependencies, test]
     - title: Other Changes
       labels: ["*"]
