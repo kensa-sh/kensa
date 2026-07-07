@@ -134,6 +134,9 @@ with `kensa.instrument()` and import the JSONL.
 | `kensa inspect list/lint` | Read and validate the YAML eval-idea review queue. |
 | `kensa eval` | Run Kensa evals through pytest. |
 
+Recommended agent flow: `kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify.
+`kensa-evals` reads `.kensa/settings.json` to choose the evidence path.
+
 Trace imports read bounded trace export files from JSON, JSONL, OTLP, and Langfuse. Connected
 Langfuse imports use metadata from `kensa connect langfuse`. By default, `connect` verifies
 credentials before saving metadata; use `--configure-only` for metadata-only setup. API key values
