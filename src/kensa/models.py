@@ -46,12 +46,14 @@ class CliEnvelope(KensaModel):
 
 
 EvidenceSource = Literal["langfuse", "trace_export", "local"]
+AgentInstruction = Literal["codex", "claude", "cursor", "other"]
 
 
 class KensaInitSettings(KensaModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     evidence_source: EvidenceSource | None = None
+    agents: tuple[AgentInstruction, ...] | None = None
 
 
 class KensaHarnessSettings(KensaModel):

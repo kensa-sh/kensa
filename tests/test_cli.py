@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 
+import click
 import pytest
 from rich.console import Console
 
@@ -2171,6 +2172,7 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     settings = _read_settings(tmp_path)
     assert settings["schema_version"] == "kensa.settings.v1"
     assert "evidence_source" not in settings["init"]
+    assert settings["init"]["agents"] == ["codex"]
     assert settings["harness"]["ready"] is False
     assert not (tmp_path / ".kensa" / "readiness.json").exists()
     assert (tmp_path / ".kensa" / ".gitignore").read_text() == "*\n!.gitignore\n!settings.json\n"
@@ -2268,6 +2270,71 @@ def test_init_trace_source_flag_persists_noninteractive_choice(
 
     settings = _read_settings(tmp_path)
     assert settings["init"]["evidence_source"] == source
+
+
+def test_init_agent_all_flag_scaffolds_all_agent_instructions(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+
+    assert main(["init", "--agent", "all", "--trace-source", "local"]) == 0
+
+    output = capsys.readouterr().out
+    assert "✓ .agents/skills/kensa-evals/ (1 file)" in output
+    assert "✓ .claude/skills/kensa-evals/ (1 file)" in output
+    assert "✓ .cursor/skills/kensa-evals/ (1 file)" in output
+    for skill_name in PACKAGED_SKILLS:
+        assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
+        assert (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
+        assert (tmp_path / ".cursor" / "skills" / skill_name / "SKILL.md").exists()
+    assert _read_settings(tmp_path)["init"] == {
+        "evidence_source": "local",
+        "agents": ["codex", "claude", "cursor"],
+    }
+
+
+def test_init_explicit_auto_agent_requires_supported_detection(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+
+    assert main(["init", "--agent", "auto"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Could not detect a supported coding agent for --agent auto" in captured.err
+    assert not (tmp_path / "tests" / "evals" / "conftest.py").exists()
+    assert not (tmp_path / ".kensa" / "settings.json").exists()
+
+
+def test_init_agent_none_flag_is_rejected(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["init", "--agent", "none"]) == 2
+
+    captured = capsys.readouterr()
+    assert "Invalid value for '--agent'" in captured.err
+    assert "'none' is not one of" in captured.err
+
+
+def test_scaffold_agent_files_explicit_auto_requires_supported_detection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+
+    with pytest.raises(click.ClickException, match="Could not detect a supported coding agent"):
+        cli._scaffold_agent_files(agent_choice="auto")
 
 
 @pytest.mark.parametrize(
@@ -2766,6 +2833,30 @@ def test_init_interactive_keyboard_menu_selects_agent(
         assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
 
 
+def test_init_explicit_auto_agent_summary_uses_resolved_agent(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda command: "/bin/codex" if command == "codex" else None,
+    )
+    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    keys = iter(["\r"])
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+
+    assert main(["init", "--agent", "auto"]) == 0
+
+    output = capsys.readouterr().out
+    assert "installed Codex instructions" in output
+    assert "installed auto instructions" not in output
+    assert _read_settings(tmp_path)["init"]["agents"] == ["codex"]
+
+
 def test_select_agent_instruction_interactive_without_steps_uses_label_menu(
     monkeypatch,
 ) -> None:
@@ -2776,15 +2867,17 @@ def test_select_agent_instruction_interactive_without_steps_uses_label_menu(
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
-    choice, path = cli._select_agent_instruction()
+    choice, targets = cli._select_agent_instruction()
 
     assert choice == "cursor"
-    assert path == Path(".cursor/skills/kensa-evals/SKILL.md")
+    assert targets == (("cursor", Path(".cursor/skills/kensa-evals/SKILL.md")),)
     output = console.export_text()
     assert "Claude Code" in output
     assert "Codex" in output
     assert "Cursor" in output
     assert "Other" in output
+    assert "All supported" in output
+    assert "None" not in output
 
 
 def test_select_trace_source_interactive_without_steps_uses_label_menu(monkeypatch) -> None:
@@ -3461,7 +3554,9 @@ def test_init_interactive_interrupt_uses_step_exit(
     monkeypatch.setattr(
         cli,
         "_cmd_init_inner",
-        lambda steps, evidence_source=None: (_ for _ in ()).throw(KeyboardInterrupt),
+        lambda steps, evidence_source=None, agent_choice=None: (_ for _ in ()).throw(
+            KeyboardInterrupt
+        ),
     )
 
     assert main(["init"]) == 130
@@ -3704,6 +3799,10 @@ def test_agent_skill_steps_copy_uses_agent_markers() -> None:
         "Open Claude Code.",
         'Paste this: "Use /kensa-evals to continue the Kensa lifecycle for this repo."',
     )
+    assert cli._agent_skill_steps("all") == (
+        "Open your coding agent.",
+        'Paste the matching command: Codex "$kensa-evals"; Claude Code or Cursor "/kensa-evals".',
+    )
     assert cli._agent_skill_steps("future") == (
         "Open your coding agent.",
         'Paste this: "Use kensa-evals to continue the Kensa lifecycle for this repo."',
@@ -3711,7 +3810,7 @@ def test_agent_skill_steps_copy_uses_agent_markers() -> None:
     assert cli._agent_instruction_key_for_path(Path("unknown")) is None
 
 
-@pytest.mark.parametrize("flag", ["--agent", "--scaffold-only", "--max-agent-attempts", "--quiet"])
+@pytest.mark.parametrize("flag", ["--scaffold-only", "--max-agent-attempts", "--quiet"])
 def test_removed_init_flags_are_rejected(flag: str, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
