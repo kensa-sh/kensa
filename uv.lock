@@ -613,7 +613,7 @@ wheels = [
 
 [[package]]
 name = "kensa"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "any-llm-sdk" },
