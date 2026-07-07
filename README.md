@@ -19,8 +19,15 @@
 
 <hr />
 
-Generated from traces or written from scratch, your evals live in your repo as simple,
-executable pytest files:
+> [!IMPORTANT]
+> Kensa `>=0.9.0` is a breaking rewrite. For legacy versions (`<0.9.0`), see [satyaborg/kensa](https://github.com/satyaborg/kensa).
+
+Agents are non-deterministic. Prompts drift, tools change, models shift underneath you. Any
+change can make your agent slower, more expensive, or just plain wrong.
+
+Kensa mines your real traces, so evals assert what your agent actually did, not what it should
+have. Generated from traces or written from scratch, they live in your repo as simple, executable
+files:
 
 ```python
 import pytest
