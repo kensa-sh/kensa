@@ -19,9 +19,6 @@
 
 <hr />
 
-> [!IMPORTANT]
-> Kensa `>=0.9.0` is a breaking rewrite. For legacy versions (`<0.9.0`), see [satyaborg/kensa](https://github.com/satyaborg/kensa).
-
 Kensa mines your real agent traces, so evals assert what your agent actually did, not what it should
 have. Generated from traces or written from scratch, they live in your repository as simple, executable
 files:
@@ -61,6 +58,9 @@ make them slower, more expensive, or just plain unreliable. Run Kensa in CI with
 test suite to catch those regressions before they hit prod.
 
 ## Getting started
+
+> [!NOTE]
+> Upgrading from `<0.9.0`? 0.9.0 is a ground-up rewrite with a new API. Older releases live at [satyaborg/kensa](https://github.com/satyaborg/kensa).
 
 Paste this into your coding agent (Claude Code, Codex, Cursor):
 
