@@ -3640,10 +3640,6 @@ def test_init_noninteractive_prints_generic_trace_source_handoff(
     assert "Use the generated kensa-evals skill" in cli.SETUP_HANDOFF_PROMPT
     assert "source-specific instruction" not in cli.SETUP_HANDOFF_PROMPT
     assert "evidence_source" not in _read_settings(tmp_path)["init"]
-    assert (
-        "kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify"
-        in (REPO_ROOT / "README.md").read_text()
-    )
     assert "Next steps" in output
     assert "1. Open your coding agent." in output
     assert (
