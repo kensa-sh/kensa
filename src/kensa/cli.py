@@ -58,7 +58,7 @@ from kensa.constants import (
 )
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
-from kensa.models import EvidenceSource, InspectStatus, KensaSettings
+from kensa.models import AgentInstruction, EvidenceSource, InspectStatus, KensaSettings
 from kensa.traces import (
     ImportResult,
     RedactionMode,
@@ -68,12 +68,22 @@ from kensa.traces import (
 
 CONTEXT_SETTINGS = {"max_content_width": 120}
 _COMMAND_ORDER = ["init", "doctor", "connect", "import", "eval", "traces", "inspect"]
-_AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other")
+AgentInstructionChoice = Literal[
+    "auto",
+    "claude",
+    "codex",
+    "cursor",
+    "other",
+    "all",
+]
+_AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other", "all")
+_AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES)
 _INTERACTIVE_CHOICE_LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
     "cursor": "Cursor",
     "other": "Other",
+    "all": "All supported",
 }
 _TRACE_SOURCE_CHOICES = (
     "langfuse",
@@ -511,16 +521,27 @@ def import_command(
 
 @cli.command()
 @click.option(
+    "--agent",
+    "agent_choice",
+    type=click.Choice(_AGENT_INSTRUCTION_FLAG_CHOICES, case_sensitive=False),
+    default=None,
+    help="Install coding-agent instructions: auto, claude, codex, cursor, other, or all.",
+)
+@click.option(
     "--trace-source",
     "trace_source",
     type=click.Choice(_TRACE_SOURCE_CHOICES, case_sensitive=False),
     default=None,
     help="Persist the selected trace source.",
 )
-def init(trace_source: str | None) -> None:
+def init(agent_choice: str | None, trace_source: str | None) -> None:
     """Set up Kensa."""
+    selected_agent = cast(
+        AgentInstructionChoice | None,
+        agent_choice.lower() if agent_choice else None,
+    )
     selected_source = cast(EvidenceSource | None, trace_source.lower() if trace_source else None)
-    code = _cmd_init(selected_source)
+    code = _cmd_init(selected_source, selected_agent)
     raise click.exceptions.Exit(code)
 
 
@@ -1409,8 +1430,9 @@ def _ensure_kensa_gitignore(kensa_dir: Path) -> bool:
     return created
 
 
-def _record_init_evidence_source(
+def _record_init_choices(
     evidence_source: EvidenceSource | None,
+    agent_keys: tuple[AgentInstruction, ...],
     *,
     settings: KensaSettings,
 ) -> list[Path]:
@@ -1418,6 +1440,7 @@ def _record_init_evidence_source(
     init = cast(dict[str, Any], payload.get("init", {}))
     if evidence_source is not None:
         init["evidence_source"] = evidence_source
+    init["agents"] = list(agent_keys)
     payload["init"] = init
     payload["schema_version"] = KENSA_SETTINGS_SCHEMA_VERSION
     return _write_settings(KensaSettings.model_validate(payload))
@@ -1436,14 +1459,17 @@ def _record_harness_readiness(*, ready: bool, warnings: list[str]) -> bool:
     return True
 
 
-def _cmd_init(evidence_source: EvidenceSource | None = None) -> int:
+def _cmd_init(
+    evidence_source: EvidenceSource | None = None,
+    agent_choice: AgentInstructionChoice | None = None,
+) -> int:
     steps = _Steps() if _is_interactive() else None
     if steps is None:
         cli_output.step("kensa init")
     else:
         steps.start("kensa init")
     try:
-        return _cmd_init_inner(steps, evidence_source)
+        return _cmd_init_inner(steps, evidence_source, agent_choice)
     except KeyboardInterrupt:
         _init_item(steps, "interrupted.", ok=False, err=True)
         if steps is not None:
@@ -1454,11 +1480,17 @@ def _cmd_init(evidence_source: EvidenceSource | None = None) -> int:
 def _cmd_init_inner(
     steps: _Steps | None,
     explicit_evidence_source: EvidenceSource | None = None,
+    explicit_agent_choice: AgentInstructionChoice | None = None,
 ) -> int:
     settings = _read_settings()
-    added_files, notices, instruction_key = _scaffold_init_files(steps)
+    if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
+        raise _auto_agent_detection_error()
+    added_files, notices, instruction_key, agent_keys = _scaffold_init_files(
+        steps,
+        agent_choice=explicit_agent_choice,
+    )
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
-    added_files.extend(_record_init_evidence_source(evidence_source, settings=settings))
+    added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
     for notice in notices:
@@ -1520,7 +1552,11 @@ def _agent_reference_root(path: Path) -> Path | None:
     return None
 
 
-def _scaffold_init_files(steps: _Steps | None = None) -> tuple[list[Path], list[str], str | None]:
+def _scaffold_init_files(
+    steps: _Steps | None = None,
+    *,
+    agent_choice: AgentInstructionChoice | None = None,
+) -> tuple[list[Path], list[str], str | None, tuple[AgentInstruction, ...]]:
     added: list[Path] = []
     notices: list[str] = []
     workflow_path, workflow_working_directory = _init_workflow_target()
@@ -1535,21 +1571,35 @@ def _scaffold_init_files(steps: _Steps | None = None) -> tuple[list[Path], list[
     smoke = eval_dir / "test_kensa_smoke.py"
     if _write_if_missing_or_kensa_generated(smoke, _smoke_template(), _is_kensa_smoke):
         added.append(smoke)
-    agent_files, agent_notice, instruction_key = _scaffold_agent_files(steps)
+    agent_files, agent_notice, instruction_key, agent_keys = _scaffold_agent_files(
+        steps,
+        agent_choice=agent_choice,
+    )
     added.extend(agent_files)
     if agent_notice is not None:
         notices.append(agent_notice)
-    return added, notices, instruction_key
+    return added, notices, instruction_key, agent_keys
 
 
-def _scaffold_agent_files(steps: _Steps | None = None) -> tuple[list[Path], str | None, str | None]:
-    choice, path = _select_agent_instruction(steps)
-    if path is None:
-        return [], _agent_instruction_skip_notice(choice), None
-    instruction_key = "other" if choice == "other" else _agent_instruction_key_for_path(path)
-    if steps is not None and instruction_key is not None:
+def _scaffold_agent_files(
+    steps: _Steps | None = None,
+    *,
+    agent_choice: AgentInstructionChoice | None = None,
+) -> tuple[list[Path], str | None, str | None, tuple[AgentInstruction, ...]]:
+    choice, targets = _select_agent_instruction(steps, explicit_choice=agent_choice)
+    if not targets:
+        if agent_choice == "auto":
+            raise _auto_agent_detection_error()
+        return [], _agent_instruction_skip_notice(choice), None, ()
+    written: list[Path] = []
+    agent_keys: list[AgentInstruction] = []
+    for target_key, path in targets:
+        written.extend(_copy_skill_template_tree(path))
+        agent_keys.append(target_key)
+    instruction_key = choice if choice in {"all", "other"} else agent_keys[0]
+    if steps is not None:
         steps.item(_agent_instruction_choice_summary(instruction_key))
-    return _copy_skill_template_tree(path), None, instruction_key
+    return written, None, instruction_key, tuple(agent_keys)
 
 
 def _configure_trace_source_connection(
@@ -2014,18 +2064,24 @@ def _init_connect_args(provider: str) -> SimpleNamespace:
     raise ValueError(f"unsupported connection provider: {provider}")
 
 
-def _select_agent_instruction(steps: _Steps | None = None) -> tuple[str, Path | None]:
-    choice = "auto"
-    if _is_interactive():
+def _select_agent_instruction(
+    steps: _Steps | None = None,
+    *,
+    explicit_choice: AgentInstructionChoice | None = None,
+) -> tuple[AgentInstructionChoice, tuple[tuple[AgentInstruction, Path], ...]]:
+    choice: AgentInstructionChoice = explicit_choice or "auto"
+    if explicit_choice is None and _is_interactive():
         label = "Which coding agent?"
         default = _default_agent_instruction_choice()
-        choice = _select_interactive_choice(
-            label,
-            choices=_AGENT_INSTRUCTION_CHOICES,
-            default=default,
+        choice = cast(
+            AgentInstructionChoice,
+            _select_interactive_choice(
+                label,
+                choices=_AGENT_INSTRUCTION_CHOICES,
+                default=default,
+            ).lower(),
         )
-    choice = choice.lower()
-    return choice, _agent_instruction_path_for_choice(choice)
+    return choice, _agent_instruction_targets_for_choice(choice)
 
 
 def _select_trace_source(steps: _Steps | None = None) -> EvidenceSource | None:
@@ -2121,6 +2177,23 @@ def _print_choice_help(
     return 1
 
 
+def _agent_instruction_targets_for_choice(
+    choice: AgentInstructionChoice,
+) -> tuple[tuple[AgentInstruction, Path], ...]:
+    if choice == "all":
+        return tuple(
+            (cast(AgentInstruction, key), path) for key, path in _AGENT_INSTRUCTION_PATHS.items()
+        )
+    path = _agent_instruction_path_for_choice(choice)
+    if path is None:
+        return ()
+    if choice == "other":
+        return (("other", path),)
+    key = _agent_instruction_key_for_path(path)
+    assert key is not None
+    return ((cast(AgentInstruction, key), path),)
+
+
 def _agent_instruction_path_for_choice(choice: str) -> Path | None:
     if choice == "other":
         return _agent_instruction_path("codex")
@@ -2145,6 +2218,15 @@ def _agent_instruction_skip_notice(choice: str) -> str:
     reason = "no supported agent detected" if choice == "auto" else f"unsupported choice: {choice}"
     roots = ", ".join(str(path.parent.parent) for path in _AGENT_INSTRUCTION_PATHS.values())
     return f"No agent skill files installed ({reason}). Supported locations: {roots}."
+
+
+def _auto_agent_detection_error() -> click.ClickException:
+    roots = ", ".join(str(path.parent.parent) for path in _AGENT_INSTRUCTION_PATHS.values())
+    return click.ClickException(
+        "Could not detect a supported coding agent for --agent auto. "
+        "Rerun with --agent claude, codex, cursor, other, or all. "
+        f"Supported locations: {roots}."
+    )
 
 
 def _agent_instruction_label(choice: str) -> str:
@@ -3224,6 +3306,14 @@ def _agent_skill_steps(instruction_key: str | None) -> tuple[str, str]:
         return (
             "Open Cursor.",
             f'Paste this: "{_agent_setup_prompt("/")}"',
+        )
+    if instruction_key == "all":
+        return (
+            "Open your coding agent.",
+            (
+                'Paste the matching command: Codex "$kensa-evals"; '
+                'Claude Code or Cursor "/kensa-evals".'
+            ),
         )
     return (
         "Open your coding agent.",
