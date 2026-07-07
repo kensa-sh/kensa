@@ -22,11 +22,8 @@
 > [!IMPORTANT]
 > Kensa `>=0.9.0` is a breaking rewrite. For legacy versions (`<0.9.0`), see [satyaborg/kensa](https://github.com/satyaborg/kensa).
 
-Agents are non-deterministic. Prompts drift, tools change, models shift underneath you. Any
-change can make your agent slower, more expensive, or just plain wrong.
-
-Kensa mines your real traces, so evals assert what your agent actually did, not what it should
-have. Generated from traces or written from scratch, they live in your repo as simple, executable
+Kensa mines your real agent traces, so evals assert what your agent actually did, not what it should
+have. Generated from traces or written from scratch, they live in your repository as simple, executable
 files:
 
 ```python
@@ -59,7 +56,9 @@ def test_refund_policy(case, kensa_run, kensa_trace):
     assert result.passed, result.reasoning
 ```
 
-Run them in CI with the rest of your test suite. Catch regressions before they make it to prod.
+Why? Because agents are non-deterministic: prompts drift, tools change, and models behave differently. Any change can
+make them slower, more expensive, or just plain unreliable. Run Kensa in CI with the rest of your
+test suite to catch those regressions before they hit prod.
 
 ## Getting started
 
@@ -69,14 +68,14 @@ Paste this into your coding agent (Claude Code, Codex, Cursor):
 Fetch https://kensa.sh/install and follow it.
 ```
 
-Your agent installs Kensa, runs `kensa init`, then follows `kensa-evals`: setup, evidence import,
-inspection, approval, generation, and verification.
+Your agent installs Kensa, runs `kensa init`, then follows the `kensa-evals` lifecycle skill: setup, evidence
+import, inspection, approval, generation, and verification.
 
 <details>
 <summary>Agent can't fetch URLs? Paste this instead</summary>
 
 ```text
-Install `uv add --dev kensa`, run `uv run kensa init`, then use `kensa-evals`.
+Install `uv add --dev kensa`, run `uv run kensa init`, then use the `kensa-evals` skill.
 ```
 
 Same flow, hardcoded for uv. Use this only when your agent has no web access.
@@ -85,7 +84,7 @@ Same flow, hardcoded for uv. Use this only when your agent has no web access.
 
 ### Prefer to run it yourself
 
-Install, then hand off to your agent for `kensa-evals`.
+Install, then hand off to your agent for the `kensa-evals` skill.
 
 For uv projects:
 
@@ -127,7 +126,7 @@ with `kensa.instrument()` and import the JSONL.
 
 | Command | What it does |
 | --- | --- |
-| `kensa init` | Set up the pytest harness and `kensa-evals` lifecycle instructions. |
+| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. |
 | `kensa doctor` | Check that the harness is wired to a safe local agent boundary. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
 | `kensa import --from <provider>` | Import local or connected trace evidence. |
@@ -135,7 +134,7 @@ with `kensa.instrument()` and import the JSONL.
 | `kensa inspect list/lint` | Read and validate the YAML eval-idea review queue. |
 | `kensa eval` | Run Kensa evals through pytest. |
 
-Recommended agent flow: `kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify.
+Recommended agent flow, the `kensa-evals` skill: setup -> evidence -> inspect -> approval -> generate -> verify.
 `kensa-evals` reads `.kensa/settings.json` to choose the evidence path.
 
 Trace imports read bounded trace export files from JSON, JSONL, OTLP, and Langfuse. Connected
