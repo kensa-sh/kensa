@@ -141,9 +141,11 @@ Trace imports read bounded trace export files from JSON, JSONL, OTLP, and Langfu
 Langfuse imports use metadata from `kensa connect langfuse` and support both the legacy trace API
 and observations-v2/events-only deployments. For observations-v2 imports, Kensa reconstructs traces
 from observation rows, so trace-level input/output may be absent while span input/output is
-preserved. By default, `connect` verifies credentials before saving metadata; use `--configure-only`
-for metadata-only setup. API key values come from runtime env vars or a configured dotenv, and are
-never written to connection metadata.
+preserved. Use `kensa import --from langfuse --langfuse-mode observations_v2` to force the
+observations-v2 path when the legacy trace API returns an empty result for traces you expect to
+exist. By default, `connect` verifies credentials before saving metadata; use `--configure-only` for
+metadata-only setup. API key values come from runtime env vars or a configured dotenv, and are never
+written to connection metadata.
 
 Run `kensa --help` or `kensa <command> --help` for the full CLI reference. Use `--json` when a
 coding agent needs a stable machine-readable response.

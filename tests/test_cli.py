@@ -1836,11 +1836,27 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
             "limit": 50,
             "public_key": "lf-public-value",
             "secret_key": "lf-secret-value",
+            "import_mode": "auto",
         }
     ]
     assert payload["data"]["source_mode"] == "connected"
     assert artifact.exists()
     assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
+
+    calls.clear()
+    code = main(
+        [
+            "import",
+            "--from",
+            "langfuse",
+            "--langfuse-mode",
+            "observations_v2",
+            "--json",
+        ]
+    )
+    json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert calls[0]["import_mode"] == "observations_v2"
 
 
 def test_new_cli_helper_edge_paths(
@@ -2218,7 +2234,7 @@ def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeyp
             {"id": "obs_1", "traceId": "tr_1", "type": "SPAN"},
             {"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"},
         ],
-        "meta": {"cursor": None},
+        "meta": {},
     }
 
     first_query = parse_qs(urlparse(requests[0].full_url).query)
@@ -2243,12 +2259,69 @@ def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeyp
         "limit": ["1000"],
         "traceId": ["tr_1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
     }
     assert second_trace_query == {
         "limit": ["1000"],
         "traceId": ["tr_2"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
     }
+
+
+def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None:
+    requests = []
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        query = parse_qs(urlparse(request.full_url).query)
+        if "traceId" not in query:
+            return _JsonResponse(
+                {
+                    "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                    "meta": {"cursor": None},
+                }
+            )
+        input_value: Any = json.dumps([{"role": "user", "content": "Refund me"}])
+        output_value: Any = json.dumps({"answer": "Done"})
+        if query.get("parseIoAsJson") == ["true"]:
+            input_value = [{"role": "user", "content": "Refund me"}]
+            output_value = {"answer": "Done"}
+        return _JsonResponse(
+            {
+                "data": [
+                    {
+                        "id": "obs_1",
+                        "traceId": "tr_1",
+                        "type": "SPAN",
+                        "input": input_value,
+                        "output": output_value,
+                    }
+                ],
+                "meta": {"cursor": None},
+            }
+        )
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    payload = cli._fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        project=None,
+        since=None,
+        limit=1,
+        public_key="public",
+        secret_key="secret",
+        import_mode="observations_v2",
+    )
+
+    assert payload["data"][0]["input"] == [{"role": "user", "content": "Refund me"}]
+    assert payload["data"][0]["output"] == {"answer": "Done"}
+    assert parse_qs(urlparse(requests[0].full_url).query) == {
+        "limit": ["1"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
+    }
+    assert parse_qs(urlparse(requests[1].full_url).query)["parseIoAsJson"] == ["true"]
 
 
 def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None:
@@ -2289,7 +2362,7 @@ def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None
             {"id": "obs_root", "traceId": "tr_1", "type": "SPAN"},
             {"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"},
         ],
-        "meta": {"cursor": "later"},
+        "meta": {},
     }
     assert len(requests) == 2
     assert parse_qs(urlparse(requests[0].full_url).query) == {
@@ -2300,6 +2373,7 @@ def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None
         "limit": ["1000"],
         "traceId": ["tr_1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
     }
 
 
@@ -2331,7 +2405,7 @@ def test_langfuse_auto_import_falls_back_only_when_trace_endpoint_is_missing(
         secret_key="secret",
     ) == {
         "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-        "meta": {"cursor": None},
+        "meta": {},
     }
     assert len(requests) == 3
     assert "/api/public/traces?" in requests[0].full_url

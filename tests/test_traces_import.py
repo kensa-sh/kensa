@@ -1161,6 +1161,7 @@ def test_import_langfuse_observation_rows_group_by_trace_id(tmp_path: Path) -> N
     assert rows[0]["duration_ms"] == 1000.0
     assert [span["id"] for span in rows[0]["spans"]] == ["obs_1", "obs_3"]
     assert rows[0]["spans"][0]["kind"] == "span"
+    assert "end_time" not in rows[0]["spans"][0]["attributes"]
     assert rows[0]["spans"][1]["parent_id"] == "obs_1"
     assert [span["id"] for span in rows[1]["spans"]] == ["obs_2"]
 

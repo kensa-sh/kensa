@@ -80,7 +80,8 @@ request escalation for these commands instead of deferring or switching sources.
 backoff with retries is normal; let a healthy retry finish. Kensa supports both the legacy Langfuse
 trace API and observations-v2/events-only deployments. Observations-v2 imports reconstruct traces
 from observation rows, so trace-level input/output may be absent while span input/output is
-preserved.
+preserved. If the legacy trace API returns an empty result for traces that should exist, retry with
+`kensa import --from langfuse --langfuse-mode observations_v2 --limit 50`.
 
 For `trace_export`:
 

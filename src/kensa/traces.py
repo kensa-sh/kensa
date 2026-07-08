@@ -1096,6 +1096,7 @@ def _langfuse_observation_span_view(
 _LANGFUSE_RESERVED_KEYS = frozenset(
     {
         "endTime",
+        "end_time",
         "events",
         "id",
         "input",
