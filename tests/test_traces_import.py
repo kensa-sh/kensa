@@ -1044,6 +1044,11 @@ def test_import_langfuse_records_accepts_official_data_envelope(tmp_path: Path) 
                         "traceName": "refund-agent",
                         "traceUserId": "user_1",
                         "traceSessionId": "session_1",
+                        "userId": "trace-user-camel",
+                        "sessionId": "trace-session-camel",
+                        "release": "2026.07.08",
+                        "environment": "production",
+                        "tags": ["refunds"],
                         "name": "agent",
                         "type": "SPAN",
                         "input": {"message": "Refund me"},
@@ -1084,6 +1089,11 @@ def test_import_langfuse_records_accepts_official_data_envelope(tmp_path: Path) 
     assert row["output"] is None
     assert row["attributes"]["traceUserId"] == "user_1"
     assert row["attributes"]["traceSessionId"] == "session_1"
+    assert row["attributes"]["userId"] == "trace-user-camel"
+    assert row["attributes"]["sessionId"] == "trace-session-camel"
+    assert row["attributes"]["release"] == "2026.07.08"
+    assert row["attributes"]["environment"] == "production"
+    assert row["attributes"]["tags"] == ["refunds"]
     assert row["attributes"]["tenant"] == "support"
     assert row["spans"][0]["id"] == "obs_1"
     assert row["spans"][0]["input"] == {"message": "Refund me"}
@@ -1101,6 +1111,58 @@ def test_import_langfuse_records_accepts_official_data_envelope(tmp_path: Path) 
     )
     assert limited.records_written == 1
     assert limited.span_count == 2
+
+
+def test_import_langfuse_observation_rows_group_by_trace_id(tmp_path: Path) -> None:
+    source = tmp_path / "langfuse-observation-groups.json"
+    source.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "id": "obs_1",
+                        "trace_id": "trace_1",
+                        "trace_name": "first",
+                        "session_id": "session_1",
+                        "start_time": "2026-07-08T00:00:00Z",
+                        "end_time": "2026-07-08T00:00:01Z",
+                        "observation_type": "SPAN",
+                    },
+                    {"id": "obs_2", "traceId": "trace_2", "traceName": "second", "type": "SPAN"},
+                    {
+                        "id": "obs_3",
+                        "trace_id": "trace_1",
+                        "parent_observation_id": "obs_1",
+                        "name": "child",
+                        "type": "GENERATION",
+                    },
+                ],
+                "meta": {"cursor": None},
+            }
+        )
+    )
+    out = tmp_path / "langfuse-observation-groups.jsonl"
+
+    result = import_trace_source(
+        provider="langfuse",
+        source=str(source),
+        out=out,
+        limit=10,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    rows = _read_jsonl(out)
+    assert result.records_written == 2
+    assert result.span_count == 3
+    assert [row["id"] for row in rows] == ["trace_1", "trace_2"]
+    assert rows[0]["name"] == "first"
+    assert rows[0]["attributes"]["trace_name"] == "first"
+    assert rows[0]["attributes"]["session_id"] == "session_1"
+    assert rows[0]["duration_ms"] == 1000.0
+    assert [span["id"] for span in rows[0]["spans"]] == ["obs_1", "obs_3"]
+    assert rows[0]["spans"][0]["kind"] == "span"
+    assert rows[0]["spans"][1]["parent_id"] == "obs_1"
+    assert [span["id"] for span in rows[1]["spans"]] == ["obs_2"]
 
 
 def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path) -> None:

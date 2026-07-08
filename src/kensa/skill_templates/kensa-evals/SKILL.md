@@ -77,7 +77,10 @@ kensa import --from langfuse --limit 50
 
 Langfuse imports need network access. Under a sandboxed harness that blocks network by default,
 request escalation for these commands instead of deferring or switching sources. Rate-limit
-backoff with retries is normal; let a healthy retry finish.
+backoff with retries is normal; let a healthy retry finish. Kensa supports both the legacy Langfuse
+trace API and observations-v2/events-only deployments. Observations-v2 imports reconstruct traces
+from observation rows, so trace-level input/output may be absent while span input/output is
+preserved.
 
 For `trace_export`:
 
