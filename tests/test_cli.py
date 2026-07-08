@@ -2751,6 +2751,35 @@ def test_langfuse_non_retryable_http_errors_are_user_friendly(monkeypatch) -> No
     assert "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY" in message
 
 
+def test_langfuse_400_reports_response_body_and_parameter_next_step(monkeypatch) -> None:
+    body = json.dumps(
+        {
+            "error": "Bad Request",
+            "message": (
+                '[{"code":"unrecognized_keys","keys":["parseIoAsJson"],'
+                '"message":"Unrecognized key(s) in object: parseIoAsJson"}]'
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        cli,
+        "urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(_http_error(400, body=body)),
+    )
+
+    with pytest.raises(ValueError, match="Langfuse returned HTTP 400") as exc_info:
+        cli._read_langfuse_json_response(
+            cli.Request("https://langfuse.example.com/api/public/v2/observations?traceId=tr_1"),
+            label="observations",
+        )
+
+    message = str(exc_info.value)
+    assert "Langfuse response:" in message
+    assert "parseIoAsJson" in message
+    assert "Langfuse rejected the request parameters" in message
+    assert "Kensa/Langfuse version mismatch" in message
+
+
 def test_langfuse_trace_404_reports_import_readiness_message(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
@@ -2786,7 +2815,10 @@ def test_langfuse_error_message_helper_branches() -> None:
         cli._langfuse_transport_hint(URLError("connection reset"))
         == "Kensa could not reach Langfuse."
     )
-    assert cli._langfuse_http_error_body_hint(_http_error(404, body="plain error")) is None
+    assert (
+        cli._langfuse_http_error_body_hint(_http_error(404, body="plain error"))
+        == "Langfuse response: plain error"
+    )
     assert cli._langfuse_http_error_reason(403) == "denied access"
     assert cli._langfuse_http_error_reason(404) == "could not find the requested endpoint"
     assert cli._langfuse_http_error_reason(429) == "rate limited Kensa"
@@ -2799,6 +2831,11 @@ def test_langfuse_error_message_helper_branches() -> None:
     assert (
         cli._langfuse_http_error_next_step(500)
         == "Check the selected Langfuse region or retry after Langfuse is healthy."
+    )
+    assert (
+        cli._langfuse_http_error_next_step(400)
+        == "Langfuse rejected the request parameters; the response above may say which one. "
+        "Check for a Kensa/Langfuse version mismatch."
     )
     assert (
         cli._langfuse_retry_next_step(500)

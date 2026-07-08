@@ -3134,12 +3134,17 @@ def _langfuse_http_error_body_hint(exc: HTTPError) -> str | None:
     if not body:
         return None
     text = body.decode(errors="replace") if isinstance(body, bytes) else str(body)
+    text = " ".join(text.split())
+    if not text:
+        return None
     if "events_only" in text.lower():
         return (
             "Langfuse returned an events_only hint; this deployment may expose ingestion-only "
             "event APIs instead of trace reads."
         )
-    return None
+    if len(text) > 200:
+        text = f"{text[:197].rstrip()}..."
+    return f"Langfuse response: {text}"
 
 
 def _langfuse_request_endpoint(request: Request) -> str | None:
@@ -3323,6 +3328,11 @@ def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None
         )
     if status_code == 404:
         return "Check the selected Langfuse region or custom base URL."
+    if status_code == 400:
+        return (
+            "Langfuse rejected the request parameters; the response above may say which one. "
+            "Check for a Kensa/Langfuse version mismatch."
+        )
     return "Check the selected Langfuse region or retry after Langfuse is healthy."
 
 
