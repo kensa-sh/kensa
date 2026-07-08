@@ -21,7 +21,7 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from importlib.resources import files
@@ -190,7 +190,29 @@ _AGENT_INSTRUCTION_PATHS = {
 class _ConnectionCheck:
     endpoint: str
     credential_envs: tuple[str, ...]
-    authenticated: bool
+    endpoint_reachable: bool = False
+    authenticated: bool = False
+    trace_read: bool = False
+
+    @property
+    def import_ready(self) -> bool:
+        return self.endpoint_reachable and self.authenticated and self.trace_read
+
+
+class _ConnectionCheckError(ValueError):
+    check: _ConnectionCheck
+
+    def __init__(self, message: str, *, check: _ConnectionCheck) -> None:
+        super().__init__(message)
+        self.check = check
+
+
+class _LangfuseRequestError(ValueError):
+    status_code: int | None
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 _TRACE_SOURCE_LABELS: dict[str, str] = {
@@ -2324,16 +2346,20 @@ def _cmd_connect(args: Any) -> int:
     try:
         metadata, path, check = _connect_provider(args)
     except (OSError, RuntimeError, ValueError) as exc:
+        check = exc.check if isinstance(exc, _ConnectionCheckError) else None
         if bool(getattr(args, "json", False)):
             cli_output.print_json_envelope(
                 command=f"connect {provider}",
                 ok=False,
                 exit_code=1,
                 summary=f"Could not connect {provider}.",
+                data=_connection_check_data(check) if check is not None else None,
                 errors=[str(exc)],
             )
         else:
             cli_output.step(f"kensa connect {provider}")
+            if check is not None:
+                _print_connection_check(check)
             cli_output.item(f"error: {exc}", ok=False, err=True)
         return 1
     if bool(getattr(args, "json", False)):
@@ -2345,22 +2371,62 @@ def _cmd_connect(args: Any) -> int:
             data={
                 "path": str(cli_output.display_path(path)),
                 "connection": metadata,
-                "checked": check is not None,
+                **_connection_check_data(check),
             },
         )
     else:
         cli_output.step(f"kensa connect {provider}")
         if check is not None:
-            if check.credential_envs:
-                cli_output.item(f"found credential env vars: {', '.join(check.credential_envs)}")
-            cli_output.item(
-                f"authenticated with {check.endpoint}"
-                if check.authenticated
-                else f"checked {check.endpoint}"
-            )
+            _print_connection_check(check)
         cli_output.item(f"metadata: {cli_output.display_path(path)}")
         cli_output.item("API key values were not stored.")
     return 0
+
+
+def _connection_check_data(check: _ConnectionCheck | None) -> dict[str, Any]:
+    return {
+        "checked": check is not None,
+        "checks": _connection_checks_payload(check),
+    }
+
+
+def _connection_checks_payload(check: _ConnectionCheck | None) -> dict[str, bool]:
+    if check is None:
+        return {
+            "endpoint": False,
+            "auth": False,
+            "trace_read": False,
+            "import_ready": False,
+        }
+    return {
+        "endpoint": check.endpoint_reachable,
+        "auth": check.authenticated,
+        "trace_read": check.trace_read,
+        "import_ready": check.import_ready,
+    }
+
+
+def _print_connection_check(check: _ConnectionCheck) -> None:
+    if check.credential_envs:
+        cli_output.item(f"found credential env vars: {', '.join(check.credential_envs)}")
+    cli_output.item(
+        f"endpoint reachable: {check.endpoint}",
+        ok=check.endpoint_reachable,
+        err=not check.endpoint_reachable,
+    )
+    cli_output.item(
+        "credentials accepted",
+        ok=check.authenticated,
+        err=not check.authenticated,
+    )
+    if check.authenticated:
+        cli_output.item(
+            "trace import read access verified"
+            if check.trace_read
+            else "trace import read access failed",
+            ok=check.trace_read,
+            err=not check.trace_read,
+        )
 
 
 def _connect_provider(args: Any) -> tuple[dict[str, Any], Path, _ConnectionCheck | None]:
@@ -2404,24 +2470,56 @@ def _check_connection(args: Any, metadata: dict[str, Any]) -> _ConnectionCheck:
         auth: dict[str, Any] = raw_auth if isinstance(raw_auth, dict) else {}
         public_key_env = str(auth.get("public_key_env") or "LANGFUSE_PUBLIC_KEY")
         secret_key_env = str(auth.get("secret_key_env") or "LANGFUSE_SECRET_KEY")
+        check = _ConnectionCheck(
+            endpoint=endpoint,
+            credential_envs=(public_key_env, secret_key_env),
+        )
         values = _required_env_values(
             (public_key_env, secret_key_env),
             provider="Langfuse",
         )
-        _fetch_langfuse_connected_export(
-            endpoint=endpoint,
-            project=str(metadata["project"]) if metadata.get("project") is not None else None,
-            since=None,
-            limit=1,
-            public_key=values[public_key_env],
-            secret_key=values[secret_key_env],
-        )
-        return _ConnectionCheck(
-            endpoint=endpoint,
-            credential_envs=(public_key_env, secret_key_env),
-            authenticated=True,
-        )
+        public_key = values[public_key_env]
+        secret_key = values[secret_key_env]
+        try:
+            _check_langfuse_api_auth(
+                endpoint=endpoint,
+                public_key=public_key,
+                secret_key=secret_key,
+            )
+        except _LangfuseRequestError as exc:
+            check = replace(check, endpoint_reachable=exc.status_code is not None)
+            raise _ConnectionCheckError(str(exc), check=check) from exc
+        except ValueError as exc:
+            raise _ConnectionCheckError(str(exc), check=check) from exc
+        check = replace(check, endpoint_reachable=True, authenticated=True)
+        try:
+            _fetch_langfuse_connected_export(
+                endpoint=endpoint,
+                project=str(metadata["project"]) if metadata.get("project") is not None else None,
+                since=None,
+                limit=1,
+                public_key=public_key,
+                secret_key=secret_key,
+            )
+        except ValueError as exc:
+            raise _ConnectionCheckError(str(exc), check=check) from exc
+        return replace(check, trace_read=True)
     raise ValueError(f"unsupported connection provider: {provider}")
+
+
+def _check_langfuse_api_auth(
+    *,
+    endpoint: str,
+    public_key: str,
+    secret_key: str,
+) -> None:
+    _read_langfuse_json_response(
+        Request(
+            f"{endpoint.rstrip('/')}/api/public/projects",
+            headers=_langfuse_auth_headers(public_key, secret_key),
+        ),
+        label="projects",
+    )
 
 
 def _cmd_import(args: Any) -> int:
@@ -2640,8 +2738,7 @@ def _fetch_langfuse_connected_export(
     secret_key: str,
 ) -> dict[str, Any]:
     del project
-    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-    headers = {"Authorization": f"Basic {token}"}
+    headers = _langfuse_auth_headers(public_key, secret_key)
     start_time = _provider_start_time(since)
     traces, trace_meta = _fetch_langfuse_trace_rows(
         endpoint=endpoint,
@@ -2659,6 +2756,11 @@ def _fetch_langfuse_connected_export(
             )
         )
     return {"traces": traces, "observations": observations, "meta": trace_meta}
+
+
+def _langfuse_auth_headers(public_key: str, secret_key: str) -> dict[str, str]:
+    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
 
 def _fetch_langfuse_trace_rows(
@@ -2804,18 +2906,33 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
         try:
             return _read_json_response(request)
         except HTTPError as exc:
+            body_hint = _langfuse_http_error_body_hint(exc)
             if exc.code not in _LANGFUSE_RETRYABLE_STATUS_CODES:
-                raise ValueError(_langfuse_http_error_message(label, exc.code, endpoint)) from exc
+                raise _LangfuseRequestError(
+                    _langfuse_http_error_message(
+                        label,
+                        exc.code,
+                        endpoint,
+                        body_hint=body_hint,
+                    ),
+                    status_code=exc.code,
+                ) from exc
             if attempt >= _LANGFUSE_MAX_ATTEMPTS:
-                raise ValueError(
-                    _langfuse_retry_exhausted_message(label, exc.code, endpoint=endpoint)
+                raise _LangfuseRequestError(
+                    _langfuse_retry_exhausted_message(
+                        label,
+                        exc.code,
+                        endpoint=endpoint,
+                        body_hint=body_hint,
+                    ),
+                    status_code=exc.code,
                 ) from exc
             delay = _langfuse_retry_delay(exc, attempt)
             _sleep_before_langfuse_retry(delay, reason=_langfuse_http_retry_reason(exc.code))
             attempt += 1
         except (TimeoutError, URLError) as exc:
             if _is_permanent_langfuse_transport_error(exc):
-                raise ValueError(
+                raise _LangfuseRequestError(
                     _langfuse_transport_retry_exhausted_message(
                         label,
                         exc,
@@ -2824,7 +2941,7 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
                     )
                 ) from exc
             if attempt >= _LANGFUSE_MAX_ATTEMPTS:
-                raise ValueError(
+                raise _LangfuseRequestError(
                     _langfuse_transport_retry_exhausted_message(
                         label,
                         exc,
@@ -2835,6 +2952,21 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
             delay = _langfuse_retry_delay(None, attempt)
             _sleep_before_langfuse_retry(delay, reason="request failed")
             attempt += 1
+
+
+def _langfuse_http_error_body_hint(exc: HTTPError) -> str | None:
+    body: bytes | str | None = None
+    with contextlib.suppress(OSError, ValueError, UnicodeDecodeError):
+        body = exc.read(2048)
+    if not body:
+        return None
+    text = body.decode(errors="replace") if isinstance(body, bytes) else str(body)
+    if "events_only" in text.lower():
+        return (
+            "Langfuse returned an events_only hint; this deployment may expose ingestion-only "
+            "event APIs instead of trace reads."
+        )
+    return None
 
 
 def _langfuse_request_endpoint(request: Request) -> str | None:
@@ -2897,6 +3029,8 @@ def _langfuse_http_error_message(
     label: str,
     status_code: int,
     endpoint: str | None,
+    *,
+    body_hint: str | None = None,
 ) -> str:
     reason = _langfuse_http_error_reason(status_code)
     return _langfuse_failure_message(
@@ -2904,7 +3038,8 @@ def _langfuse_http_error_message(
         label=label,
         retry_count=0,
         endpoint=endpoint,
-        next_step=_langfuse_http_error_next_step(status_code),
+        body_hint=body_hint,
+        next_step=_langfuse_http_error_next_step(status_code, label=label),
     )
 
 
@@ -2913,6 +3048,7 @@ def _langfuse_retry_exhausted_message(
     status_code: int,
     *,
     endpoint: str | None,
+    body_hint: str | None = None,
 ) -> str:
     reason = "rate limited Kensa" if status_code == 429 else f"returned HTTP {status_code}"
     return _langfuse_failure_message(
@@ -2920,6 +3056,7 @@ def _langfuse_retry_exhausted_message(
         label=label,
         retry_count=_LANGFUSE_MAX_ATTEMPTS - 1,
         endpoint=endpoint,
+        body_hint=body_hint,
         next_step=_langfuse_retry_next_step(status_code),
     )
 
@@ -2948,6 +3085,7 @@ def _langfuse_failure_message(
     retry_count: int,
     endpoint: str | None,
     last_error: BaseException | None = None,
+    body_hint: str | None = None,
     next_step: str,
 ) -> str:
     lines = [
@@ -2958,6 +3096,8 @@ def _langfuse_failure_message(
     lines.append(_langfuse_retry_summary(retry_count))
     if last_error is not None:
         lines.append(_langfuse_transport_hint(last_error))
+    if body_hint is not None:
+        lines.append(body_hint)
     lines.append(next_step)
     lines.append("Then run: kensa connect langfuse")
     return "\n".join(lines)
@@ -2997,9 +3137,16 @@ def _langfuse_http_error_reason(status_code: int) -> str:
     return f"returned HTTP {status_code}"
 
 
-def _langfuse_http_error_next_step(status_code: int) -> str:
+def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None) -> str:
     if status_code in {401, 403}:
         return "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and the selected Langfuse region."
+    if status_code == 404 and label == "traces":
+        return (
+            "Kensa reached Langfuse, but the trace read API was unavailable.\n"
+            "This Langfuse deployment does not expose the trace read API required by "
+            "kensa import.\n"
+            "Check that this deployment supports GET /api/public/traces."
+        )
     if status_code == 404:
         return "Check the selected Langfuse region or custom base URL."
     return "Check the selected Langfuse region or retry after Langfuse is healthy."
