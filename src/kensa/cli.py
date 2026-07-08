@@ -184,6 +184,11 @@ class _LangfuseDataEnvelope(BaseModel):
     meta: dict[str, Any]
 
 
+class _UnsupportedInitJudgeProvider(ValueError):
+    def __init__(self, env_name: str, value: str) -> None:
+        super().__init__(f"Unsupported {env_name}: {value}. Set {env_name} to openai or anthropic.")
+
+
 class _LangfuseRequestError(ValueError):
     def __init__(
         self,
@@ -1670,9 +1675,9 @@ def _configure_trace_source_connection(
                 _record_pyproject_dotenv(dotenv_path)
                 credential_source = "existing"
             else:
-                dotenv_path, credential_source = _configure_init_credentials(provider)
+                dotenv_path, credential_source = _configure_init_credentials(provider, steps)
         else:
-            dotenv_path, credential_source = _configure_init_credentials(provider)
+            dotenv_path, credential_source = _configure_init_credentials(provider, steps)
         if credential_source == "later":
             _init_notice(
                 steps,
@@ -1710,7 +1715,7 @@ def _configure_trace_source_connection(
         _init_item(steps, message)
     try:
         missing_judge = _missing_init_judge_envs(dotenv_path)
-    except ValueError as exc:
+    except _UnsupportedInitJudgeProvider as exc:
         _init_notice(steps, str(exc))
         missing_judge = _missing_any_init_judge_envs(dotenv_path)
     if missing_judge:
@@ -1760,7 +1765,10 @@ def _is_friendly_langfuse_error(message: str) -> bool:
     return message.startswith(("Could not reach Langfuse", "Langfuse "))
 
 
-def _configure_init_credentials(provider: str) -> tuple[Path, _InitCredentialSource]:
+def _configure_init_credentials(
+    provider: str,
+    steps: _Steps | None,
+) -> tuple[Path, _InitCredentialSource]:
     dotenv_path = _init_dotenv_path()
     credential_source = _select_init_credential_source(provider, dotenv_path)
     if credential_source == "later":
@@ -1778,7 +1786,7 @@ def _configure_init_credentials(provider: str) -> tuple[Path, _InitCredentialSou
         _record_pyproject_dotenv(selected_dotenv, replace=True)
         return selected_dotenv, credential_source
 
-    judge_provider = _prompt_judge_provider()
+    judge_provider = _prompt_judge_provider(steps)
     env_values = _prompt_provider_env_values(provider, judge_provider)
     env_values.update(_provider_init_env_values(provider, dotenv_path))
     env_values.update(_judge_init_env_values(judge_provider))
@@ -1858,8 +1866,12 @@ def _is_dotenv_filename(name: str) -> bool:
     return name == ".env" or name.startswith(".env.") or name.endswith(".env")
 
 
-def _prompt_judge_provider() -> _InitJudgeProvider:
-    configured = _judge_provider_from_environment()
+def _prompt_judge_provider(steps: _Steps | None) -> _InitJudgeProvider:
+    try:
+        configured = _judge_provider_from_environment()
+    except _UnsupportedInitJudgeProvider as exc:
+        _init_notice(steps, str(exc))
+        configured = None
     default: _InitJudgeProvider = configured or "openai"
     choice = _select_interactive_choice(
         "Judge provider",
@@ -1880,12 +1892,14 @@ def _judge_provider_label(provider: str) -> str:
 
 
 def _judge_provider_from_environment() -> _InitJudgeProvider | None:
-    raw_provider = os.environ.get("KENSA_JUDGE_PROVIDER") or os.environ.get("KENSA_LLM_PROVIDER")
-    if raw_provider:
+    for env_name in ("KENSA_JUDGE_PROVIDER", "KENSA_LLM_PROVIDER"):
+        raw_provider = os.environ.get(env_name)
+        if not raw_provider:
+            continue
         provider = raw_provider.strip().lower()
         if provider in _INIT_JUDGE_PROVIDER_CHOICES:
             return cast(_InitJudgeProvider, provider)
-        raise ValueError(f"Unsupported judge provider: {raw_provider}")
+        raise _UnsupportedInitJudgeProvider(env_name, raw_provider)
     raw_model = os.environ.get("KENSA_JUDGE_MODEL") or os.environ.get("KENSA_LLM_MODEL")
     if raw_model:
         return _judge_provider_for_model(raw_model)

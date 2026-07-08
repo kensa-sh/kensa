@@ -3780,6 +3780,40 @@ def test_init_langfuse_credentials_create_root_dotenv_and_connect(
     assert "openai-test" not in output
 
 
+def test_init_langfuse_credentials_create_warns_for_unsupported_judge_provider(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "gemini")
+    keys = iter(["\r", "\r", "\r"])
+    prompts = iter(["pk-test", "sk-test", "openai-test"])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    output = capsys.readouterr().out
+    dotenv = (tmp_path / ".env.local").read_text()
+    assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in output
+    assert "Set KENSA_JUDGE_PROVIDER" in output
+    assert "openai" in output
+    assert "anthropic" in output
+    assert "KENSA_JUDGE_PROVIDER='openai'" in dotenv
+    assert "OPENAI_API_KEY='openai-test'" in dotenv
+    assert checks[0]["public_key"] == "pk-test"
+
+
 def test_init_langfuse_credentials_can_create_anthropic_judge_config(
     tmp_path: Path,
     monkeypatch,
@@ -4166,12 +4200,49 @@ def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider(
     assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
 
     captured = capsys.readouterr()
-    assert "Unsupported judge provider: gemini" in captured.out
+    assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in captured.out
+    assert "Set KENSA_JUDGE_PROVIDER" in captured.out
+    assert "openai" in captured.out
+    assert "anthropic" in captured.out
     assert "LLM-as-judge key not found" not in captured.out
     assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" not in captured.out
     assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
     assert checks[0]["public_key"] == "pk-existing"
-    assert "Unsupported judge provider" not in captured.err
+    assert "Unsupported KENSA_JUDGE_PROVIDER" not in captured.err
+
+
+def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider_without_key(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-existing\n"
+        "LANGFUSE_SECRET_KEY=sk-existing\n"
+        "KENSA_JUDGE_PROVIDER=gemini\n"
+    )
+    keys = iter(["j", "\r", "\r"])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    captured = capsys.readouterr()
+    assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in captured.out
+    assert "LLM-as-judge key not found" in captured.out
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
+    assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
+    assert checks[0]["public_key"] == "pk-existing"
 
 
 def test_missing_init_judge_envs_checks_dotenv_without_loaded_environment(
@@ -4352,7 +4423,7 @@ def test_init_credential_helper_branches(
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "anthropic")
     assert cli._judge_provider_from_environment() == "anthropic"
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "bogus")
-    with pytest.raises(ValueError, match="Unsupported judge provider"):
+    with pytest.raises(ValueError, match="Unsupported KENSA_JUDGE_PROVIDER"):
         cli._judge_provider_from_environment()
     monkeypatch.delenv("KENSA_JUDGE_PROVIDER")
     monkeypatch.setenv("KENSA_JUDGE_MODEL", "claude-sonnet-4-6")
