@@ -1708,7 +1708,11 @@ def _configure_trace_source_connection(
             else f"checked {check.endpoint}"
         )
         _init_item(steps, message)
-    missing_judge = _missing_init_judge_envs(dotenv_path)
+    try:
+        missing_judge = _missing_init_judge_envs(dotenv_path)
+    except ValueError as exc:
+        _init_notice(steps, str(exc))
+        missing_judge = _missing_any_init_judge_envs(dotenv_path)
     if missing_judge:
         _init_notice(
             steps,
@@ -1913,11 +1917,14 @@ def _missing_init_credential_envs(provider: str, dotenv_path: Path | None) -> tu
 
 
 def _missing_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
-    with contextlib.suppress(ValueError):
-        judge_provider = _judge_provider_from_environment()
-        if judge_provider is not None:
-            name = _JUDGE_API_KEY_ENVS[judge_provider]
-            return () if _env_or_dotenv_has_key(name, dotenv_path) else (name,)
+    judge_provider = _judge_provider_from_environment()
+    if judge_provider is not None:
+        name = _JUDGE_API_KEY_ENVS[judge_provider]
+        return () if _env_or_dotenv_has_key(name, dotenv_path) else (name,)
+    return _missing_any_init_judge_envs(dotenv_path)
+
+
+def _missing_any_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
     if any(_env_or_dotenv_has_key(name, dotenv_path) for name in _JUDGE_API_KEY_ENVS.values()):
         return ()
     return tuple(_JUDGE_API_KEY_ENVS.values())

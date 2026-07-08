@@ -2819,6 +2819,10 @@ def test_langfuse_error_message_helper_branches() -> None:
         cli._langfuse_http_error_body_hint(_http_error(404, body="plain error"))
         == "Langfuse response: plain error"
     )
+    assert cli._langfuse_http_error_body_hint(_http_error(400, body=" \n\t ")) is None
+    assert cli._langfuse_http_error_body_hint(_http_error(400, body="x" * 205)) == (
+        f"Langfuse response: {'x' * 197}..."
+    )
     assert cli._langfuse_http_error_reason(403) == "denied access"
     assert cli._langfuse_http_error_reason(404) == "could not find the requested endpoint"
     assert cli._langfuse_http_error_reason(429) == "rate limited Kensa"
@@ -4134,7 +4138,7 @@ def test_init_langfuse_existing_env_file_connects_without_judge_key(
     assert "sk-existing" not in captured.err
 
 
-def test_init_langfuse_existing_env_file_ignores_unsupported_judge_provider(
+def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -4147,6 +4151,7 @@ def test_init_langfuse_existing_env_file_ignores_unsupported_judge_provider(
         "LANGFUSE_PUBLIC_KEY=pk-existing\n"
         "LANGFUSE_SECRET_KEY=sk-existing\n"
         "KENSA_JUDGE_PROVIDER=gemini\n"
+        "OPENAI_API_KEY=openai-existing\n"
     )
     keys = iter(["j", "\r", "\r"])
     checks: list[dict[str, Any]] = []
@@ -4161,11 +4166,11 @@ def test_init_langfuse_existing_env_file_ignores_unsupported_judge_provider(
     assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
 
     captured = capsys.readouterr()
-    assert "LLM-as-judge key not found" in captured.out
-    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
+    assert "Unsupported judge provider: gemini" in captured.out
+    assert "LLM-as-judge key not found" not in captured.out
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" not in captured.out
     assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
     assert checks[0]["public_key"] == "pk-existing"
-    assert "Unsupported judge provider" not in captured.out
     assert "Unsupported judge provider" not in captured.err
 
 
@@ -4178,6 +4183,9 @@ def test_missing_init_judge_envs_checks_dotenv_without_loaded_environment(
     dotenv.write_text("ANTHROPIC_API_KEY=anthropic-existing\n")
 
     assert cli._missing_init_judge_envs(dotenv) == ()
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "openai")
+    assert cli._missing_init_judge_envs(dotenv) == ("OPENAI_API_KEY",)
+    assert cli._format_missing_init_judge_envs(("OPENAI_API_KEY",)) == "OPENAI_API_KEY"
 
 
 def test_init_langfuse_existing_env_file_requires_langfuse_secret_key(
