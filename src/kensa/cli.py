@@ -415,9 +415,11 @@ def connect() -> None:
 @connect.command("langfuse")
 @click.option(
     "--endpoint",
-    default=_LANGFUSE_DEFAULT_BASE_URL,
-    show_default=True,
-    help="Langfuse base URL, e.g. US, Japan, HIPAA, or self-hosted.",
+    default=None,
+    help=(
+        "Langfuse base URL, e.g. https://us.cloud.langfuse.com or a self-hosted URL. "
+        "Defaults to LANGFUSE_BASE_URL, then https://cloud.langfuse.com."
+    ),
 )
 @click.option("--project", default=None, help="Default Langfuse project name.")
 @click.option(
@@ -439,7 +441,7 @@ def connect() -> None:
 )
 @click.option("--json", "json_output", is_flag=True, help="Emit an agent-readable JSON envelope.")
 def connect_langfuse(
-    endpoint: str,
+    endpoint: str | None,
     project: str | None,
     public_key_env: str,
     secret_key_env: str,
@@ -2053,7 +2055,7 @@ def _init_connect_args(provider: str) -> SimpleNamespace:
     if provider == "langfuse":
         return SimpleNamespace(
             provider="langfuse",
-            endpoint=os.environ.get("LANGFUSE_BASE_URL") or _LANGFUSE_DEFAULT_BASE_URL,
+            endpoint=None,
             project=None,
             public_key_env="LANGFUSE_PUBLIC_KEY",
             secret_key_env="LANGFUSE_SECRET_KEY",
@@ -2062,6 +2064,29 @@ def _init_connect_args(provider: str) -> SimpleNamespace:
             json=False,
         )
     raise ValueError(f"unsupported connection provider: {provider}")
+
+
+def _resolve_langfuse_endpoint(endpoint: str | None) -> str:
+    if endpoint is not None:
+        return _validate_langfuse_endpoint(endpoint)
+    env_endpoint = os.environ.get("LANGFUSE_BASE_URL")
+    if env_endpoint:
+        return _validate_langfuse_endpoint(env_endpoint)
+    return _LANGFUSE_DEFAULT_BASE_URL
+
+
+def _validate_langfuse_endpoint(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Langfuse endpoint must be an absolute http(s) URL.")
+    return endpoint
+
+
+def _connection_endpoint(args: Any) -> str:
+    provider = str(args.provider)
+    if provider == "langfuse":
+        return _resolve_langfuse_endpoint(getattr(args, "endpoint", None))
+    return str(args.endpoint)
 
 
 def _select_agent_instruction(
@@ -2358,7 +2383,7 @@ def _connection_metadata(args: Any) -> dict[str, Any]:
         "schema_version": _CONNECTION_SCHEMA_VERSION,
         "provider": provider,
         "created_at": _utc_now_iso(),
-        "endpoint": safe_endpoint(str(args.endpoint)),
+        "endpoint": safe_endpoint(_connection_endpoint(args)),
         "project": getattr(args, "project", None),
     }
     if provider == "langfuse":
