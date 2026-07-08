@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import socket
@@ -34,13 +35,17 @@ def _read_settings(root: Path) -> dict[str, Any]:
     return json.loads((root / ".kensa" / "settings.json").read_text())
 
 
-def _http_error(code: int, headers: dict[str, str] | None = None) -> HTTPError:
+def _http_error(
+    code: int,
+    headers: dict[str, str] | None = None,
+    body: str | None = None,
+) -> HTTPError:
     return HTTPError(
         "https://langfuse.example.com",
         code,
         "status",
         cast(Any, headers or {}),
-        None,
+        io.BytesIO(body.encode()) if body is not None else None,
     )
 
 
@@ -58,6 +63,17 @@ def _clear_init_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
         cli._DOTENV_ENV_VAR,
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def _stub_langfuse_auth_check(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[dict[str, Any]] | None = None,
+) -> None:
+    def fake_auth_check(**kwargs: Any) -> None:
+        if calls is not None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(cli, "_check_langfuse_api_auth", fake_auth_check)
 
 
 class _JsonResponse:
@@ -1362,6 +1378,7 @@ def test_connect_commands_write_metadata_without_secret_values(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    _stub_langfuse_auth_check(monkeypatch)
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
@@ -1408,6 +1425,7 @@ def test_connect_langfuse_uses_env_base_url_when_endpoint_is_omitted(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
     monkeypatch.setenv("LANGFUSE_BASE_URL", "https://langfuse.internal.test")
+    _stub_langfuse_auth_check(monkeypatch)
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
@@ -1436,6 +1454,7 @@ def test_connect_langfuse_uses_configured_dotenv_base_url_when_endpoint_is_omitt
         "LANGFUSE_SECRET_KEY=lf-secret-value\n"
         "LANGFUSE_BASE_URL=https://langfuse.internal.test\n"
     )
+    _stub_langfuse_auth_check(monkeypatch)
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
@@ -1530,6 +1549,187 @@ def test_connect_langfuse_json_reports_missing_credentials(
     assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
 
 
+def test_connect_langfuse_checks_auth_before_trace_read(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    calls: list[str] = []
+
+    def fake_auth_check(**kwargs: Any) -> None:
+        calls.append(f"auth:{kwargs['endpoint']}")
+
+    def fake_fetch(**kwargs: Any) -> dict[str, Any]:
+        calls.append(f"trace:{kwargs['endpoint']}")
+        return {"data": [], "meta": {"cursor": None}}
+
+    monkeypatch.setattr(cli, "_check_langfuse_api_auth", fake_auth_check)
+    monkeypatch.setattr(cli, "_fetch_langfuse_connected_export", fake_fetch)
+
+    assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 0
+
+    capsys.readouterr()
+    assert calls == [
+        "auth:https://langfuse.example.com",
+        "trace:https://langfuse.example.com",
+    ]
+
+
+def test_connect_langfuse_auth_check_failure_does_not_write_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    monkeypatch.setattr(
+        cli,
+        "_check_langfuse_api_auth",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("auth check failed")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
+    )
+
+    assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 1
+
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "auth check failed" in combined
+    assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
+
+
+def test_connect_langfuse_auth_request_failure_reports_partial_checks(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    monkeypatch.setattr(
+        cli,
+        "_check_langfuse_api_auth",
+        lambda **kwargs: (_ for _ in ()).throw(
+            cli._LangfuseRequestError("credentials rejected", status_code=401)
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
+    )
+
+    assert main(["connect", "langfuse", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"] == {
+        "checked": True,
+        "checks": {
+            "endpoint": True,
+            "auth": False,
+            "trace_read": False,
+            "import_ready": False,
+        },
+    }
+    assert "credentials rejected" in payload["errors"][0]
+    assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
+
+
+def test_connect_langfuse_trace_read_failure_after_auth_does_not_write_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("trace read failed")),
+    )
+
+    assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 1
+
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "endpoint reachable: https://langfuse.example.com" in combined
+    assert "credentials accepted" in combined
+    assert "trace import read access failed" in combined
+    assert "trace read failed" in combined
+    assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
+
+
+def test_connect_langfuse_configure_only_skips_checks_and_writes_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_check_langfuse_api_auth",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected auth check")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
+    )
+
+    assert (
+        main(
+            [
+                "connect",
+                "langfuse",
+                "--endpoint",
+                "https://langfuse.example.com",
+                "--configure-only",
+            ]
+        )
+        == 0
+    )
+
+    capsys.readouterr()
+    connection = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert connection["endpoint"] == "https://langfuse.example.com"
+
+
+def test_connect_langfuse_json_reports_check_status_on_success(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert main(["connect", "langfuse", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["checked"] is True
+    assert payload["data"]["checks"] == {
+        "endpoint": True,
+        "auth": True,
+        "trace_read": True,
+        "import_ready": True,
+    }
+
+
 def test_connected_langfuse_import_uses_connection_and_runtime_env(
     tmp_path: Path,
     monkeypatch,
@@ -1539,6 +1739,7 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
     monkeypatch.setenv("TEST_LANGFUSE_PUBLIC", "lf-public-value")
     monkeypatch.setenv("TEST_LANGFUSE_SECRET", "lf-secret-value")
+    _stub_langfuse_auth_check(monkeypatch)
     calls: list[dict[str, Any]] = []
 
     def fake_fetch(**kwargs: Any) -> dict[str, Any]:
@@ -1723,6 +1924,22 @@ def test_new_cli_helper_edge_paths(
             SimpleNamespace(provider="bad"),
             {"provider": "bad", "endpoint": "https://example.com"},
         )
+
+    auth_requests: list[Any] = []
+
+    def fake_auth_urlopen(request, timeout: int):
+        del timeout
+        auth_requests.append(request)
+        return _JsonResponse({"data": [], "meta": {}})
+
+    monkeypatch.setattr(cli, "urlopen", fake_auth_urlopen)
+    cli._check_langfuse_api_auth(
+        endpoint="https://langfuse.example.com",
+        public_key="public",
+        secret_key="secret",
+    )
+    assert auth_requests[0].full_url == "https://langfuse.example.com/api/public/projects"
+    assert auth_requests[0].headers["Authorization"].startswith("Basic ")
 
     requests: list[Any] = []
     responses = iter(
@@ -2129,6 +2346,29 @@ def test_langfuse_non_retryable_http_errors_are_user_friendly(monkeypatch) -> No
     assert "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY" in message
 
 
+def test_langfuse_trace_404_reports_import_readiness_message(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            _http_error(404, body='{"error":"events_only"}')
+        ),
+    )
+
+    with pytest.raises(ValueError, match="trace read API") as exc_info:
+        cli._read_langfuse_json_response(
+            cli.Request("https://langfuse.example.com/api/public/traces?page=1&limit=1"),
+            label="traces",
+        )
+
+    message = str(exc_info.value)
+    assert "Langfuse could not find the requested endpoint while fetching traces." in message
+    assert "Kensa reached Langfuse, but the trace read API was unavailable." in message
+    assert "GET /api/public/traces" in message
+    assert "events_only hint" in message
+    assert "selected Langfuse region or custom base URL" not in message
+
+
 def test_langfuse_error_message_helper_branches() -> None:
     request = cast(Any, SimpleNamespace(full_url="not-a-url"))
     assert cli._langfuse_request_endpoint(request) is None
@@ -2141,6 +2381,7 @@ def test_langfuse_error_message_helper_branches() -> None:
         cli._langfuse_transport_hint(URLError("connection reset"))
         == "Kensa could not reach Langfuse."
     )
+    assert cli._langfuse_http_error_body_hint(_http_error(404, body="plain error")) is None
     assert cli._langfuse_http_error_reason(403) == "denied access"
     assert cli._langfuse_http_error_reason(404) == "could not find the requested endpoint"
     assert cli._langfuse_http_error_reason(429) == "rate limited Kensa"
@@ -2149,6 +2390,7 @@ def test_langfuse_error_message_helper_branches() -> None:
         cli._langfuse_http_error_next_step(404)
         == "Check the selected Langfuse region or custom base URL."
     )
+    assert "trace read API" in cli._langfuse_http_error_next_step(404, label="traces")
     assert (
         cli._langfuse_http_error_next_step(500)
         == "Check the selected Langfuse region or retry after Langfuse is healthy."
@@ -3059,6 +3301,7 @@ def test_init_langfuse_credentials_create_root_dotenv_and_connect(
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3103,6 +3346,7 @@ def test_init_langfuse_credentials_can_create_anthropic_judge_config(
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3131,6 +3375,7 @@ def test_init_langfuse_credentials_can_select_us_region(
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3156,6 +3401,7 @@ def test_init_langfuse_credentials_can_select_custom_base_url(
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3224,6 +3470,7 @@ def test_init_langfuse_preserves_existing_base_url(
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3306,6 +3553,7 @@ def test_init_langfuse_can_use_existing_env_file_without_editing_it(
     keys = iter(["j", "\r", "\r"])
     checks: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
@@ -3353,6 +3601,7 @@ def test_init_langfuse_uses_configured_dotenv_without_prompting(
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected prompt")),
     )
     monkeypatch.setattr(cli, "_git_tracks_path", lambda path: path == dotenv)
+    _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
         "_fetch_langfuse_connected_export",
