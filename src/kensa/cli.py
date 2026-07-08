@@ -2925,18 +2925,30 @@ def _fetch_langfuse_observation_rows(
                 "limit": _LANGFUSE_OBSERVATION_PAGE_LIMIT,
                 "traceId": trace_id,
                 "fields": fields,
-                "parseIoAsJson": "true" if parse_io_as_json else None,
                 "cursor": cursor,
             }
         )
         url = f"{endpoint.rstrip('/')}/api/public/v2/observations{query}"
         payload = _read_langfuse_json_response(Request(url, headers=headers), label="observations")
         page_rows = _langfuse_response_rows(payload, label="observations")
-        rows.extend(page_rows)
+        if parse_io_as_json:
+            rows.extend(_parse_langfuse_io_fields(row) for row in page_rows)
+        else:
+            rows.extend(page_rows)
         cursor = _response_cursor(payload)
         if cursor is None or not page_rows:
             break
     return rows
+
+
+def _parse_langfuse_io_fields(row: dict[str, Any]) -> dict[str, Any]:
+    parsed_row = dict(row)
+    for key in ("input", "output"):
+        value = parsed_row.get(key)
+        if isinstance(value, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed_row[key] = json.loads(value)
+    return parsed_row
 
 
 def _langfuse_response_rows(payload: dict[str, Any], *, label: str) -> list[dict[str, Any]]:

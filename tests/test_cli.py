@@ -2259,13 +2259,11 @@ def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeyp
         "limit": ["1000"],
         "traceId": ["tr_1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-        "parseIoAsJson": ["true"],
     }
     assert second_trace_query == {
         "limit": ["1000"],
         "traceId": ["tr_2"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-        "parseIoAsJson": ["true"],
     }
 
 
@@ -2283,11 +2281,6 @@ def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None
                     "meta": {"cursor": None},
                 }
             )
-        input_value: Any = json.dumps([{"role": "user", "content": "Refund me"}])
-        output_value: Any = json.dumps({"answer": "Done"})
-        if query.get("parseIoAsJson") == ["true"]:
-            input_value = [{"role": "user", "content": "Refund me"}]
-            output_value = {"answer": "Done"}
         return _JsonResponse(
             {
                 "data": [
@@ -2295,9 +2288,16 @@ def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None
                         "id": "obs_1",
                         "traceId": "tr_1",
                         "type": "SPAN",
-                        "input": input_value,
-                        "output": output_value,
-                    }
+                        "input": json.dumps([{"role": "user", "content": "Refund me"}]),
+                        "output": json.dumps({"answer": "Done"}),
+                    },
+                    {
+                        "id": "obs_2",
+                        "traceId": "tr_1",
+                        "type": "GENERATION",
+                        "input": "raw prompt",
+                        "output": json.dumps(["Done"]),
+                    },
                 ],
                 "meta": {"cursor": None},
             }
@@ -2317,11 +2317,14 @@ def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None
 
     assert payload["data"][0]["input"] == [{"role": "user", "content": "Refund me"}]
     assert payload["data"][0]["output"] == {"answer": "Done"}
+    assert payload["data"][1]["input"] == "raw prompt"
+    assert payload["data"][1]["output"] == ["Done"]
     assert parse_qs(urlparse(requests[0].full_url).query) == {
         "limit": ["1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
     }
-    assert parse_qs(urlparse(requests[1].full_url).query)["parseIoAsJson"] == ["true"]
+    for request in requests:
+        assert "parseIoAsJson" not in parse_qs(urlparse(request.full_url).query)
 
 
 def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None:
@@ -2373,7 +2376,6 @@ def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None
         "limit": ["1000"],
         "traceId": ["tr_1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-        "parseIoAsJson": ["true"],
     }
 
 
