@@ -1034,7 +1034,7 @@ def _langfuse_observation_trace_views(
         views.append(
             TraceView(
                 id=trace_id,
-                name=_string_or_none(_first_value(first, "traceName")) or trace_id,
+                name=_string_or_none(_first_value(first, "traceName", "trace_name")) or trace_id,
                 source=trace_source.with_trace_url(
                     _string_or_none(_first_value(first, "trace_url", "traceUrl", "url"))
                 ),
@@ -1058,7 +1058,9 @@ def _langfuse_observation_span_view(
     observation: dict[str, Any],
     trace_id: str,
 ) -> SpanView:
-    observation_type = str(_first_value(observation, "type", "observationType") or "span")
+    observation_type = str(
+        _first_value(observation, "type", "observationType", "observation_type") or "span"
+    )
     name = str(_first_value(observation, "name", "id") or observation_type)
     span_id = _required_span_id(observation, trace_id=trace_id)
     parent_id = _first_value(observation, "parentObservationId", "parent_observation_id")
@@ -1094,6 +1096,7 @@ def _langfuse_observation_span_view(
 _LANGFUSE_RESERVED_KEYS = frozenset(
     {
         "endTime",
+        "end_time",
         "events",
         "id",
         "input",
@@ -1101,11 +1104,14 @@ _LANGFUSE_RESERVED_KEYS = frozenset(
         "metadata",
         "observations",
         "observationId",
+        "observation_type",
         "output",
         "outputs",
         "parentObservationId",
         "parent_observation_id",
+        "sessionId",
         "startTime",
+        "start_time",
         "status",
         "statusMessage",
         "status_message",
@@ -1115,9 +1121,13 @@ _LANGFUSE_RESERVED_KEYS = frozenset(
         "traceSessionId",
         "traceUserId",
         "trace_id",
+        "trace_name",
+        "trace_session_id",
+        "trace_user_id",
         "trace_url",
         "traceUrl",
         "url",
+        "userId",
     }
 )
 
@@ -1126,10 +1136,15 @@ def _langfuse_attributes(row: dict[str, Any]) -> dict[str, Any]:
     attrs = _attributes_from_mapping(row, _LANGFUSE_RESERVED_KEYS)
     for key in (
         "user_id",
+        "userId",
         "traceUserId",
+        "trace_user_id",
         "session_id",
+        "sessionId",
         "traceSessionId",
+        "trace_session_id",
         "traceName",
+        "trace_name",
         "release",
         "version",
         "environment",
@@ -1144,7 +1159,22 @@ def _langfuse_attributes(row: dict[str, Any]) -> dict[str, Any]:
 
 def _langfuse_observation_trace_attributes(row: dict[str, Any]) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
-    for key in ("traceName", "traceUserId", "traceSessionId"):
+    for key in (
+        "traceName",
+        "trace_name",
+        "traceUserId",
+        "trace_user_id",
+        "traceSessionId",
+        "trace_session_id",
+        "userId",
+        "user_id",
+        "sessionId",
+        "session_id",
+        "release",
+        "version",
+        "environment",
+        "tags",
+    ):
         if key in row and row[key] is not None:
             attrs[key] = row[key]
     metadata = row.get("metadata")
@@ -1220,6 +1250,7 @@ def _started_at_unix_nano(row: dict[str, Any]) -> int | None:
             "start_time_unix_nano",
             "startTimeUnixNano",
             "startTime",
+            "start_time",
             "timestamp",
         )
     )
@@ -1233,6 +1264,7 @@ def _ended_at_unix_nano(row: dict[str, Any]) -> int | None:
             "end_time_unix_nano",
             "endTimeUnixNano",
             "endTime",
+            "end_time",
         )
     )
 

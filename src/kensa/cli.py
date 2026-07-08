@@ -76,6 +76,7 @@ AgentInstructionChoice = Literal[
     "other",
     "all",
 ]
+_LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
 _AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other")
 _AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES, "all")
 _INTERACTIVE_CHOICE_LABELS = {
@@ -130,6 +131,8 @@ _SINCE_WINDOW = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
 _IMPORT_DEFAULT_LIMIT = 1000
 _LANGFUSE_TRACE_PAGE_LIMIT = 100
 _LANGFUSE_OBSERVATION_PAGE_LIMIT = 1000
+_LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS = "core"
+_LANGFUSE_OBSERVATIONS_V2_FIELDS = "core,basic,time,io,metadata,model,usage,metrics,trace_context"
 _LANGFUSE_CONNECTED_DEFAULT_LIMIT = 50
 _LANGFUSE_MAX_ATTEMPTS = 4
 _LANGFUSE_MAX_RETRY_DELAY_SECONDS = 30.0
@@ -181,6 +184,21 @@ class _LangfuseDataEnvelope(BaseModel):
     meta: dict[str, Any]
 
 
+class _LangfuseRequestError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        label: str,
+        status_code: int | None = None,
+        endpoint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.label = label
+        self.status_code = status_code
+        self.endpoint = endpoint
+
+
 _AGENT_INSTRUCTION_PATHS = {
     target_key: path for target_key, _binaries, path, _markers in _AGENT_INSTRUCTION_TARGETS
 }
@@ -205,14 +223,6 @@ class _ConnectionCheckError(ValueError):
     def __init__(self, message: str, *, check: _ConnectionCheck) -> None:
         super().__init__(message)
         self.check = check
-
-
-class _LangfuseRequestError(ValueError):
-    status_code: int | None
-
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
 
 
 _TRACE_SOURCE_LABELS: dict[str, str] = {
@@ -490,7 +500,10 @@ def connect_langfuse(
     "provider",
     required=True,
     type=click.Choice(["json", "jsonl", "otlp", "langfuse"]),
-    help="Trace source format or connected provider.",
+    help=(
+        "Trace source format or connected provider. Langfuse imports support the "
+        "legacy trace API and observations-v2/events-only deployments."
+    ),
 )
 @click.option("--source", default=None, help="Local export file to import.")
 @click.option("--endpoint", default=None, help="One-off endpoint provenance override.")
@@ -516,6 +529,13 @@ def connect_langfuse(
     type=click.Choice(["off", "keys", "strict"]),
     help="Redaction mode for imported trace data.",
 )
+@click.option(
+    "--langfuse-mode",
+    default="auto",
+    show_default=True,
+    type=click.Choice(["auto", "legacy_traces", "observations_v2"]),
+    help="Connected Langfuse import mode.",
+)
 @click.option("--json", "json_output", is_flag=True, help="Emit an agent-readable JSON envelope.")
 def import_command(
     provider: str,
@@ -526,6 +546,7 @@ def import_command(
     limit: int | None,
     max_payload_bytes: int,
     redact: str,
+    langfuse_mode: _LangfuseImportMode,
     json_output: bool,
 ) -> None:
     """Import traces into Kensa."""
@@ -538,6 +559,7 @@ def import_command(
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         redact=redact,
+        langfuse_mode=langfuse_mode,
         json=json_output,
     )
     raise click.exceptions.Exit(_cmd_import(args))
@@ -2620,6 +2642,10 @@ def _connected_import(args: Any, *, out: Path) -> ImportResult:
             project=project,
             since=getattr(args, "since", None),
             limit=int(args.limit),
+            import_mode=cast(
+                _LangfuseImportMode,
+                getattr(args, "langfuse_mode", "auto"),
+            ),
         )
     else:
         raise ValueError(f"unsupported connected import provider: {provider}")
@@ -2655,6 +2681,7 @@ def _connected_langfuse_payload(
     project: Any,
     since: str | None,
     limit: int,
+    import_mode: _LangfuseImportMode = "auto",
 ) -> dict[str, Any]:
     raw_auth = connection.get("auth")
     auth: dict[str, Any] = raw_auth if isinstance(raw_auth, dict) else {}
@@ -2670,6 +2697,7 @@ def _connected_langfuse_payload(
             limit=limit,
             public_key=public_key,
             secret_key=secret_key,
+            import_mode=import_mode,
         )
 
 
@@ -2736,10 +2764,55 @@ def _fetch_langfuse_connected_export(
     limit: int,
     public_key: str,
     secret_key: str,
+    import_mode: _LangfuseImportMode = "auto",
 ) -> dict[str, Any]:
     del project
     headers = _langfuse_auth_headers(public_key, secret_key)
     start_time = _provider_start_time(since)
+    if import_mode == "legacy_traces":
+        return _fetch_langfuse_legacy_trace_export(
+            endpoint=endpoint,
+            headers=headers,
+            start_time=start_time,
+            limit=limit,
+        )
+    if import_mode == "observations_v2":
+        return _fetch_langfuse_observations_v2_export(
+            endpoint=endpoint,
+            headers=headers,
+            start_time=start_time,
+            limit=limit,
+        )
+    if import_mode != "auto":
+        raise ValueError(f"Unsupported Langfuse import mode: {import_mode}")
+    try:
+        return _fetch_langfuse_legacy_trace_export(
+            endpoint=endpoint,
+            headers=headers,
+            start_time=start_time,
+            limit=limit,
+        )
+    except _LangfuseRequestError as exc:
+        if not _is_langfuse_events_only_trace_failure(exc):
+            raise
+        try:
+            return _fetch_langfuse_observations_v2_export(
+                endpoint=endpoint,
+                headers=headers,
+                start_time=start_time,
+                limit=limit,
+            )
+        except (OSError, RuntimeError, ValueError) as fallback_exc:
+            raise fallback_exc from exc
+
+
+def _fetch_langfuse_legacy_trace_export(
+    *,
+    endpoint: str,
+    headers: dict[str, str],
+    start_time: str | None,
+    limit: int,
+) -> dict[str, Any]:
     traces, trace_meta = _fetch_langfuse_trace_rows(
         endpoint=endpoint,
         headers=headers,
@@ -2761,6 +2834,49 @@ def _fetch_langfuse_connected_export(
 def _langfuse_auth_headers(public_key: str, secret_key: str) -> dict[str, str]:
     token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
+
+
+def _fetch_langfuse_observations_v2_export(
+    *,
+    endpoint: str,
+    headers: dict[str, str],
+    start_time: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    trace_ids: dict[str, None] = {}
+    cursor: str | None = None
+    page_limit = min(max(limit, 1), _LANGFUSE_OBSERVATION_PAGE_LIMIT)
+    while len(trace_ids) < limit:
+        query = _query(
+            {
+                "limit": page_limit,
+                "fromStartTime": start_time,
+                "fields": _LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS,
+                "cursor": cursor,
+            }
+        )
+        url = f"{endpoint.rstrip('/')}/api/public/v2/observations{query}"
+        payload = _read_langfuse_json_response(Request(url, headers=headers), label="observations")
+        page_rows = _langfuse_response_rows(payload, label="observations")
+        for row in page_rows:
+            trace_id = row.get("traceId") or row.get("trace_id")
+            if trace_id is not None and str(trace_id) != "":
+                trace_ids.setdefault(str(trace_id), None)
+        cursor = _response_cursor(payload)
+        if cursor is None or not page_rows:
+            break
+    rows: list[dict[str, Any]] = []
+    for trace_id in list(trace_ids)[:limit]:
+        rows.extend(
+            _fetch_langfuse_observation_rows(
+                endpoint=endpoint,
+                headers=headers,
+                trace_id=trace_id,
+                fields=_LANGFUSE_OBSERVATIONS_V2_FIELDS,
+                parse_io_as_json=True,
+            )
+        )
+    return {"data": rows, "meta": {}}
 
 
 def _fetch_langfuse_trace_rows(
@@ -2798,6 +2914,8 @@ def _fetch_langfuse_observation_rows(
     endpoint: str,
     headers: dict[str, str],
     trace_id: str,
+    fields: str | None = None,
+    parse_io_as_json: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -2806,6 +2924,8 @@ def _fetch_langfuse_observation_rows(
             {
                 "limit": _LANGFUSE_OBSERVATION_PAGE_LIMIT,
                 "traceId": trace_id,
+                "fields": fields,
+                "parseIoAsJson": "true" if parse_io_as_json else None,
                 "cursor": cursor,
             }
         )
@@ -2866,6 +2986,10 @@ def _langfuse_trace_id(trace: dict[str, Any]) -> str:
     return str(value)
 
 
+def _is_langfuse_events_only_trace_failure(exc: _LangfuseRequestError) -> bool:
+    return exc.label == "traces" and exc.status_code == 404
+
+
 def _query(values: dict[str, Any]) -> str:
     query = urlencode({key: value for key, value in values.items() if value is not None})
     return f"?{query}" if query else ""
@@ -2874,9 +2998,15 @@ def _query(values: dict[str, Any]) -> str:
 def _provider_start_time(since: str | None) -> str | None:
     if since is None:
         return None
-    match = _SINCE_WINDOW.fullmatch(since.strip())
+    stripped = since.strip()
+    match = _SINCE_WINDOW.fullmatch(stripped)
     if match is None:
-        return since
+        with contextlib.suppress(ValueError):
+            parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return stripped
     seconds = (
         int(match.group("count"))
         * {"m": 60, "h": 3600, "d": 86400, "w": 604800}[match.group("unit")]
@@ -2915,7 +3045,9 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
                         endpoint,
                         body_hint=body_hint,
                     ),
+                    label=label,
                     status_code=exc.code,
+                    endpoint=endpoint,
                 ) from exc
             if attempt >= _LANGFUSE_MAX_ATTEMPTS:
                 raise _LangfuseRequestError(
@@ -2925,7 +3057,9 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
                         endpoint=endpoint,
                         body_hint=body_hint,
                     ),
+                    label=label,
                     status_code=exc.code,
+                    endpoint=endpoint,
                 ) from exc
             delay = _langfuse_retry_delay(exc, attempt)
             _sleep_before_langfuse_retry(delay, reason=_langfuse_http_retry_reason(exc.code))
@@ -2938,7 +3072,9 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
                         exc,
                         retry_count=attempt - 1,
                         endpoint=endpoint,
-                    )
+                    ),
+                    label=label,
+                    endpoint=endpoint,
                 ) from exc
             if attempt >= _LANGFUSE_MAX_ATTEMPTS:
                 raise _LangfuseRequestError(
@@ -2947,7 +3083,9 @@ def _read_langfuse_json_response(request: Request, *, label: str) -> dict[str, A
                         exc,
                         retry_count=attempt - 1,
                         endpoint=endpoint,
-                    )
+                    ),
+                    label=label,
+                    endpoint=endpoint,
                 ) from exc
             delay = _langfuse_retry_delay(None, attempt)
             _sleep_before_langfuse_retry(delay, reason="request failed")
@@ -3145,7 +3283,8 @@ def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None
             "Kensa reached Langfuse, but the trace read API was unavailable.\n"
             "This Langfuse deployment does not expose the trace read API required by "
             "kensa import.\n"
-            "Check that this deployment supports GET /api/public/traces."
+            "Check that this deployment supports GET /api/public/traces, or retry with "
+            "kensa import --from langfuse --langfuse-mode observations_v2."
         )
     if status_code == 404:
         return "Check the selected Langfuse region or custom base URL."

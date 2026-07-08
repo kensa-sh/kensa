@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 
 import click
 import pytest
@@ -1416,6 +1417,51 @@ def test_connect_commands_write_metadata_without_secret_values(
     assert langfuse_checks[0]["secret_key"] == "lf-secret-value"
 
 
+def test_connect_langfuse_accepts_events_only_observations_v2(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    requests = []
+    responses = iter(
+        [
+            {"data": [], "meta": {}},
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"cursor": None},
+            },
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"cursor": None},
+            },
+        ]
+    )
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        if "/api/public/traces?" in request.full_url:
+            raise _http_error(404)
+        return _JsonResponse(next(responses))
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 0
+
+    capsys.readouterr()
+    langfuse = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert langfuse["endpoint"] == "https://langfuse.example.com"
+    assert len(requests) == 4
+    assert requests[0].full_url.endswith("/api/public/projects")
+    assert "/api/public/traces?" in requests[1].full_url
+    assert "/api/public/v2/observations?" in requests[2].full_url
+    assert parse_qs(urlparse(requests[3].full_url).query)["traceId"] == ["tr_1"]
+    assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
+
+
 def test_connect_langfuse_uses_env_base_url_when_endpoint_is_omitted(
     tmp_path: Path,
     monkeypatch,
@@ -1617,7 +1663,7 @@ def test_connect_langfuse_auth_request_failure_reports_partial_checks(
         cli,
         "_check_langfuse_api_auth",
         lambda **kwargs: (_ for _ in ()).throw(
-            cli._LangfuseRequestError("credentials rejected", status_code=401)
+            cli._LangfuseRequestError("credentials rejected", label="projects", status_code=401)
         ),
     )
     monkeypatch.setattr(
@@ -1790,11 +1836,27 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
             "limit": 50,
             "public_key": "lf-public-value",
             "secret_key": "lf-secret-value",
+            "import_mode": "auto",
         }
     ]
     assert payload["data"]["source_mode"] == "connected"
     assert artifact.exists()
     assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
+
+    calls.clear()
+    code = main(
+        [
+            "import",
+            "--from",
+            "langfuse",
+            "--langfuse-mode",
+            "observations_v2",
+            "--json",
+        ]
+    )
+    json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert calls[0]["import_mode"] == "observations_v2"
 
 
 def test_new_cli_helper_edge_paths(
@@ -1980,6 +2042,7 @@ def test_new_cli_helper_edge_paths(
         limit=2,
         public_key="public",
         secret_key="secret",
+        import_mode="legacy_traces",
     ) == {
         "traces": [{"id": "tr_1", "name": "first"}, {"traceId": "tr_2", "name": "second"}],
         "observations": [
@@ -2091,6 +2154,8 @@ def test_new_cli_helper_edge_paths(
     monkeypatch.setattr(cli, "datetime", FixedDateTime)
     assert cli._provider_start_time("7d") == "2026-06-18T12:00:30Z"
     assert cli._provider_start_time("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00Z"
+    assert cli._provider_start_time("2026-07-08") == "2026-07-08T00:00:00Z"
+    assert cli._provider_start_time(" not-a-date ") == "not-a-date"
     assert cli._provider_start_time(None) is None
 
     monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _JsonResponse([]))
@@ -2124,6 +2189,344 @@ def test_new_cli_helper_edge_paths(
     )
     with pytest.raises(ValueError, match="not found"):
         cli_traces.resolve_trace_view_source(None)
+
+
+def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeypatch) -> None:
+    requests = []
+    responses = iter(
+        [
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"cursor": "next-observation-page"},
+            },
+            {
+                "data": [{"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"}],
+                "meta": {"cursor": None},
+            },
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"cursor": None},
+            },
+            {
+                "data": [{"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"}],
+                "meta": {"cursor": None},
+            },
+        ]
+    )
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        return _JsonResponse(next(responses))
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    assert cli._fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        project="prod",
+        since="2026-06-01T00:00:00Z",
+        limit=2,
+        public_key="public",
+        secret_key="secret",
+        import_mode="observations_v2",
+    ) == {
+        "data": [
+            {"id": "obs_1", "traceId": "tr_1", "type": "SPAN"},
+            {"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"},
+        ],
+        "meta": {},
+    }
+
+    first_query = parse_qs(urlparse(requests[0].full_url).query)
+    second_query = parse_qs(urlparse(requests[1].full_url).query)
+    first_trace_query = parse_qs(urlparse(requests[2].full_url).query)
+    second_trace_query = parse_qs(urlparse(requests[3].full_url).query)
+    assert requests[0].full_url.startswith(
+        "https://langfuse.example.com/api/public/v2/observations?"
+    )
+    assert first_query == {
+        "limit": ["2"],
+        "fromStartTime": ["2026-06-01T00:00:00Z"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
+    }
+    assert second_query == {
+        "limit": ["2"],
+        "fromStartTime": ["2026-06-01T00:00:00Z"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
+        "cursor": ["next-observation-page"],
+    }
+    assert first_trace_query == {
+        "limit": ["1000"],
+        "traceId": ["tr_1"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
+    }
+    assert second_trace_query == {
+        "limit": ["1000"],
+        "traceId": ["tr_2"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
+    }
+
+
+def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None:
+    requests = []
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        query = parse_qs(urlparse(request.full_url).query)
+        if "traceId" not in query:
+            return _JsonResponse(
+                {
+                    "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                    "meta": {"cursor": None},
+                }
+            )
+        input_value: Any = json.dumps([{"role": "user", "content": "Refund me"}])
+        output_value: Any = json.dumps({"answer": "Done"})
+        if query.get("parseIoAsJson") == ["true"]:
+            input_value = [{"role": "user", "content": "Refund me"}]
+            output_value = {"answer": "Done"}
+        return _JsonResponse(
+            {
+                "data": [
+                    {
+                        "id": "obs_1",
+                        "traceId": "tr_1",
+                        "type": "SPAN",
+                        "input": input_value,
+                        "output": output_value,
+                    }
+                ],
+                "meta": {"cursor": None},
+            }
+        )
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    payload = cli._fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        project=None,
+        since=None,
+        limit=1,
+        public_key="public",
+        secret_key="secret",
+        import_mode="observations_v2",
+    )
+
+    assert payload["data"][0]["input"] == [{"role": "user", "content": "Refund me"}]
+    assert payload["data"][0]["output"] == {"answer": "Done"}
+    assert parse_qs(urlparse(requests[0].full_url).query) == {
+        "limit": ["1"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
+    }
+    assert parse_qs(urlparse(requests[1].full_url).query)["parseIoAsJson"] == ["true"]
+
+
+def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None:
+    requests = []
+    responses = iter(
+        [
+            {
+                "data": [{"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"}],
+                "meta": {"cursor": "later"},
+            },
+            {
+                "data": [
+                    {"id": "obs_root", "traceId": "tr_1", "type": "SPAN"},
+                    {"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"},
+                ],
+                "meta": {"cursor": None},
+            },
+        ]
+    )
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        return _JsonResponse(next(responses))
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    assert cli._fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        project=None,
+        since=None,
+        limit=1,
+        public_key="public",
+        secret_key="secret",
+        import_mode="observations_v2",
+    ) == {
+        "data": [
+            {"id": "obs_root", "traceId": "tr_1", "type": "SPAN"},
+            {"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"},
+        ],
+        "meta": {},
+    }
+    assert len(requests) == 2
+    assert parse_qs(urlparse(requests[0].full_url).query) == {
+        "limit": ["1"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
+    }
+    assert parse_qs(urlparse(requests[1].full_url).query) == {
+        "limit": ["1000"],
+        "traceId": ["tr_1"],
+        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
+        "parseIoAsJson": ["true"],
+    }
+
+
+def test_langfuse_auto_import_falls_back_only_when_trace_endpoint_is_missing(
+    monkeypatch,
+) -> None:
+    requests = []
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        if "/api/public/traces?" in request.full_url:
+            raise _http_error(404)
+        return _JsonResponse(
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"cursor": None},
+            }
+        )
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    assert cli._fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        project=None,
+        since=None,
+        limit=1,
+        public_key="public",
+        secret_key="secret",
+    ) == {
+        "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+        "meta": {},
+    }
+    assert len(requests) == 3
+    assert "/api/public/traces?" in requests[0].full_url
+    assert "/api/public/v2/observations?" in requests[1].full_url
+    assert parse_qs(urlparse(requests[2].full_url).query)["traceId"] == ["tr_1"]
+
+    requests.clear()
+    monkeypatch.setattr(
+        cli,
+        "urlopen",
+        lambda request, timeout: (
+            requests.append(request) or (_ for _ in ()).throw(_http_error(401))
+        ),
+    )
+    with pytest.raises(ValueError, match="rejected the credentials"):
+        cli._fetch_langfuse_connected_export(
+            endpoint="https://langfuse.example.com",
+            project=None,
+            since=None,
+            limit=1,
+            public_key="public",
+            secret_key="secret",
+        )
+    assert len(requests) == 1
+    assert "/api/public/traces?" in requests[0].full_url
+
+    with pytest.raises(ValueError, match="Unsupported Langfuse import mode"):
+        cli._fetch_langfuse_connected_export(
+            endpoint="https://langfuse.example.com",
+            project=None,
+            since=None,
+            limit=1,
+            public_key="public",
+            secret_key="secret",
+            import_mode=cast(Any, "bad_mode"),
+        )
+
+    requests.clear()
+
+    def fake_broken_fallback_urlopen(request, timeout: int):
+        del timeout
+        requests.append(request)
+        if "/api/public/traces?" in request.full_url:
+            raise _http_error(404)
+        return _JsonResponse({"data": {}})
+
+    monkeypatch.setattr(cli, "urlopen", fake_broken_fallback_urlopen)
+    with pytest.raises(ValueError, match="data list") as error:
+        cli._fetch_langfuse_connected_export(
+            endpoint="https://langfuse.example.com",
+            project=None,
+            since=None,
+            limit=1,
+            public_key="public",
+            secret_key="secret",
+        )
+    assert isinstance(error.value.__cause__, cli._LangfuseRequestError)
+    assert len(requests) == 2
+    assert "/api/public/traces?" in requests[0].full_url
+    assert "/api/public/v2/observations?" in requests[1].full_url
+
+
+def test_langfuse_events_only_connected_import_does_not_write_secrets(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
+    monkeypatch.setenv("TEST_LANGFUSE_PUBLIC", "lf-public-value")
+    monkeypatch.setenv("TEST_LANGFUSE_SECRET", "lf-secret-value")
+    connection_dir = tmp_path / ".kensa" / "connections"
+    connection_dir.mkdir(parents=True)
+    (connection_dir / "langfuse.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.connection.v1",
+                "provider": "langfuse",
+                "created_at": "2026-06-01T00:00:00Z",
+                "endpoint": "https://langfuse.example.com",
+                "project": None,
+                "auth": {
+                    "type": "basic",
+                    "public_key_env": "TEST_LANGFUSE_PUBLIC",
+                    "secret_key_env": "TEST_LANGFUSE_SECRET",
+                },
+            }
+        )
+    )
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        if "/api/public/traces?" in request.full_url:
+            raise _http_error(404)
+        return _JsonResponse(
+            {
+                "data": [
+                    {
+                        "id": "obs_1",
+                        "traceId": "tr_1",
+                        "traceName": "support-agent",
+                        "type": "SPAN",
+                        "name": "agent",
+                    }
+                ],
+                "meta": {"cursor": None},
+            }
+        )
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+
+    assert main(["import", "--from", "langfuse", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = tmp_path / ".kensa" / "traces" / "imports" / "langfuse-1792820123.jsonl"
+    rows = [json.loads(line) for line in artifact.read_text().splitlines()]
+    assert payload["ok"] is True
+    assert rows[0]["id"] == "tr_1"
+    assert rows[0]["name"] == "support-agent"
+    assert "lf-public-value" not in _tree_text(tmp_path / ".kensa")
+    assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
 
 
 def test_langfuse_retry_after_retries_rate_limited_requests(monkeypatch, capsys) -> None:
