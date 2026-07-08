@@ -1708,6 +1708,16 @@ def _configure_trace_source_connection(
             else f"checked {check.endpoint}"
         )
         _init_item(steps, message)
+    missing_judge = _missing_init_judge_envs()
+    if missing_judge:
+        _init_notice(
+            steps,
+            (
+                "LLM-as-judge key not found. Add "
+                f"{_format_missing_init_judge_envs(missing_judge)} to "
+                f"{cli_output.display_path(dotenv_path)} before running evals."
+            ),
+        )
     _init_item(steps, f"saved metadata: {cli_output.display_path(path)}")
     _init_item(steps, "API key values were not stored in connection metadata")
     return "ready"
@@ -1898,9 +1908,22 @@ def _judge_init_env_values(provider: _InitJudgeProvider) -> dict[str, str]:
 
 
 def _missing_init_credential_envs(provider: str, dotenv_path: Path | None) -> tuple[str, ...]:
-    judge_provider = _judge_provider_from_environment() or "openai"
-    required = (*_provider_env_names(provider), _JUDGE_API_KEY_ENVS[judge_provider])
+    required = _provider_env_names(provider)
     return tuple(name for name in required if not _env_or_dotenv_has_key(name, dotenv_path))
+
+
+def _missing_init_judge_envs() -> tuple[str, ...]:
+    judge_provider = _judge_provider_from_environment()
+    if judge_provider is not None:
+        name = _JUDGE_API_KEY_ENVS[judge_provider]
+        return () if os.environ.get(name) else (name,)
+    return tuple(name for name in _JUDGE_API_KEY_ENVS.values() if not os.environ.get(name))
+
+
+def _format_missing_init_judge_envs(env_names: tuple[str, ...]) -> str:
+    if len(env_names) == 1:
+        return env_names[0]
+    return " or ".join(env_names)
 
 
 def _env_or_dotenv_has_key(name: str, dotenv_path: Path | None) -> bool:

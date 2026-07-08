@@ -4022,7 +4022,47 @@ def test_init_langfuse_uses_configured_dotenv_without_prompting(
     assert "pk-existing" not in output
 
 
-def test_init_langfuse_existing_env_file_requires_judge_key(
+def test_init_langfuse_uses_configured_dotenv_without_judge_key(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    (tmp_path / "pyproject.toml").write_text('[tool.kensa]\ndotenv = "config/dev.env"\n')
+    config = tmp_path / "config"
+    config.mkdir()
+    dotenv = config / "dev.env"
+    dotenv.write_text("LANGFUSE_PUBLIC_KEY=pk-existing\nLANGFUSE_SECRET_KEY=sk-existing\n")
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli.click,
+        "getchar",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+    )
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    output = capsys.readouterr().out
+    connection = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert "using credentials from config/dev.env" in output
+    assert "LLM-as-judge key not found" in output
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in output
+    assert checks[0]["public_key"] == "pk-existing"
+    assert connection["auth"]["public_key_env"] == "LANGFUSE_PUBLIC_KEY"
+    assert connection["auth"]["secret_key_env"] == "LANGFUSE_SECRET_KEY"
+    assert "pk-existing" not in output
+    assert "sk-existing" not in output
+
+
+def test_init_langfuse_existing_env_file_connects_without_judge_key(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -4033,17 +4073,51 @@ def test_init_langfuse_existing_env_file_requires_judge_key(
     dotenv = tmp_path / "dev.env"
     dotenv.write_text("LANGFUSE_PUBLIC_KEY=pk-existing\nLANGFUSE_SECRET_KEY=sk-existing\n")
     keys = iter(["j", "\r", "\r"])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    captured = capsys.readouterr()
+    connection = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert "LLM-as-judge key not found" in captured.out
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
+    assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
+    assert checks[0]["public_key"] == "pk-existing"
+    assert connection["provider"] == "langfuse"
+    assert "pk-existing" not in captured.out
+    assert "sk-existing" not in captured.out
+    assert "pk-existing" not in captured.err
+    assert "sk-existing" not in captured.err
+
+
+def test_init_langfuse_existing_env_file_requires_langfuse_secret_key(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text("LANGFUSE_PUBLIC_KEY=pk-existing\n")
+    keys = iter(["j", "\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
     assert cli._configure_trace_source_connection(None, "langfuse") == "failed"
 
     captured = capsys.readouterr()
     assert "Missing required credentials in dev.env:" in captured.err
-    assert "OPENAI_API_KEY" in captured.err
+    assert "LANGFUSE_SECRET_KEY" in captured.err
+    assert "OPENAI_API_KEY" not in captured.err
     assert "pk-existing" not in captured.out
-    assert "sk-existing" not in captured.out
     assert "pk-existing" not in captured.err
-    assert "sk-existing" not in captured.err
 
 
 def test_init_provider_credentials_can_be_configured_later(
