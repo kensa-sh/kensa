@@ -137,6 +137,7 @@ _LANGFUSE_CONNECTED_DEFAULT_LIMIT = 50
 _LANGFUSE_MAX_ATTEMPTS = 4
 _LANGFUSE_MAX_RETRY_DELAY_SECONDS = 30.0
 _LANGFUSE_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_LANGFUSE_RESPONSE_HINT_MAX_CHARS = 300
 _InitConnectionStatus = Literal["ready", "deferred", "failed"]
 _InitCredentialSource = Literal["create", "existing", "later"]
 _InitJudgeProvider = Literal["openai", "anthropic"]
@@ -186,7 +187,19 @@ class _LangfuseDataEnvelope(BaseModel):
 
 class _UnsupportedInitJudgeProvider(ValueError):
     def __init__(self, env_name: str, value: str) -> None:
-        super().__init__(f"Unsupported {env_name}: {value}. Set {env_name} to openai or anthropic.")
+        super().__init__(
+            f"Unsupported {env_name}: {value}. Kensa's built-in judge supports openai "
+            "and anthropic. Other providers need set_judge_provider()."
+        )
+
+
+class _UnrecognizedInitJudgeModel(ValueError):
+    def __init__(self, value: str) -> None:
+        super().__init__(
+            f"Judge model configured ({value}), but Kensa could not infer a built-in "
+            "judge provider. Set KENSA_JUDGE_PROVIDER to openai or anthropic, or use "
+            "set_judge_provider()."
+        )
 
 
 class _LangfuseRequestError(ValueError):
@@ -1682,9 +1695,8 @@ def _configure_trace_source_connection(
             _init_notice(
                 steps,
                 (
-                    "Credentials not configured. Add LANGFUSE_PUBLIC_KEY, "
-                    "LANGFUSE_SECRET_KEY, and an LLM provider key, then run "
-                    f"kensa connect {provider}."
+                    "Credentials not configured. Add LANGFUSE_PUBLIC_KEY and "
+                    f"LANGFUSE_SECRET_KEY, then run kensa connect {provider}."
                 ),
             )
             return "deferred"
@@ -1715,7 +1727,7 @@ def _configure_trace_source_connection(
         _init_item(steps, message)
     try:
         missing_judge = _missing_init_judge_envs(dotenv_path)
-    except _UnsupportedInitJudgeProvider as exc:
+    except (_UnsupportedInitJudgeProvider, _UnrecognizedInitJudgeModel) as exc:
         _init_notice(steps, str(exc))
         missing_judge = _missing_any_init_judge_envs(dotenv_path)
     if missing_judge:
@@ -1789,7 +1801,8 @@ def _configure_init_credentials(
     judge_provider = _prompt_judge_provider(steps)
     env_values = _prompt_provider_env_values(provider, judge_provider)
     env_values.update(_provider_init_env_values(provider, dotenv_path))
-    env_values.update(_judge_init_env_values(judge_provider))
+    if _JUDGE_API_KEY_ENVS[judge_provider] in env_values:
+        env_values.update(_judge_init_env_values(judge_provider))
     _write_dotenv_values(dotenv_path, env_values)
     _ensure_gitignored(dotenv_path)
     _record_pyproject_dotenv(dotenv_path)
@@ -1808,7 +1821,10 @@ def _select_init_credential_source(
         choices=_INIT_CREDENTIAL_SOURCE_CHOICES,
         default="create",
         choice_label=lambda value: _init_credential_source_label(value, label, dotenv_path),
-        help_text=f"Kensa needs {label} credentials for traces and an LLM-as-judge key.",
+        help_text=(
+            f"Kensa needs {label} credentials for traces. "
+            "Judge credentials are optional during init."
+        ),
     )
     return cast(_InitCredentialSource, choice)
 
@@ -1900,13 +1916,28 @@ def _judge_provider_from_environment() -> _InitJudgeProvider | None:
         if provider in _INIT_JUDGE_PROVIDER_CHOICES:
             return cast(_InitJudgeProvider, provider)
         raise _UnsupportedInitJudgeProvider(env_name, raw_provider)
-    raw_model = os.environ.get("KENSA_JUDGE_MODEL") or os.environ.get("KENSA_LLM_MODEL")
+    raw_model = _raw_judge_model_from_environment()
     if raw_model:
         return _judge_provider_for_model(raw_model)
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
+    return None
+
+
+def _raw_judge_model_from_environment() -> str | None:
+    raw_model = os.environ.get("KENSA_JUDGE_MODEL") or os.environ.get("KENSA_LLM_MODEL")
+    if raw_model is None:
+        return None
+    model = raw_model.strip()
+    return model or None
+
+
+def _unrecognized_judge_model_from_environment() -> str | None:
+    model = _raw_judge_model_from_environment()
+    if model is not None and _judge_provider_for_model(model) is None:
+        return model
     return None
 
 
@@ -1931,14 +1962,21 @@ def _missing_init_credential_envs(provider: str, dotenv_path: Path | None) -> tu
 
 
 def _missing_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
+    if _env_or_dotenv_has_key("KENSA_JUDGE_RESULT", dotenv_path):
+        return ()
     judge_provider = _judge_provider_from_environment()
     if judge_provider is not None:
         name = _JUDGE_API_KEY_ENVS[judge_provider]
         return () if _env_or_dotenv_has_key(name, dotenv_path) else (name,)
+    unrecognized_model = _unrecognized_judge_model_from_environment()
+    if unrecognized_model is not None:
+        raise _UnrecognizedInitJudgeModel(unrecognized_model)
     return _missing_any_init_judge_envs(dotenv_path)
 
 
 def _missing_any_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
+    if _env_or_dotenv_has_key("KENSA_JUDGE_RESULT", dotenv_path):
+        return ()
     if any(_env_or_dotenv_has_key(name, dotenv_path) for name in _JUDGE_API_KEY_ENVS.values()):
         return ()
     return tuple(_JUDGE_API_KEY_ENVS.values())
@@ -2037,9 +2075,19 @@ def _prompt_provider_env_values(
     judge_provider: _InitJudgeProvider,
 ) -> dict[str, str]:
     values: dict[str, str] = {}
-    for name in (*_provider_env_names(provider), _JUDGE_API_KEY_ENVS[judge_provider]):
+    for name in _provider_env_names(provider):
         value = click.prompt(name, hide_input=True, confirmation_prompt=False)
         values[name] = _validated_dotenv_value(name, str(value))
+    judge_key = _JUDGE_API_KEY_ENVS[judge_provider]
+    value = click.prompt(
+        f"{judge_key} (optional)",
+        default="",
+        show_default=False,
+        hide_input=True,
+        confirmation_prompt=False,
+    )
+    if str(value):
+        values[judge_key] = _validated_dotenv_value(judge_key, str(value))
     return values
 
 
@@ -2915,15 +2963,39 @@ def _fetch_langfuse_observations_v2_export(
     rows: list[dict[str, Any]] = []
     for trace_id in list(trace_ids)[:limit]:
         rows.extend(
-            _fetch_langfuse_observation_rows(
-                endpoint=endpoint,
-                headers=headers,
-                trace_id=trace_id,
-                fields=_LANGFUSE_OBSERVATIONS_V2_FIELDS,
-                parse_io_as_json=True,
+            _parse_langfuse_observations_v2_io(
+                _fetch_langfuse_observation_rows(
+                    endpoint=endpoint,
+                    headers=headers,
+                    trace_id=trace_id,
+                    fields=_LANGFUSE_OBSERVATIONS_V2_FIELDS,
+                )
             )
         )
     return {"data": rows, "meta": {}}
+
+
+def _parse_langfuse_observations_v2_io(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parsed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        parsed_row = dict(row)
+        for key in ("input", "output"):
+            if key in parsed_row:
+                parsed_row[key] = _parse_langfuse_observation_io_value(parsed_row[key])
+        parsed_rows.append(parsed_row)
+    return parsed_rows
+
+
+def _parse_langfuse_observation_io_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return value
 
 
 def _fetch_langfuse_trace_rows(
@@ -2962,7 +3034,6 @@ def _fetch_langfuse_observation_rows(
     headers: dict[str, str],
     trace_id: str,
     fields: str | None = None,
-    parse_io_as_json: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -2978,24 +3049,11 @@ def _fetch_langfuse_observation_rows(
         url = f"{endpoint.rstrip('/')}/api/public/v2/observations{query}"
         payload = _read_langfuse_json_response(Request(url, headers=headers), label="observations")
         page_rows = _langfuse_response_rows(payload, label="observations")
-        if parse_io_as_json:
-            rows.extend(_parse_langfuse_io_fields(row) for row in page_rows)
-        else:
-            rows.extend(page_rows)
+        rows.extend(page_rows)
         cursor = _response_cursor(payload)
         if cursor is None or not page_rows:
             break
     return rows
-
-
-def _parse_langfuse_io_fields(row: dict[str, Any]) -> dict[str, Any]:
-    parsed_row = dict(row)
-    for key in ("input", "output"):
-        value = parsed_row.get(key)
-        if isinstance(value, str):
-            with contextlib.suppress(json.JSONDecodeError):
-                parsed_row[key] = json.loads(value)
-    return parsed_row
 
 
 def _langfuse_response_rows(payload: dict[str, Any], *, label: str) -> list[dict[str, Any]]:
@@ -3166,9 +3224,18 @@ def _langfuse_http_error_body_hint(exc: HTTPError) -> str | None:
             "Langfuse returned an events_only hint; this deployment may expose ingestion-only "
             "event APIs instead of trace reads."
         )
-    if len(text) > 200:
-        text = f"{text[:197].rstrip()}..."
-    return f"Langfuse response: {text}"
+    if 400 <= exc.code < 500:
+        return _langfuse_response_body_hint(text)
+    return None
+
+
+def _langfuse_response_body_hint(text: str) -> str | None:
+    sanitized = "".join(ch for ch in " ".join(text.split()) if ch.isprintable())
+    if not sanitized:
+        return None
+    if len(sanitized) > _LANGFUSE_RESPONSE_HINT_MAX_CHARS:
+        sanitized = f"{sanitized[: _LANGFUSE_RESPONSE_HINT_MAX_CHARS - 3]}..."
+    return f"Langfuse response: {sanitized}"
 
 
 def _langfuse_request_endpoint(request: Request) -> str | None:
@@ -3342,6 +3409,11 @@ def _langfuse_http_error_reason(status_code: int) -> str:
 def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None) -> str:
     if status_code in {401, 403}:
         return "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and the selected Langfuse region."
+    if status_code == 400:
+        return (
+            "Kensa reached Langfuse, but Langfuse rejected request parameters. "
+            "Upgrade Kensa if this persists, or file an issue with the response hint."
+        )
     if status_code == 404 and label == "traces":
         return (
             "Kensa reached Langfuse, but the trace read API was unavailable.\n"
@@ -3352,11 +3424,6 @@ def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None
         )
     if status_code == 404:
         return "Check the selected Langfuse region or custom base URL."
-    if status_code == 400:
-        return (
-            "Langfuse rejected the request parameters. Check the response body when present "
-            "and check for a Kensa/Langfuse version mismatch."
-        )
     return "Check the selected Langfuse region or retry after Langfuse is healthy."
 
 
