@@ -184,6 +184,11 @@ class _LangfuseDataEnvelope(BaseModel):
     meta: dict[str, Any]
 
 
+class _UnsupportedInitJudgeProvider(ValueError):
+    def __init__(self, env_name: str, value: str) -> None:
+        super().__init__(f"Unsupported {env_name}: {value}. Set {env_name} to openai or anthropic.")
+
+
 class _LangfuseRequestError(ValueError):
     def __init__(
         self,
@@ -1670,9 +1675,9 @@ def _configure_trace_source_connection(
                 _record_pyproject_dotenv(dotenv_path)
                 credential_source = "existing"
             else:
-                dotenv_path, credential_source = _configure_init_credentials(provider)
+                dotenv_path, credential_source = _configure_init_credentials(provider, steps)
         else:
-            dotenv_path, credential_source = _configure_init_credentials(provider)
+            dotenv_path, credential_source = _configure_init_credentials(provider, steps)
         if credential_source == "later":
             _init_notice(
                 steps,
@@ -1708,6 +1713,20 @@ def _configure_trace_source_connection(
             else f"checked {check.endpoint}"
         )
         _init_item(steps, message)
+    try:
+        missing_judge = _missing_init_judge_envs(dotenv_path)
+    except _UnsupportedInitJudgeProvider as exc:
+        _init_notice(steps, str(exc))
+        missing_judge = _missing_any_init_judge_envs(dotenv_path)
+    if missing_judge:
+        _init_notice(
+            steps,
+            (
+                "LLM-as-judge key not found. Add "
+                f"{_format_missing_init_judge_envs(missing_judge)} to "
+                f"{cli_output.display_path(dotenv_path)} before running evals."
+            ),
+        )
     _init_item(steps, f"saved metadata: {cli_output.display_path(path)}")
     _init_item(steps, "API key values were not stored in connection metadata")
     return "ready"
@@ -1746,7 +1765,10 @@ def _is_friendly_langfuse_error(message: str) -> bool:
     return message.startswith(("Could not reach Langfuse", "Langfuse "))
 
 
-def _configure_init_credentials(provider: str) -> tuple[Path, _InitCredentialSource]:
+def _configure_init_credentials(
+    provider: str,
+    steps: _Steps | None,
+) -> tuple[Path, _InitCredentialSource]:
     dotenv_path = _init_dotenv_path()
     credential_source = _select_init_credential_source(provider, dotenv_path)
     if credential_source == "later":
@@ -1764,7 +1786,7 @@ def _configure_init_credentials(provider: str) -> tuple[Path, _InitCredentialSou
         _record_pyproject_dotenv(selected_dotenv, replace=True)
         return selected_dotenv, credential_source
 
-    judge_provider = _prompt_judge_provider()
+    judge_provider = _prompt_judge_provider(steps)
     env_values = _prompt_provider_env_values(provider, judge_provider)
     env_values.update(_provider_init_env_values(provider, dotenv_path))
     env_values.update(_judge_init_env_values(judge_provider))
@@ -1844,8 +1866,12 @@ def _is_dotenv_filename(name: str) -> bool:
     return name == ".env" or name.startswith(".env.") or name.endswith(".env")
 
 
-def _prompt_judge_provider() -> _InitJudgeProvider:
-    configured = _judge_provider_from_environment()
+def _prompt_judge_provider(steps: _Steps | None) -> _InitJudgeProvider:
+    try:
+        configured = _judge_provider_from_environment()
+    except _UnsupportedInitJudgeProvider as exc:
+        _init_notice(steps, str(exc))
+        configured = None
     default: _InitJudgeProvider = configured or "openai"
     choice = _select_interactive_choice(
         "Judge provider",
@@ -1866,12 +1892,14 @@ def _judge_provider_label(provider: str) -> str:
 
 
 def _judge_provider_from_environment() -> _InitJudgeProvider | None:
-    raw_provider = os.environ.get("KENSA_JUDGE_PROVIDER") or os.environ.get("KENSA_LLM_PROVIDER")
-    if raw_provider:
+    for env_name in ("KENSA_JUDGE_PROVIDER", "KENSA_LLM_PROVIDER"):
+        raw_provider = os.environ.get(env_name)
+        if not raw_provider:
+            continue
         provider = raw_provider.strip().lower()
         if provider in _INIT_JUDGE_PROVIDER_CHOICES:
             return cast(_InitJudgeProvider, provider)
-        raise ValueError(f"Unsupported judge provider: {raw_provider}")
+        raise _UnsupportedInitJudgeProvider(env_name, raw_provider)
     raw_model = os.environ.get("KENSA_JUDGE_MODEL") or os.environ.get("KENSA_LLM_MODEL")
     if raw_model:
         return _judge_provider_for_model(raw_model)
@@ -1898,9 +1926,28 @@ def _judge_init_env_values(provider: _InitJudgeProvider) -> dict[str, str]:
 
 
 def _missing_init_credential_envs(provider: str, dotenv_path: Path | None) -> tuple[str, ...]:
-    judge_provider = _judge_provider_from_environment() or "openai"
-    required = (*_provider_env_names(provider), _JUDGE_API_KEY_ENVS[judge_provider])
+    required = _provider_env_names(provider)
     return tuple(name for name in required if not _env_or_dotenv_has_key(name, dotenv_path))
+
+
+def _missing_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
+    judge_provider = _judge_provider_from_environment()
+    if judge_provider is not None:
+        name = _JUDGE_API_KEY_ENVS[judge_provider]
+        return () if _env_or_dotenv_has_key(name, dotenv_path) else (name,)
+    return _missing_any_init_judge_envs(dotenv_path)
+
+
+def _missing_any_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
+    if any(_env_or_dotenv_has_key(name, dotenv_path) for name in _JUDGE_API_KEY_ENVS.values()):
+        return ()
+    return tuple(_JUDGE_API_KEY_ENVS.values())
+
+
+def _format_missing_init_judge_envs(env_names: tuple[str, ...]) -> str:
+    if len(env_names) == 1:
+        return env_names[0]
+    return " or ".join(env_names)
 
 
 def _env_or_dotenv_has_key(name: str, dotenv_path: Path | None) -> bool:
@@ -2925,18 +2972,30 @@ def _fetch_langfuse_observation_rows(
                 "limit": _LANGFUSE_OBSERVATION_PAGE_LIMIT,
                 "traceId": trace_id,
                 "fields": fields,
-                "parseIoAsJson": "true" if parse_io_as_json else None,
                 "cursor": cursor,
             }
         )
         url = f"{endpoint.rstrip('/')}/api/public/v2/observations{query}"
         payload = _read_langfuse_json_response(Request(url, headers=headers), label="observations")
         page_rows = _langfuse_response_rows(payload, label="observations")
-        rows.extend(page_rows)
+        if parse_io_as_json:
+            rows.extend(_parse_langfuse_io_fields(row) for row in page_rows)
+        else:
+            rows.extend(page_rows)
         cursor = _response_cursor(payload)
         if cursor is None or not page_rows:
             break
     return rows
+
+
+def _parse_langfuse_io_fields(row: dict[str, Any]) -> dict[str, Any]:
+    parsed_row = dict(row)
+    for key in ("input", "output"):
+        value = parsed_row.get(key)
+        if isinstance(value, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed_row[key] = json.loads(value)
+    return parsed_row
 
 
 def _langfuse_response_rows(payload: dict[str, Any], *, label: str) -> list[dict[str, Any]]:
@@ -3099,12 +3158,17 @@ def _langfuse_http_error_body_hint(exc: HTTPError) -> str | None:
     if not body:
         return None
     text = body.decode(errors="replace") if isinstance(body, bytes) else str(body)
+    text = " ".join(text.split())
+    if not text:
+        return None
     if "events_only" in text.lower():
         return (
             "Langfuse returned an events_only hint; this deployment may expose ingestion-only "
             "event APIs instead of trace reads."
         )
-    return None
+    if len(text) > 200:
+        text = f"{text[:197].rstrip()}..."
+    return f"Langfuse response: {text}"
 
 
 def _langfuse_request_endpoint(request: Request) -> str | None:
@@ -3288,6 +3352,11 @@ def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None
         )
     if status_code == 404:
         return "Check the selected Langfuse region or custom base URL."
+    if status_code == 400:
+        return (
+            "Langfuse rejected the request parameters. Check the response body when present "
+            "and check for a Kensa/Langfuse version mismatch."
+        )
     return "Check the selected Langfuse region or retry after Langfuse is healthy."
 
 
