@@ -2834,8 +2834,8 @@ def test_langfuse_error_message_helper_branches() -> None:
     )
     assert (
         cli._langfuse_http_error_next_step(400)
-        == "Langfuse rejected the request parameters; the response above may say which one. "
-        "Check for a Kensa/Langfuse version mismatch."
+        == "Langfuse rejected the request parameters. Check the response body when present "
+        "and check for a Kensa/Langfuse version mismatch."
     )
     assert (
         cli._langfuse_retry_next_step(500)
@@ -4132,6 +4132,52 @@ def test_init_langfuse_existing_env_file_connects_without_judge_key(
     assert "sk-existing" not in captured.out
     assert "pk-existing" not in captured.err
     assert "sk-existing" not in captured.err
+
+
+def test_init_langfuse_existing_env_file_ignores_unsupported_judge_provider(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-existing\n"
+        "LANGFUSE_SECRET_KEY=sk-existing\n"
+        "KENSA_JUDGE_PROVIDER=gemini\n"
+    )
+    keys = iter(["j", "\r", "\r"])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    captured = capsys.readouterr()
+    assert "LLM-as-judge key not found" in captured.out
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
+    assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
+    assert checks[0]["public_key"] == "pk-existing"
+    assert "Unsupported judge provider" not in captured.out
+    assert "Unsupported judge provider" not in captured.err
+
+
+def test_missing_init_judge_envs_checks_dotenv_without_loaded_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text("ANTHROPIC_API_KEY=anthropic-existing\n")
+
+    assert cli._missing_init_judge_envs(dotenv) == ()
 
 
 def test_init_langfuse_existing_env_file_requires_langfuse_secret_key(

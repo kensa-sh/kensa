@@ -1708,7 +1708,7 @@ def _configure_trace_source_connection(
             else f"checked {check.endpoint}"
         )
         _init_item(steps, message)
-    missing_judge = _missing_init_judge_envs()
+    missing_judge = _missing_init_judge_envs(dotenv_path)
     if missing_judge:
         _init_notice(
             steps,
@@ -1912,12 +1912,15 @@ def _missing_init_credential_envs(provider: str, dotenv_path: Path | None) -> tu
     return tuple(name for name in required if not _env_or_dotenv_has_key(name, dotenv_path))
 
 
-def _missing_init_judge_envs() -> tuple[str, ...]:
-    judge_provider = _judge_provider_from_environment()
-    if judge_provider is not None:
-        name = _JUDGE_API_KEY_ENVS[judge_provider]
-        return () if os.environ.get(name) else (name,)
-    return tuple(name for name in _JUDGE_API_KEY_ENVS.values() if not os.environ.get(name))
+def _missing_init_judge_envs(dotenv_path: Path | None) -> tuple[str, ...]:
+    with contextlib.suppress(ValueError):
+        judge_provider = _judge_provider_from_environment()
+        if judge_provider is not None:
+            name = _JUDGE_API_KEY_ENVS[judge_provider]
+            return () if _env_or_dotenv_has_key(name, dotenv_path) else (name,)
+    if any(_env_or_dotenv_has_key(name, dotenv_path) for name in _JUDGE_API_KEY_ENVS.values()):
+        return ()
+    return tuple(_JUDGE_API_KEY_ENVS.values())
 
 
 def _format_missing_init_judge_envs(env_names: tuple[str, ...]) -> str:
@@ -3330,8 +3333,8 @@ def _langfuse_http_error_next_step(status_code: int, *, label: str | None = None
         return "Check the selected Langfuse region or custom base URL."
     if status_code == 400:
         return (
-            "Langfuse rejected the request parameters; the response above may say which one. "
-            "Check for a Kensa/Langfuse version mismatch."
+            "Langfuse rejected the request parameters. Check the response body when present "
+            "and check for a Kensa/Langfuse version mismatch."
         )
     return "Check the selected Langfuse region or retry after Langfuse is healthy."
 
