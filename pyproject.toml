@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kensa"
-version = "0.9.3"
+version = "0.9.4"
 description = "Pytest-native evals harness for agent regression tests"
 readme = "README.md"
 requires-python = ">=3.11"
