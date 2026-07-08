@@ -1399,6 +1399,103 @@ def test_connect_commands_write_metadata_without_secret_values(
     assert langfuse_checks[0]["secret_key"] == "lf-secret-value"
 
 
+def test_connect_langfuse_uses_env_base_url_when_endpoint_is_omitted(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://langfuse.internal.test")
+    langfuse_checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: langfuse_checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert main(["connect", "langfuse"]) == 0
+
+    capsys.readouterr()
+    langfuse = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert langfuse["endpoint"] == "https://langfuse.internal.test"
+    assert langfuse_checks[0]["endpoint"] == "https://langfuse.internal.test"
+
+
+def test_connect_langfuse_uses_configured_dotenv_base_url_when_endpoint_is_omitted(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _clear_init_credential_env(monkeypatch)
+    (tmp_path / "pyproject.toml").write_text('[tool.kensa]\ndotenv = "dev.env"\n')
+    (tmp_path / "dev.env").write_text(
+        "LANGFUSE_PUBLIC_KEY=lf-public-value\n"
+        "LANGFUSE_SECRET_KEY=lf-secret-value\n"
+        "LANGFUSE_BASE_URL=https://langfuse.internal.test\n"
+    )
+    langfuse_checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: langfuse_checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert main(["connect", "langfuse"]) == 0
+
+    capsys.readouterr()
+    langfuse = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
+    assert langfuse["endpoint"] == "https://langfuse.internal.test"
+    assert langfuse_checks[0]["endpoint"] == "https://langfuse.internal.test"
+
+
+def test_connect_langfuse_rejects_non_url_endpoint(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fetch")),
+    )
+
+    assert main(["connect", "langfuse", "--endpoint", "US"]) == 1
+
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "Langfuse endpoint must be an absolute http(s) URL." in combined
+    assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
+
+
+def test_connect_langfuse_rejects_empty_explicit_endpoint_without_fallback(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://langfuse.internal.test")
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fetch")),
+    )
+
+    assert main(["connect", "langfuse", "--endpoint", ""]) == 1
+
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "Langfuse endpoint must be an absolute http(s) URL." in combined
+    assert not (tmp_path / ".kensa" / "connections" / "langfuse.json").exists()
+
+
 def test_connect_langfuse_missing_credentials_does_not_write_metadata(
     tmp_path: Path,
     monkeypatch,
