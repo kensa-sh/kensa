@@ -1459,6 +1459,9 @@ def test_connect_langfuse_accepts_events_only_observations_v2(
     assert "/api/public/traces?" in requests[1].full_url
     assert "/api/public/v2/observations?" in requests[2].full_url
     assert parse_qs(urlparse(requests[3].full_url).query)["traceId"] == ["tr_1"]
+    for request in requests:
+        if "/api/public/v2/observations?" in request.full_url:
+            assert "parseIoAsJson" not in parse_qs(urlparse(request.full_url).query)
     assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
 
 
@@ -2267,7 +2270,7 @@ def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeyp
     }
 
 
-def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None:
+def test_langfuse_observations_v2_import_parses_io_client_side(monkeypatch) -> None:
     requests = []
 
     def fake_urlopen(request, timeout: int):
@@ -2298,6 +2301,20 @@ def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None
                         "input": "raw prompt",
                         "output": json.dumps(["Done"]),
                     },
+                    {
+                        "id": "obs_3",
+                        "traceId": "tr_1",
+                        "type": "SPAN",
+                        "input": {"already": "structured"},
+                        "output": ["done"],
+                    },
+                    {
+                        "id": "obs_4",
+                        "traceId": "tr_1",
+                        "type": "SPAN",
+                        "input": "not json",
+                        "output": json.dumps("plain output"),
+                    },
                 ],
                 "meta": {"cursor": None},
             }
@@ -2319,6 +2336,10 @@ def test_langfuse_observations_v2_import_requests_parsed_io(monkeypatch) -> None
     assert payload["data"][0]["output"] == {"answer": "Done"}
     assert payload["data"][1]["input"] == "raw prompt"
     assert payload["data"][1]["output"] == ["Done"]
+    assert payload["data"][2]["input"] == {"already": "structured"}
+    assert payload["data"][2]["output"] == ["done"]
+    assert payload["data"][3]["input"] == "not json"
+    assert payload["data"][3]["output"] == json.dumps("plain output")
     assert parse_qs(urlparse(requests[0].full_url).query) == {
         "limit": ["1"],
         "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
@@ -2751,14 +2772,20 @@ def test_langfuse_non_retryable_http_errors_are_user_friendly(monkeypatch) -> No
     assert "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY" in message
 
 
-def test_langfuse_400_reports_response_body_and_parameter_next_step(monkeypatch) -> None:
+def test_langfuse_400_includes_response_hint_and_request_parameter_next_step(
+    monkeypatch,
+) -> None:
     body = json.dumps(
         {
-            "error": "Bad Request",
-            "message": (
-                '[{"code":"unrecognized_keys","keys":["parseIoAsJson"],'
-                '"message":"Unrecognized key(s) in object: parseIoAsJson"}]'
-            ),
+            "message": "Invalid request",
+            "error": [
+                {
+                    "code": "unrecognized_keys",
+                    "keys": ["parseIoAsJson"],
+                    "path": [],
+                    "message": "Unrecognized key(s) in object",
+                }
+            ],
         }
     )
     monkeypatch.setattr(
@@ -2769,15 +2796,17 @@ def test_langfuse_400_reports_response_body_and_parameter_next_step(monkeypatch)
 
     with pytest.raises(ValueError, match="Langfuse returned HTTP 400") as exc_info:
         cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com/api/public/v2/observations?traceId=tr_1"),
+            cli.Request("https://langfuse.example.com/api/public/v2/observations"),
             label="observations",
         )
 
     message = str(exc_info.value)
     assert "Langfuse response:" in message
+    assert "unrecognized_keys" in message
     assert "parseIoAsJson" in message
-    assert "Langfuse rejected the request parameters" in message
-    assert "Kensa/Langfuse version mismatch" in message
+    assert "Langfuse rejected request parameters" in message
+    assert "file an issue with the response hint" in message
+    assert "selected Langfuse region or retry after Langfuse is healthy" not in message
 
 
 def test_langfuse_trace_404_reports_import_readiness_message(monkeypatch) -> None:
@@ -2819,14 +2848,26 @@ def test_langfuse_error_message_helper_branches() -> None:
         cli._langfuse_http_error_body_hint(_http_error(404, body="plain error"))
         == "Langfuse response: plain error"
     )
+    assert cli._langfuse_http_error_body_hint(_http_error(500, body="plain error")) is None
     assert cli._langfuse_http_error_body_hint(_http_error(400, body=" \n\t ")) is None
-    assert cli._langfuse_http_error_body_hint(_http_error(400, body="x" * 205)) == (
-        f"Langfuse response: {'x' * 197}..."
+    assert cli._langfuse_response_body_hint(" \n\t ") is None
+    escaped_hint = cli._langfuse_response_body_hint("\x1b[31mbad\x1b[0m \x07ok")
+    assert escaped_hint is not None
+    assert "\x1b" not in escaped_hint
+    assert "\x07" not in escaped_hint
+    assert "bad" in escaped_hint
+    assert "ok" in escaped_hint
+    long_hint = cli._langfuse_response_body_hint("x" * (cli._LANGFUSE_RESPONSE_HINT_MAX_CHARS + 1))
+    assert long_hint is not None
+    assert long_hint.endswith("...")
+    assert (
+        len(long_hint.removeprefix("Langfuse response: ")) == cli._LANGFUSE_RESPONSE_HINT_MAX_CHARS
     )
     assert cli._langfuse_http_error_reason(403) == "denied access"
     assert cli._langfuse_http_error_reason(404) == "could not find the requested endpoint"
     assert cli._langfuse_http_error_reason(429) == "rate limited Kensa"
     assert cli._langfuse_http_error_reason(500) == "returned HTTP 500"
+    assert "request parameters" in cli._langfuse_http_error_next_step(400)
     assert (
         cli._langfuse_http_error_next_step(404)
         == "Check the selected Langfuse region or custom base URL."
@@ -2838,8 +2879,8 @@ def test_langfuse_error_message_helper_branches() -> None:
     )
     assert (
         cli._langfuse_http_error_next_step(400)
-        == "Langfuse rejected the request parameters. Check the response body when present "
-        "and check for a Kensa/Langfuse version mismatch."
+        == "Kensa reached Langfuse, but Langfuse rejected request parameters. "
+        "Upgrade Kensa if this persists, or file an issue with the response hint."
     )
     assert (
         cli._langfuse_retry_next_step(500)
@@ -3804,14 +3845,51 @@ def test_init_langfuse_credentials_create_warns_for_unsupported_judge_provider(
     assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
 
     output = capsys.readouterr().out
+    normalized = " ".join(output.split())
     dotenv = (tmp_path / ".env.local").read_text()
     assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in output
-    assert "Set KENSA_JUDGE_PROVIDER" in output
-    assert "openai" in output
-    assert "anthropic" in output
+    assert "built-in judge supports openai and anthropic" in normalized
+    assert "set_judge_provider()" in normalized
     assert "KENSA_JUDGE_PROVIDER='openai'" in dotenv
     assert "OPENAI_API_KEY='openai-test'" in dotenv
     assert checks[0]["public_key"] == "pk-test"
+
+
+def test_init_langfuse_credentials_create_can_skip_judge_key(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    keys = iter(["\r", "\r", "\r"])
+    prompts = iter(["pk-test", "sk-test", ""])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    output = capsys.readouterr().out
+    dotenv = tmp_path / ".env.local"
+    dotenv_text = dotenv.read_text()
+    assert "LANGFUSE_PUBLIC_KEY='pk-test'" in dotenv_text
+    assert "LANGFUSE_SECRET_KEY='sk-test'" in dotenv_text
+    assert "OPENAI_API_KEY" not in dotenv_text
+    assert "KENSA_JUDGE_PROVIDER" not in dotenv_text
+    assert "KENSA_JUDGE_MODEL" not in dotenv_text
+    assert checks[0]["public_key"] == "pk-test"
+    assert "LLM-as-judge key not found" in output
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in output
+    assert "pk-test" not in output
+    assert "sk-test" not in output
 
 
 def test_init_langfuse_credentials_can_create_anthropic_judge_config(
@@ -4200,10 +4278,10 @@ def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider(
     assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
 
     captured = capsys.readouterr()
+    normalized = " ".join(captured.out.split())
     assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in captured.out
-    assert "Set KENSA_JUDGE_PROVIDER" in captured.out
-    assert "openai" in captured.out
-    assert "anthropic" in captured.out
+    assert "built-in judge supports openai and anthropic" in normalized
+    assert "set_judge_provider()" in normalized
     assert "LLM-as-judge key not found" not in captured.out
     assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" not in captured.out
     assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
@@ -4238,7 +4316,10 @@ def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider_wi
     assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
 
     captured = capsys.readouterr()
+    normalized = " ".join(captured.out.split())
     assert "Unsupported KENSA_JUDGE_PROVIDER: gemini" in captured.out
+    assert "built-in judge supports openai and anthropic" in normalized
+    assert "set_judge_provider()" in normalized
     assert "LLM-as-judge key not found" in captured.out
     assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
     assert "saved metadata: .kensa/connections/langfuse.json" in captured.out
@@ -4271,6 +4352,11 @@ def test_init_langfuse_existing_env_file_requires_langfuse_secret_key(
     dotenv.write_text("LANGFUSE_PUBLIC_KEY=pk-existing\n")
     keys = iter(["j", "\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    monkeypatch.setattr(
+        cli,
+        "_connect_provider",
+        lambda args: (_ for _ in ()).throw(AssertionError("unexpected connection check")),
+    )
 
     assert cli._configure_trace_source_connection(None, "langfuse") == "failed"
 
@@ -4280,6 +4366,100 @@ def test_init_langfuse_existing_env_file_requires_langfuse_secret_key(
     assert "OPENAI_API_KEY" not in captured.err
     assert "pk-existing" not in captured.out
     assert "pk-existing" not in captured.err
+
+
+def test_init_langfuse_existing_env_file_warns_for_unrecognized_judge_model(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-existing\n"
+        "LANGFUSE_SECRET_KEY=sk-existing\n"
+        "KENSA_JUDGE_MODEL=custom-model\n"
+    )
+    keys = iter(["j", "\r", "\r"])
+    checks: list[dict[str, Any]] = []
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    captured = capsys.readouterr()
+    normalized = " ".join(captured.out.split())
+    assert "Judge model configured (custom-model)" in captured.out
+    assert "could not infer a built-in judge provider" in normalized
+    assert "KENSA_JUDGE_PROVIDER" in normalized
+    assert "set_judge_provider()" in normalized
+    assert "LLM-as-judge key not found" in captured.out
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" in captured.out
+    assert checks[0]["public_key"] == "pk-existing"
+    assert "pk-existing" not in captured.out
+    assert "sk-existing" not in captured.out
+
+
+def test_init_langfuse_explicit_judge_provider_wins_over_unrecognized_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _clear_init_credential_env(monkeypatch)
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "openai")
+    monkeypatch.setenv("KENSA_JUDGE_MODEL", "o3-mini")
+
+    assert cli._missing_init_judge_envs(tmp_path / ".env.local") == ("OPENAI_API_KEY",)
+
+
+def test_init_langfuse_invalid_judge_provider_wins_over_unrecognized_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _clear_init_credential_env(monkeypatch)
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "gemini")
+    monkeypatch.setenv("KENSA_JUDGE_MODEL", "custom-model")
+
+    with pytest.raises(ValueError, match="Unsupported KENSA_JUDGE_PROVIDER: gemini"):
+        cli._missing_init_judge_envs(tmp_path / ".env.local")
+
+
+def test_init_langfuse_existing_env_file_skips_judge_notice_for_local_result(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    _clear_init_credential_env(monkeypatch)
+    dotenv = tmp_path / "dev.env"
+    dotenv.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-existing\n"
+        "LANGFUSE_SECRET_KEY=sk-existing\n"
+        "KENSA_JUDGE_RESULT=pass\n"
+    )
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    keys = iter(["j", "\r", "\r"])
+    monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
+    _stub_langfuse_auth_check(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_fetch_langfuse_connected_export",
+        lambda **kwargs: {"data": [], "meta": {"cursor": None}},
+    )
+
+    assert cli._configure_trace_source_connection(None, "langfuse") == "ready"
+
+    combined = "\n".join(capsys.readouterr())
+    assert "LLM-as-judge key not found" not in combined
+    assert "OPENAI_API_KEY or ANTHROPIC_API_KEY" not in combined
+    assert cli._missing_any_init_judge_envs(dotenv) == ()
 
 
 def test_init_provider_credentials_can_be_configured_later(
@@ -4299,6 +4479,7 @@ def test_init_provider_credentials_can_be_configured_later(
     assert "Credentials not configured" in output
     assert "LANGFUSE_PUBLIC_KEY" in output
     assert "LANGFUSE_SECRET_KEY" in output
+    assert "LLM provider key" not in output
     assert not (tmp_path / ".env.local").exists()
 
 
@@ -4420,10 +4601,13 @@ def test_init_credential_helper_branches(
     assert cli._judge_provider_for_model("claude-sonnet-4-6") == "anthropic"
     assert cli._judge_provider_for_model("custom") is None
 
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    assert cli._judge_provider_from_environment() == "openai"
+    monkeypatch.delenv("OPENAI_API_KEY")
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "anthropic")
     assert cli._judge_provider_from_environment() == "anthropic"
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "bogus")
-    with pytest.raises(ValueError, match="Unsupported KENSA_JUDGE_PROVIDER"):
+    with pytest.raises(ValueError, match="built-in judge supports openai"):
         cli._judge_provider_from_environment()
     monkeypatch.delenv("KENSA_JUDGE_PROVIDER")
     monkeypatch.setenv("KENSA_JUDGE_MODEL", "claude-sonnet-4-6")
