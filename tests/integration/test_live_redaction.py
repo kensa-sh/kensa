@@ -63,7 +63,7 @@ def test_live_sm_readiness_and_redaction_pass(
             {
                 "id": "tr_live",
                 "trace_url": (
-                    "https://trace.example.com/%41KIAIOSFODNN7EXAMPLE/"
+                    "https://10.0.0.1/%41KIAIOSFODNN7EXAMPLE/"
                     "eyJhbGciOiJIUzI1NiJ9%2EeyJzdWIiOiIxIn0%2Esig-part/"
                     "alice.smith%40example.com"
                 ),
@@ -110,6 +110,7 @@ def test_live_sm_readiness_and_redaction_pass(
     assert "AKIAIOSFODNN7EXAMPLE" not in rendered
     assert "%41KIAIOSFODNN7EXAMPLE" not in rendered
     assert "%2EeyJzdWIiOiIxIn0%2E" not in rendered
+    assert "10.0.0.1" not in rendered
     assert "alice.smith@example.com" not in rendered
     assert "01/02/1990" not in rendered
     manifest = result.redaction

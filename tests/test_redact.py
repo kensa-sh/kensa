@@ -523,6 +523,51 @@ def test_redactor_freeform_keys_use_full_detector_suite(
     assert redacted["Alice Smith"] == "schema key"
 
 
+def test_redactor_preserves_normalized_key_collisions(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = ["Alice", "alice"]
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value(
+        {"attributes": {"Alice": 1, "[REDACTED_KEY_1]": "literal", "alice": 2}}
+    )
+
+    assert redacted["attributes"] == {
+        "[PERSON_1]": 1,
+        "[REDACTED_KEY_1]": "literal",
+        "[REDACTED_KEY_2]": 2,
+    }
+
+
+def test_redactor_preserves_generic_redacted_key_collisions(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = []
+    redaction_ready.extra_results = [
+        FakeRecognizerResult("MYSTERY_LABEL", 0, 4, 0.9, "CustomRecognizer")
+    ]
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value({"attributes": {"abcd": 1, "wxyz": 2}})
+
+    assert redacted["attributes"] == {"[REDACTED]": 1, "[REDACTED_KEY_1]": 2}
+
+
+def test_redactor_preserves_literal_placeholder_key_collisions(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = ["Alice"]
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value({"attributes": {"Alice": "detected", "[PERSON_1]": "literal"}})
+
+    assert redacted["attributes"] == {
+        "[PERSON_1]": "detected",
+        "[REDACTED_KEY_1]": "literal",
+    }
+
+
 def test_redactor_scalar_type_preservation(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
@@ -648,7 +693,7 @@ def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
     assert redacted["source"]["trace_url"] == "https://trace.example.com/safe%20segment"
 
 
-def test_redactor_locator_preserves_ipv6_brackets(
+def test_redactor_locator_redacts_ipv6_hosts(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redactor = Redactor(environment="local")
@@ -657,7 +702,27 @@ def test_redactor_locator_preserves_ipv6_brackets(
         {"source": {"source_url": "https://[2001:db8::1]/alice@example.com"}}
     )
 
-    assert redacted["source"]["source_url"] == ("https://[2001:db8::1]/[EMAIL_ADDRESS_1]")
+    assert redacted["source"]["source_url"] == ("https://[IP_ADDRESS_1]/[EMAIL_ADDRESS_1]")
+
+
+def test_redactor_locator_scans_hostname_labels(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = ["Alice"]
+    redaction_ready.secret_markers = ["AKIAV7EXAMPLEKEY"]
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value(
+        {
+            "source": {
+                "source_url": "https://Alice.example.com/path",
+                "trace_url": "https://AKIAV7EXAMPLEKEY.example.com/path",
+            }
+        }
+    )
+
+    assert redacted["source"]["source_url"] == "https://[PERSON_1].example.com/path"
+    assert redacted["source"]["trace_url"] == "https://[SECRET_1].example.com/path"
 
 
 def test_redactor_unknown_entity_and_conflicts_render_redacted(

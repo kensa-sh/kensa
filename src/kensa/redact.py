@@ -37,6 +37,7 @@ REDACTION_READINESS_SCHEMA_VERSION = "kensa.redaction_readiness.v1"
 REDACTION_READINESS_PATH = Path(".kensa") / "redaction.json"
 REDACTION_EXTRA_MODULES = ("spacy", "presidio_analyzer", "detect_secrets", "phonenumbers")
 REDACTED_PLACEHOLDER = "[REDACTED]"
+_REDACTED_KEY_PREFIX = "REDACTED_KEY"
 PSEUDONYMIZATION_SCHEME = "instance-counter"
 LANGUAGE = "en"
 _MODELS_DIR_ENV = "KENSA_MODELS_DIR"
@@ -744,7 +745,9 @@ _RULESET = {
     "deterministic_recognizers": list(_DETERMINISTIC_RECOGNIZER_NAMES),
     "freeform_containers": sorted(_FREEFORM_CONTAINERS),
     "freeform_key_detection": "full-value-suite",
+    "freeform_key_collision_policy": "opaque-counter",
     "language": LANGUAGE,
+    "locator_hostname_detection": "ip-or-label-full-value-suite",
     "locator_url_path_percent_decoding": "utf-8-replace",
     "phone_regions": list(_PHONE_REGIONS),
     "presidio_recognizers": list(_PRESIDIO_RECOGNIZER_NAMES),
@@ -768,8 +771,18 @@ _RULESET = {
 RULESET_HASH = hashlib.sha256(json.dumps(_RULESET, sort_keys=True).encode()).hexdigest()
 
 
-def _safe_url_netloc(parsed: SplitResult) -> str:
-    host = parsed.hostname or ""
+def _raw_url_host(parsed: SplitResult) -> str:
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        closing = authority.find("]")
+        return authority[1:closing] if closing >= 0 else authority[1:]
+    host, separator, _port = authority.rpartition(":")
+    return host if separator else authority
+
+
+def _safe_url_netloc(parsed: SplitResult, *, host: str | None = None) -> str:
+    rendered_host = _raw_url_host(parsed) if host is None else host
+    host = rendered_host
     if ":" in host:
         host = f"[{host}]"
     try:
@@ -1047,14 +1060,37 @@ class Redactor:
         for key, item in value.items():
             text_key = str(key)
             rendered_key = self._render_key(text_key, rewritable=rewritable)
+            storage_key = self._unique_dict_key(
+                original=text_key,
+                rendered=rendered_key,
+                existing=redacted,
+            )
             if _SECRET_KEY.search(text_key):
                 self._secret_keys_redacted = True
                 self._span_count += 1
                 self._changed_value_count += 1
-                redacted[rendered_key] = self._secret_value_alias(item)
+                redacted[storage_key] = self._secret_value_alias(item)
                 continue
-            redacted[rendered_key] = self.redact_value(item, path=(*path, text_key))
+            redacted[storage_key] = self.redact_value(item, path=(*path, text_key))
         return redacted
+
+    def _unique_dict_key(
+        self,
+        *,
+        original: str,
+        rendered: str,
+        existing: dict[str, Any],
+    ) -> str:
+        if rendered not in existing:
+            return rendered
+        index = 1
+        collision_key = f"[{_REDACTED_KEY_PREFIX}_{index}]"
+        while collision_key in existing:
+            index += 1
+            collision_key = f"[{_REDACTED_KEY_PREFIX}_{index}]"
+        if original == rendered:
+            self._changed_value_count += 1
+        return collision_key
 
     def _render_key(self, key: str, *, rewritable: bool) -> str:
         # Schema keys are identifiers and stay unchanged. Keys inside free-form
@@ -1109,13 +1145,29 @@ class Redactor:
     def _redact_locator(self, value: str) -> tuple[str, int]:
         parsed = urlsplit(value)
         if parsed.scheme and parsed.netloc:
-            # The host is intentional provenance. Userinfo, query, and fragment are
-            # dropped, while path segments are decoded for scanning before storage.
-            path, span_count = self._redact_path(parsed.path, decode_percent=True)
+            hostname, hostname_span_count = self._redact_hostname(_raw_url_host(parsed))
+            path, path_span_count = self._redact_path(parsed.path, decode_percent=True)
             return urlunsplit(
-                (parsed.scheme, _safe_url_netloc(parsed), path, "", ""),
-            ), span_count
+                (parsed.scheme, _safe_url_netloc(parsed, host=hostname), path, "", ""),
+            ), hostname_span_count + path_span_count
         return self._redact_path(value)
+
+    def _redact_hostname(self, hostname: str) -> tuple[str, int]:
+        try:
+            ipaddress.ip_address(hostname.split("%", 1)[0])
+        except ValueError:
+            pass
+        else:
+            return self._alias(str(EntityType.IP_ADDRESS), hostname), 1
+
+        labels = hostname.split(".")
+        redacted_labels: list[str] = []
+        span_count = 0
+        for label in labels:
+            redacted, count = self._redact_text(label, timing_exempt=False)
+            redacted_labels.append(label if count == 0 else redacted)
+            span_count += count
+        return ".".join(redacted_labels), span_count
 
     def _redact_path(self, value: str, *, decode_percent: bool = False) -> tuple[str, int]:
         parts = re.split(r"([/\\])", value)
