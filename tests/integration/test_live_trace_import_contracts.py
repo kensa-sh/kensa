@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request
 
 import pytest
+from langfuse import Langfuse
 
 from kensa import cli
 from kensa import traces as traces_module
+from kensa.providers import langfuse as langfuse_provider
 
 pytestmark = pytest.mark.live
 
@@ -78,11 +77,6 @@ def _payload_size(payload: dict[str, Any]) -> int:
     return max(1, len(json.dumps(payload, sort_keys=True).encode()))
 
 
-def _query(values: dict[str, Any]) -> str:
-    query = urlencode({key: value for key, value in values.items() if value is not None})
-    return f"?{query}" if query else ""
-
-
 def _assert_data_envelope(payload: dict[str, Any], *, provider: str) -> list[Any]:
     data = payload.get("data")
     assert isinstance(data, list), f"{provider} live response must include a data list"
@@ -139,22 +133,25 @@ def _import_live_payload(
 
 
 def test_live_langfuse_observations_endpoint_returns_official_envelope() -> None:
-    endpoint = _required_env("LANGFUSE_BASE_URL").rstrip("/")
+    endpoint = _required_env("LANGFUSE_BASE_URL")
     public_key = _required_env("LANGFUSE_PUBLIC_KEY")
     secret_key = _required_env("LANGFUSE_SECRET_KEY")
-    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-    query = _query(
-        {
-            "limit": 1,
-            "fromStartTime": cli._provider_start_time(_live_since("langfuse")),
-        }
+    since_filter = langfuse_provider._provider_since_filter(_live_since("langfuse"))
+    client = Langfuse(
+        base_url=endpoint.rstrip("/"),
+        public_key=public_key,
+        secret_key=secret_key,
+        tracing_enabled=False,
+        timeout=30,
     )
-    payload = cli._read_json_response(
-        Request(
-            f"{endpoint}/api/public/v2/observations{query}",
-            headers={"Authorization": f"Basic {token}"},
-        )
+    response = client.api.observations.get_many(
+        limit=1,
+        from_start_time=since_filter.parsed,
+        request_options=langfuse_provider._request_options(
+            langfuse_provider._observations_since_query(since_filter)
+        ),
     )
+    payload = langfuse_provider.sdk_to_plain(response)
 
     _assert_data_envelope(payload, provider="langfuse")
     assert isinstance(payload.get("meta"), dict)
@@ -162,26 +159,27 @@ def test_live_langfuse_observations_endpoint_returns_official_envelope() -> None
     assert cursor is None or isinstance(cursor, str)
 
 
-def test_live_langfuse_traces_endpoint_returns_official_envelope() -> None:
-    endpoint = _required_env("LANGFUSE_BASE_URL").rstrip("/")
+def test_live_langfuse_legacy_mode_still_works_where_trace_endpoint_exists() -> None:
+    endpoint = _required_env("LANGFUSE_BASE_URL")
     public_key = _required_env("LANGFUSE_PUBLIC_KEY")
     secret_key = _required_env("LANGFUSE_SECRET_KEY")
-    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-    query = _query(
-        {
-            "page": 1,
-            "limit": 1,
-            "fromTimestamp": cli._provider_start_time(_live_since("langfuse")),
-        }
-    )
-    payload = cli._read_json_response(
-        Request(
-            f"{endpoint}/api/public/traces{query}",
-            headers={"Authorization": f"Basic {token}"},
+    try:
+        payload = langfuse_provider.fetch_langfuse_connected_export(
+            endpoint=endpoint,
+            public_key=public_key,
+            secret_key=secret_key,
+            since=_live_since("langfuse"),
+            limit=_live_limit(),
+            import_mode="legacy_traces",
         )
-    )
+    except langfuse_provider.LangfuseProviderError as exc:
+        if exc.label == "traces" and exc.status_code == 404:
+            pytest.skip("Langfuse trace endpoint is unavailable for this deployment")
+        raise
 
-    rows = _assert_data_envelope(payload, provider="langfuse")
+    rows = payload.get("traces")
+    assert isinstance(rows, list), "langfuse live legacy import must include trace records"
+    _assert_non_empty_data(payload, provider="langfuse")
     assert isinstance(payload.get("meta"), dict)
     for row in rows:
         assert isinstance(row, dict)
@@ -194,13 +192,40 @@ def test_live_langfuse_connected_import_writes_non_empty_records(tmp_path: Path)
     secret_key = _required_env("LANGFUSE_SECRET_KEY")
     since = _live_since("langfuse")
 
-    payload = cli._fetch_langfuse_connected_export(
+    payload = langfuse_provider.fetch_langfuse_connected_export(
         endpoint=endpoint,
-        project=None,
         since=since,
         limit=_live_limit(),
         public_key=public_key,
         secret_key=secret_key,
+    )
+
+    _assert_non_empty_data(payload, provider="langfuse")
+    _import_live_payload(
+        provider="langfuse",
+        payload=payload,
+        endpoint=endpoint,
+        project=None,
+        since=since,
+        tmp_path=tmp_path,
+    )
+
+
+def test_live_langfuse_observations_only_import_writes_non_empty_records(
+    tmp_path: Path,
+) -> None:
+    endpoint = _required_env("LANGFUSE_BASE_URL")
+    public_key = _required_env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _required_env("LANGFUSE_SECRET_KEY")
+    since = _live_since("langfuse")
+
+    payload = langfuse_provider.fetch_langfuse_connected_export(
+        endpoint=endpoint,
+        public_key=public_key,
+        secret_key=secret_key,
+        since=since,
+        limit=_live_limit(),
+        import_mode="observations_v2",
     )
 
     _assert_non_empty_data(payload, provider="langfuse")

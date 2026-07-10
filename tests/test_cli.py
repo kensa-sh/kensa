@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import ast
-import io
 import json
 import os
-import socket
-import ssl
 import subprocess
 import sys
 import tomllib
-from datetime import datetime
+import types
 from importlib.resources import files as resource_files
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
 
 import click
 import pytest
@@ -32,22 +27,92 @@ REPO_ROOT = PROJECT_ROOT
 PACKAGED_SKILLS = ("kensa-evals", "kensa-setup", "kensa-inspect", "kensa-generate")
 
 
+class _FakeLangfuseProviderError(ValueError):
+    def __init__(self, message: str, *, label: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.label = label
+        self.status_code = status_code
+
+
 def _read_settings(root: Path) -> dict[str, Any]:
     return json.loads((root / ".kensa" / "settings.json").read_text())
 
 
-def _http_error(
-    code: int,
-    headers: dict[str, str] | None = None,
-    body: str | None = None,
-) -> HTTPError:
-    return HTTPError(
-        "https://langfuse.example.com",
-        code,
-        "status",
-        cast(Any, headers or {}),
-        io.BytesIO(body.encode()) if body is not None else None,
+def test_cli_import_does_not_load_langfuse_sdk() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import kensa.cli; "
+                "print('kensa.providers.langfuse' in sys.modules); "
+                "print('langfuse' in sys.modules)"
+            ),
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     )
+
+    assert result.stdout.splitlines() == ["False", "False"]
+
+
+def test_lazy_langfuse_wrappers_delegate_to_provider_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_provider = types.ModuleType("kensa.providers.langfuse")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_check(**kwargs: Any) -> None:
+        calls.append(("check", kwargs))
+
+    def fake_fetch(**kwargs: Any) -> dict[str, Any]:
+        calls.append(("fetch", kwargs))
+        return {"data": [], "meta": {}}
+
+    fake_provider_any = cast(Any, fake_provider)
+    fake_provider_any.check_langfuse_connection = fake_check
+    fake_provider_any.fetch_langfuse_connected_export = fake_fetch
+    monkeypatch.setitem(sys.modules, "kensa.providers.langfuse", fake_provider)
+
+    cli.check_langfuse_connection(
+        endpoint="https://langfuse.example.com",
+        public_key="public",
+        secret_key="secret",
+    )
+    payload = cli.fetch_langfuse_connected_export(
+        endpoint="https://langfuse.example.com",
+        public_key="public",
+        secret_key="secret",
+        since="7d",
+        limit=5,
+        import_mode="observations_v2",
+    )
+
+    assert payload == {"data": [], "meta": {}}
+    assert calls == [
+        (
+            "check",
+            {
+                "endpoint": "https://langfuse.example.com",
+                "public_key": "public",
+                "secret_key": "secret",
+            },
+        ),
+        (
+            "fetch",
+            {
+                "endpoint": "https://langfuse.example.com",
+                "public_key": "public",
+                "secret_key": "secret",
+                "since": "7d",
+                "limit": 5,
+                "import_mode": "observations_v2",
+            },
+        ),
+    ]
 
 
 def _clear_init_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,21 +139,7 @@ def _stub_langfuse_auth_check(
         if calls is not None:
             calls.append(kwargs)
 
-    monkeypatch.setattr(cli, "_check_langfuse_api_auth", fake_auth_check)
-
-
-class _JsonResponse:
-    def __init__(self, payload: Any) -> None:
-        self.payload = payload
-
-    def __enter__(self) -> _JsonResponse:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode()
+    monkeypatch.setattr(cli, "check_langfuse_connection", fake_auth_check)
 
 
 def _write_persistent_smoke(eval_dir: Path, source: str | None = None) -> None:
@@ -1383,7 +1434,7 @@ def test_connect_commands_write_metadata_without_secret_values(
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: langfuse_checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -1425,43 +1476,27 @@ def test_connect_langfuse_accepts_events_only_observations_v2(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "lf-public-value")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
-    requests = []
-    responses = iter(
-        [
-            {"data": [], "meta": {}},
-            {
+    _stub_langfuse_auth_check(monkeypatch)
+    fetches: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli,
+        "fetch_langfuse_connected_export",
+        lambda **kwargs: (
+            fetches.append(kwargs)
+            or {
                 "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": None},
-            },
-            {
-                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": None},
-            },
-        ]
+                "meta": {},
+            }
+        ),
     )
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        if "/api/public/traces?" in request.full_url:
-            raise _http_error(404)
-        return _JsonResponse(next(responses))
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
 
     assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 0
 
     capsys.readouterr()
     langfuse = json.loads((tmp_path / ".kensa" / "connections" / "langfuse.json").read_text())
     assert langfuse["endpoint"] == "https://langfuse.example.com"
-    assert len(requests) == 4
-    assert requests[0].full_url.endswith("/api/public/projects")
-    assert "/api/public/traces?" in requests[1].full_url
-    assert "/api/public/v2/observations?" in requests[2].full_url
-    assert parse_qs(urlparse(requests[3].full_url).query)["traceId"] == ["tr_1"]
-    for request in requests:
-        if "/api/public/v2/observations?" in request.full_url:
-            assert "parseIoAsJson" not in parse_qs(urlparse(request.full_url).query)
+    assert fetches[0]["limit"] == 1
+    assert "import_mode" not in fetches[0]
     assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
 
 
@@ -1478,7 +1513,7 @@ def test_connect_langfuse_uses_env_base_url_when_endpoint_is_omitted(
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: langfuse_checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -1507,7 +1542,7 @@ def test_connect_langfuse_uses_configured_dotenv_base_url_when_endpoint_is_omitt
     langfuse_checks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: langfuse_checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -1529,7 +1564,7 @@ def test_connect_langfuse_rejects_non_url_endpoint(
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fetch")),
     )
 
@@ -1552,7 +1587,7 @@ def test_connect_langfuse_rejects_empty_explicit_endpoint_without_fallback(
     monkeypatch.setenv("LANGFUSE_BASE_URL", "https://langfuse.internal.test")
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fetch")),
     )
 
@@ -1615,8 +1650,8 @@ def test_connect_langfuse_checks_auth_before_trace_read(
         calls.append(f"trace:{kwargs['endpoint']}")
         return {"data": [], "meta": {"cursor": None}}
 
-    monkeypatch.setattr(cli, "_check_langfuse_api_auth", fake_auth_check)
-    monkeypatch.setattr(cli, "_fetch_langfuse_connected_export", fake_fetch)
+    monkeypatch.setattr(cli, "check_langfuse_connection", fake_auth_check)
+    monkeypatch.setattr(cli, "fetch_langfuse_connected_export", fake_fetch)
 
     assert main(["connect", "langfuse", "--endpoint", "https://langfuse.example.com"]) == 0
 
@@ -1637,12 +1672,12 @@ def test_connect_langfuse_auth_check_failure_does_not_write_metadata(
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
     monkeypatch.setattr(
         cli,
-        "_check_langfuse_api_auth",
+        "check_langfuse_connection",
         lambda **kwargs: (_ for _ in ()).throw(ValueError("auth check failed")),
     )
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
     )
 
@@ -1664,14 +1699,14 @@ def test_connect_langfuse_auth_request_failure_reports_partial_checks(
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "lf-secret-value")
     monkeypatch.setattr(
         cli,
-        "_check_langfuse_api_auth",
+        "check_langfuse_connection",
         lambda **kwargs: (_ for _ in ()).throw(
-            cli._LangfuseRequestError("credentials rejected", label="projects", status_code=401)
+            _FakeLangfuseProviderError("credentials rejected", label="projects", status_code=401)
         ),
     )
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
     )
 
@@ -1702,7 +1737,7 @@ def test_connect_langfuse_trace_read_failure_after_auth_does_not_write_metadata(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(ValueError("trace read failed")),
     )
 
@@ -1725,12 +1760,12 @@ def test_connect_langfuse_configure_only_skips_checks_and_writes_metadata(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         cli,
-        "_check_langfuse_api_auth",
+        "check_langfuse_connection",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected auth check")),
     )
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected trace read")),
     )
 
@@ -1763,7 +1798,7 @@ def test_connect_langfuse_json_reports_check_status_on_success(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: {"data": [], "meta": {"cursor": None}},
     )
 
@@ -1806,7 +1841,7 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
             "meta": {"cursor": None},
         }
 
-    monkeypatch.setattr(cli, "_fetch_langfuse_connected_export", fake_fetch)
+    monkeypatch.setattr(cli, "fetch_langfuse_connected_export", fake_fetch)
 
     assert (
         main(
@@ -1834,7 +1869,6 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     assert calls == [
         {
             "endpoint": "https://langfuse.example.com",
-            "project": "prod",
             "since": "7d",
             "limit": 50,
             "public_key": "lf-public-value",
@@ -1869,7 +1903,6 @@ def test_new_cli_helper_edge_paths(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert isinstance(cli._unix_timestamp(), int)
-    assert cli._query({"empty": None}) == ""
     with pytest.raises(ValueError, match="--redact"):
         cli._redaction_mode("bad")
     with pytest.raises(ValueError, match="unsupported connection provider"):
@@ -1980,7 +2013,6 @@ def test_new_cli_helper_edge_paths(
         cli._connected_langfuse_payload(
             {"auth": {"public_key_env": "MISSING_PUBLIC", "secret_key_env": "MISSING_SECRET"}},
             endpoint="https://langfuse.example.com",
-            project=None,
             since=None,
             limit=1,
         )
@@ -1989,181 +2021,6 @@ def test_new_cli_helper_edge_paths(
             SimpleNamespace(provider="bad"),
             {"provider": "bad", "endpoint": "https://example.com"},
         )
-
-    auth_requests: list[Any] = []
-
-    def fake_auth_urlopen(request, timeout: int):
-        del timeout
-        auth_requests.append(request)
-        return _JsonResponse({"data": [], "meta": {}})
-
-    monkeypatch.setattr(cli, "urlopen", fake_auth_urlopen)
-    cli._check_langfuse_api_auth(
-        endpoint="https://langfuse.example.com",
-        public_key="public",
-        secret_key="secret",
-    )
-    assert auth_requests[0].full_url == "https://langfuse.example.com/api/public/projects"
-    assert auth_requests[0].headers["Authorization"].startswith("Basic ")
-
-    requests: list[Any] = []
-    responses = iter(
-        [
-            {
-                "data": [{"id": "tr_1", "name": "first"}],
-                "meta": {"page": 1, "limit": 2, "totalItems": 2, "totalPages": 2},
-            },
-            {
-                "data": [{"traceId": "tr_2", "name": "second"}],
-                "meta": {"page": 2, "limit": 2, "totalItems": 2, "totalPages": 2},
-            },
-            {
-                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": "next-observation"},
-            },
-            {
-                "data": [{"id": "obs_2", "traceId": "tr_1", "type": "GENERATION"}],
-                "meta": {"cursor": None},
-            },
-            {
-                "data": [{"id": "obs_3", "traceId": "tr_2", "type": "SPAN"}],
-                "meta": {"cursor": None},
-            },
-        ]
-    )
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        return _JsonResponse(next(responses))
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    assert cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project="prod",
-        since="2026-06-01T00:00:00Z",
-        limit=2,
-        public_key="public",
-        secret_key="secret",
-        import_mode="legacy_traces",
-    ) == {
-        "traces": [{"id": "tr_1", "name": "first"}, {"traceId": "tr_2", "name": "second"}],
-        "observations": [
-            {"id": "obs_1", "traceId": "tr_1", "type": "SPAN"},
-            {"id": "obs_2", "traceId": "tr_1", "type": "GENERATION"},
-            {"id": "obs_3", "traceId": "tr_2", "type": "SPAN"},
-        ],
-        "meta": {"page": 2, "limit": 2, "totalItems": 2, "totalPages": 2},
-    }
-    assert requests[0].full_url.endswith(
-        "/api/public/traces?page=1&limit=2&fromTimestamp=2026-06-01T00%3A00%3A00Z"
-    )
-    assert requests[1].full_url.endswith(
-        "/api/public/traces?page=2&limit=2&fromTimestamp=2026-06-01T00%3A00%3A00Z"
-    )
-    assert requests[2].full_url.endswith("/api/public/v2/observations?limit=1000&traceId=tr_1")
-    assert requests[3].full_url.endswith(
-        "/api/public/v2/observations?limit=1000&traceId=tr_1&cursor=next-observation"
-    )
-    assert requests[4].full_url.endswith("/api/public/v2/observations?limit=1000&traceId=tr_2")
-    assert requests[0].headers["Authorization"].startswith("Basic ")
-
-    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _JsonResponse({"data": {}}))
-    with pytest.raises(ValueError, match="Langfuse connected import response"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _JsonResponse({"data": []}))
-    with pytest.raises(ValueError, match="meta object"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _JsonResponse({"data": [1]}))
-    with pytest.raises(ValueError, match="object rows"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-    monkeypatch.setattr(
-        cli,
-        "urlopen",
-        lambda request, timeout: _JsonResponse({"data": [{"name": "missing"}], "meta": {}}),
-    )
-    with pytest.raises(ValueError, match="missing a trace id"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-
-    requests.clear()
-    paginated_responses = iter(
-        [
-            {
-                "data": [{"id": "tr_large_1", "name": "first"}],
-                "meta": {"page": 1, "limit": 100, "totalItems": 2, "totalPages": 2},
-            },
-            {
-                "data": [{"id": "tr_large_2", "name": "second"}],
-                "meta": {"page": 2, "limit": 100, "totalItems": 2, "totalPages": 2},
-            },
-            {"data": [], "meta": {"cursor": None}},
-            {"data": [], "meta": {"cursor": None}},
-        ]
-    )
-
-    def fake_paginated_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        return _JsonResponse(next(paginated_responses))
-
-    monkeypatch.setattr(cli, "urlopen", fake_paginated_urlopen)
-    assert cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project=None,
-        since=None,
-        limit=1000,
-        public_key="public",
-        secret_key="secret",
-    )["traces"] == [
-        {"id": "tr_large_1", "name": "first"},
-        {"id": "tr_large_2", "name": "second"},
-    ]
-    assert requests[0].full_url.endswith("/api/public/traces?page=1&limit=100")
-    assert requests[1].full_url.endswith("/api/public/traces?page=2&limit=100")
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 6, 25, 12, 0, 30, 123456, tzinfo=tz)
-
-    monkeypatch.setattr(cli, "datetime", FixedDateTime)
-    assert cli._provider_start_time("7d") == "2026-06-18T12:00:30Z"
-    assert cli._provider_start_time("2026-06-01T00:00:00Z") == "2026-06-01T00:00:00Z"
-    assert cli._provider_start_time("2026-07-08") == "2026-07-08T00:00:00Z"
-    assert cli._provider_start_time(" not-a-date ") == "not-a-date"
-    assert cli._provider_start_time(None) is None
-
-    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _JsonResponse([]))
-    with pytest.raises(ValueError, match="JSON object"):
-        cli._read_json_response(cli.Request("https://example.com"))
 
     (tmp_path / ".kensa" / "traces" / "imports" / "latest.json").unlink(missing_ok=True)
     with pytest.raises(ValueError, match="No latest trace import"):
@@ -2192,700 +2049,6 @@ def test_new_cli_helper_edge_paths(
     )
     with pytest.raises(ValueError, match="not found"):
         cli_traces.resolve_trace_view_source(None)
-
-
-def test_langfuse_observations_v2_import_paginates_with_cursor_and_since(monkeypatch) -> None:
-    requests = []
-    responses = iter(
-        [
-            {
-                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": "next-observation-page"},
-            },
-            {
-                "data": [{"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"}],
-                "meta": {"cursor": None},
-            },
-            {
-                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": None},
-            },
-            {
-                "data": [{"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"}],
-                "meta": {"cursor": None},
-            },
-        ]
-    )
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        return _JsonResponse(next(responses))
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-
-    assert cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project="prod",
-        since="2026-06-01T00:00:00Z",
-        limit=2,
-        public_key="public",
-        secret_key="secret",
-        import_mode="observations_v2",
-    ) == {
-        "data": [
-            {"id": "obs_1", "traceId": "tr_1", "type": "SPAN"},
-            {"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"},
-        ],
-        "meta": {},
-    }
-
-    first_query = parse_qs(urlparse(requests[0].full_url).query)
-    second_query = parse_qs(urlparse(requests[1].full_url).query)
-    first_trace_query = parse_qs(urlparse(requests[2].full_url).query)
-    second_trace_query = parse_qs(urlparse(requests[3].full_url).query)
-    assert requests[0].full_url.startswith(
-        "https://langfuse.example.com/api/public/v2/observations?"
-    )
-    assert first_query == {
-        "limit": ["2"],
-        "fromStartTime": ["2026-06-01T00:00:00Z"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
-    }
-    assert second_query == {
-        "limit": ["2"],
-        "fromStartTime": ["2026-06-01T00:00:00Z"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
-        "cursor": ["next-observation-page"],
-    }
-    assert first_trace_query == {
-        "limit": ["1000"],
-        "traceId": ["tr_1"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-    }
-    assert second_trace_query == {
-        "limit": ["1000"],
-        "traceId": ["tr_2"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-    }
-
-
-def test_langfuse_observations_v2_import_parses_io_client_side(monkeypatch) -> None:
-    requests = []
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        query = parse_qs(urlparse(request.full_url).query)
-        if "traceId" not in query:
-            return _JsonResponse(
-                {
-                    "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                    "meta": {"cursor": None},
-                }
-            )
-        return _JsonResponse(
-            {
-                "data": [
-                    {
-                        "id": "obs_1",
-                        "traceId": "tr_1",
-                        "type": "SPAN",
-                        "input": json.dumps([{"role": "user", "content": "Refund me"}]),
-                        "output": json.dumps({"answer": "Done"}),
-                    },
-                    {
-                        "id": "obs_2",
-                        "traceId": "tr_1",
-                        "type": "GENERATION",
-                        "input": "raw prompt",
-                        "output": json.dumps(["Done"]),
-                    },
-                    {
-                        "id": "obs_3",
-                        "traceId": "tr_1",
-                        "type": "SPAN",
-                        "input": {"already": "structured"},
-                        "output": ["done"],
-                    },
-                    {
-                        "id": "obs_4",
-                        "traceId": "tr_1",
-                        "type": "SPAN",
-                        "input": "not json",
-                        "output": json.dumps("plain output"),
-                    },
-                ],
-                "meta": {"cursor": None},
-            }
-        )
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-
-    payload = cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project=None,
-        since=None,
-        limit=1,
-        public_key="public",
-        secret_key="secret",
-        import_mode="observations_v2",
-    )
-
-    assert payload["data"][0]["input"] == [{"role": "user", "content": "Refund me"}]
-    assert payload["data"][0]["output"] == {"answer": "Done"}
-    assert payload["data"][1]["input"] == "raw prompt"
-    assert payload["data"][1]["output"] == ["Done"]
-    assert payload["data"][2]["input"] == {"already": "structured"}
-    assert payload["data"][2]["output"] == ["done"]
-    assert payload["data"][3]["input"] == "not json"
-    assert payload["data"][3]["output"] == json.dumps("plain output")
-    assert parse_qs(urlparse(requests[0].full_url).query) == {
-        "limit": ["1"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
-    }
-    for request in requests:
-        assert "parseIoAsJson" not in parse_qs(urlparse(request.full_url).query)
-
-
-def test_langfuse_observations_v2_refetches_retained_traces(monkeypatch) -> None:
-    requests = []
-    responses = iter(
-        [
-            {
-                "data": [{"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"}],
-                "meta": {"cursor": "later"},
-            },
-            {
-                "data": [
-                    {"id": "obs_root", "traceId": "tr_1", "type": "SPAN"},
-                    {"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"},
-                ],
-                "meta": {"cursor": None},
-            },
-        ]
-    )
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        return _JsonResponse(next(responses))
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-
-    assert cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project=None,
-        since=None,
-        limit=1,
-        public_key="public",
-        secret_key="secret",
-        import_mode="observations_v2",
-    ) == {
-        "data": [
-            {"id": "obs_root", "traceId": "tr_1", "type": "SPAN"},
-            {"id": "obs_child", "traceId": "tr_1", "parentObservationId": "obs_root"},
-        ],
-        "meta": {},
-    }
-    assert len(requests) == 2
-    assert parse_qs(urlparse(requests[0].full_url).query) == {
-        "limit": ["1"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_DISCOVERY_FIELDS],
-    }
-    assert parse_qs(urlparse(requests[1].full_url).query) == {
-        "limit": ["1000"],
-        "traceId": ["tr_1"],
-        "fields": [cli._LANGFUSE_OBSERVATIONS_V2_FIELDS],
-    }
-
-
-def test_langfuse_auto_import_falls_back_only_when_trace_endpoint_is_missing(
-    monkeypatch,
-) -> None:
-    requests = []
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        if "/api/public/traces?" in request.full_url:
-            raise _http_error(404)
-        return _JsonResponse(
-            {
-                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": None},
-            }
-        )
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-
-    assert cli._fetch_langfuse_connected_export(
-        endpoint="https://langfuse.example.com",
-        project=None,
-        since=None,
-        limit=1,
-        public_key="public",
-        secret_key="secret",
-    ) == {
-        "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-        "meta": {},
-    }
-    assert len(requests) == 3
-    assert "/api/public/traces?" in requests[0].full_url
-    assert "/api/public/v2/observations?" in requests[1].full_url
-    assert parse_qs(urlparse(requests[2].full_url).query)["traceId"] == ["tr_1"]
-
-    requests.clear()
-    monkeypatch.setattr(
-        cli,
-        "urlopen",
-        lambda request, timeout: (
-            requests.append(request) or (_ for _ in ()).throw(_http_error(401))
-        ),
-    )
-    with pytest.raises(ValueError, match="rejected the credentials"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-    assert len(requests) == 1
-    assert "/api/public/traces?" in requests[0].full_url
-
-    with pytest.raises(ValueError, match="Unsupported Langfuse import mode"):
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-            import_mode=cast(Any, "bad_mode"),
-        )
-
-    requests.clear()
-
-    def fake_broken_fallback_urlopen(request, timeout: int):
-        del timeout
-        requests.append(request)
-        if "/api/public/traces?" in request.full_url:
-            raise _http_error(404)
-        return _JsonResponse({"data": {}})
-
-    monkeypatch.setattr(cli, "urlopen", fake_broken_fallback_urlopen)
-    with pytest.raises(ValueError, match="data list") as error:
-        cli._fetch_langfuse_connected_export(
-            endpoint="https://langfuse.example.com",
-            project=None,
-            since=None,
-            limit=1,
-            public_key="public",
-            secret_key="secret",
-        )
-    assert isinstance(error.value.__cause__, cli._LangfuseRequestError)
-    assert len(requests) == 2
-    assert "/api/public/traces?" in requests[0].full_url
-    assert "/api/public/v2/observations?" in requests[1].full_url
-
-
-def test_langfuse_events_only_connected_import_does_not_write_secrets(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
-    monkeypatch.setenv("TEST_LANGFUSE_PUBLIC", "lf-public-value")
-    monkeypatch.setenv("TEST_LANGFUSE_SECRET", "lf-secret-value")
-    connection_dir = tmp_path / ".kensa" / "connections"
-    connection_dir.mkdir(parents=True)
-    (connection_dir / "langfuse.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.connection.v1",
-                "provider": "langfuse",
-                "created_at": "2026-06-01T00:00:00Z",
-                "endpoint": "https://langfuse.example.com",
-                "project": None,
-                "auth": {
-                    "type": "basic",
-                    "public_key_env": "TEST_LANGFUSE_PUBLIC",
-                    "secret_key_env": "TEST_LANGFUSE_SECRET",
-                },
-            }
-        )
-    )
-
-    def fake_urlopen(request, timeout: int):
-        del timeout
-        if "/api/public/traces?" in request.full_url:
-            raise _http_error(404)
-        return _JsonResponse(
-            {
-                "data": [
-                    {
-                        "id": "obs_1",
-                        "traceId": "tr_1",
-                        "traceName": "support-agent",
-                        "type": "SPAN",
-                        "name": "agent",
-                    }
-                ],
-                "meta": {"cursor": None},
-            }
-        )
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-
-    assert main(["import", "--from", "langfuse", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    artifact = tmp_path / ".kensa" / "traces" / "imports" / "langfuse-1792820123.jsonl"
-    rows = [json.loads(line) for line in artifact.read_text().splitlines()]
-    assert payload["ok"] is True
-    assert rows[0]["id"] == "tr_1"
-    assert rows[0]["name"] == "support-agent"
-    assert "lf-public-value" not in _tree_text(tmp_path / ".kensa")
-    assert "lf-secret-value" not in _tree_text(tmp_path / ".kensa")
-
-
-def test_langfuse_retry_after_retries_rate_limited_requests(monkeypatch, capsys) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        if calls == 1:
-            raise _http_error(429, {"Retry-After": "0"})
-        return _JsonResponse({"data": [], "meta": {"cursor": None}})
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-
-    assert cli._read_langfuse_json_response(
-        cli.Request("https://langfuse.example.com"),
-        label="observations",
-    ) == {"data": [], "meta": {"cursor": None}}
-    assert calls == 2
-    assert sleeps == [0.0]
-    assert "Langfuse rate limited; retrying in 0s" in capsys.readouterr().err
-
-
-def test_langfuse_retry_after_caps_large_server_delays(monkeypatch, capsys) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        if calls == 1:
-            raise _http_error(429, {"Retry-After": "inf"})
-        return _JsonResponse({"data": [], "meta": {"cursor": None}})
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-
-    assert cli._read_langfuse_json_response(
-        cli.Request("https://langfuse.example.com"),
-        label="traces",
-    ) == {"data": [], "meta": {"cursor": None}}
-    assert sleeps == [30.0]
-    assert "Langfuse rate limited; retrying in 30s" in capsys.readouterr().err
-
-
-def test_langfuse_retry_after_accepts_http_dates(monkeypatch) -> None:
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 7, 2, 0, 0, 0, tzinfo=tz)
-
-    monkeypatch.setattr(cli, "datetime", FixedDateTime)
-
-    assert cli._retry_after_delay_seconds("Thu, 02 Jul 2026 00:00:05 GMT") == 5.0
-    assert cli._retry_after_delay_seconds("Thu, 02 Jul 2026 00:00:05") == 5.0
-    assert cli._retry_after_delay_seconds("Thu, 02 Jul 2026 00:00:00 GMT") == 0.0
-    assert cli._retry_after_delay_seconds("not a date") is None
-    assert (
-        cli._langfuse_retry_delay(
-            _http_error(429, {"Retry-After": "Thu, 02 Jul 2026 00:01:00 GMT"}),
-            1,
-        )
-        == 30.0
-    )
-
-
-def test_langfuse_repeated_rate_limits_return_actionable_error(monkeypatch) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        raise _http_error(429)
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-    monkeypatch.setattr(cli.random, "uniform", lambda lower, upper: 0.0)
-
-    with pytest.raises(ValueError, match="Langfuse rate limited Kensa") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com"),
-            label="observations",
-        )
-
-    message = str(exc_info.value)
-    assert calls == 4
-    assert sleeps == [1.0, 2.0, 4.0]
-    assert "Langfuse rate limited Kensa while fetching observations." in message
-    assert "Endpoint: https://langfuse.example.com" in message
-    assert "Kensa retried 3 times before giving up." in message
-    assert "Wait a minute, then retry the Langfuse connection." in message
-    assert "Then run: kensa connect langfuse" in message
-
-
-def test_langfuse_retries_transient_transport_errors(monkeypatch, capsys) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        if calls == 1:
-            raise URLError("timed out")
-        return _JsonResponse({"data": [], "meta": {"cursor": None}})
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-    monkeypatch.setattr(cli.random, "uniform", lambda lower, upper: 0.0)
-
-    assert cli._read_langfuse_json_response(
-        cli.Request("https://langfuse.example.com"),
-        label="traces",
-    ) == {"data": [], "meta": {"cursor": None}}
-    assert calls == 2
-    assert sleeps == [1.0]
-    assert "Langfuse request failed; retrying in 1s" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    ("reason", "expected_message"),
-    [
-        (socket.gaierror("host not found"), "Kensa could not resolve the Langfuse host."),
-        (
-            ssl.SSLError("certificate verify failed"),
-            "TLS certificate verification failed for the Langfuse host.",
-        ),
-    ],
-)
-def test_langfuse_fails_fast_on_permanent_transport_errors(
-    reason: BaseException,
-    expected_message: str,
-    monkeypatch,
-    capsys,
-) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        raise URLError(reason)
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-
-    with pytest.raises(ValueError, match="Langfuse could not be reached") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://bad-langfuse.example.com"),
-            label="traces",
-        )
-
-    message = str(exc_info.value)
-    assert calls == 1
-    assert sleeps == []
-    assert "Langfuse could not be reached while fetching traces." in message
-    assert "Endpoint: https://bad-langfuse.example.com" in message
-    assert (
-        "Kensa did not retry because this looks like a configuration or connectivity issue."
-        in message
-    )
-    assert expected_message in message
-    assert "Last error:" not in message
-    assert "urlopen error" not in message
-    assert capsys.readouterr().err == ""
-
-
-def test_langfuse_repeated_transport_errors_return_actionable_error(monkeypatch) -> None:
-    calls = 0
-
-    def fake_urlopen(request, timeout: int):
-        nonlocal calls
-        del request, timeout
-        calls += 1
-        raise TimeoutError("timed out")
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
-    monkeypatch.setattr(cli.random, "uniform", lambda lower, upper: 0.0)
-
-    with pytest.raises(ValueError, match="Langfuse could not be reached") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com"),
-            label="observations",
-        )
-
-    message = str(exc_info.value)
-    assert calls == 4
-    assert sleeps == [1.0, 2.0, 4.0]
-    assert "Langfuse could not be reached while fetching observations." in message
-    assert "Kensa retried 3 times before giving up." in message
-    assert "The request timed out before Langfuse responded." in message
-    assert "Last error:" not in message
-    assert "Then run: kensa connect langfuse" in message
-
-
-def test_langfuse_non_retryable_http_errors_are_user_friendly(monkeypatch) -> None:
-    monkeypatch.setattr(
-        cli,
-        "urlopen",
-        lambda request, timeout: (_ for _ in ()).throw(_http_error(401)),
-    )
-
-    with pytest.raises(ValueError, match="Langfuse rejected the credentials") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com"),
-            label="traces",
-        )
-
-    message = str(exc_info.value)
-    assert "HTTP Error 401" not in message
-    assert "Check LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY" in message
-
-
-def test_langfuse_400_includes_response_hint_and_request_parameter_next_step(
-    monkeypatch,
-) -> None:
-    body = json.dumps(
-        {
-            "message": "Invalid request",
-            "error": [
-                {
-                    "code": "unrecognized_keys",
-                    "keys": ["parseIoAsJson"],
-                    "path": [],
-                    "message": "Unrecognized key(s) in object",
-                }
-            ],
-        }
-    )
-    monkeypatch.setattr(
-        cli,
-        "urlopen",
-        lambda request, timeout: (_ for _ in ()).throw(_http_error(400, body=body)),
-    )
-
-    with pytest.raises(ValueError, match="Langfuse returned HTTP 400") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com/api/public/v2/observations"),
-            label="observations",
-        )
-
-    message = str(exc_info.value)
-    assert "Langfuse response:" in message
-    assert "unrecognized_keys" in message
-    assert "parseIoAsJson" in message
-    assert "Langfuse rejected request parameters" in message
-    assert "file an issue with the response hint" in message
-    assert "selected Langfuse region or retry after Langfuse is healthy" not in message
-
-
-def test_langfuse_trace_404_reports_import_readiness_message(monkeypatch) -> None:
-    monkeypatch.setattr(
-        cli,
-        "urlopen",
-        lambda request, timeout: (_ for _ in ()).throw(
-            _http_error(404, body='{"error":"events_only"}')
-        ),
-    )
-
-    with pytest.raises(ValueError, match="trace read API") as exc_info:
-        cli._read_langfuse_json_response(
-            cli.Request("https://langfuse.example.com/api/public/traces?page=1&limit=1"),
-            label="traces",
-        )
-
-    message = str(exc_info.value)
-    assert "Langfuse could not find the requested endpoint while fetching traces." in message
-    assert "Kensa reached Langfuse, but the trace read API was unavailable." in message
-    assert "GET /api/public/traces" in message
-    assert "events_only hint" in message
-    assert "selected Langfuse region or custom base URL" not in message
-
-
-def test_langfuse_error_message_helper_branches() -> None:
-    request = cast(Any, SimpleNamespace(full_url="not-a-url"))
-    assert cli._langfuse_request_endpoint(request) is None
-    assert cli._langfuse_retry_summary(1) == "Kensa retried once before giving up."
-    assert (
-        cli._langfuse_transport_hint(URLError("timed out"))
-        == "The request timed out before Langfuse responded."
-    )
-    assert (
-        cli._langfuse_transport_hint(URLError("connection reset"))
-        == "Kensa could not reach Langfuse."
-    )
-    assert (
-        cli._langfuse_http_error_body_hint(_http_error(404, body="plain error"))
-        == "Langfuse response: plain error"
-    )
-    assert cli._langfuse_http_error_body_hint(_http_error(500, body="plain error")) is None
-    assert cli._langfuse_http_error_body_hint(_http_error(400, body=" \n\t ")) is None
-    assert cli._langfuse_response_body_hint(" \n\t ") is None
-    escaped_hint = cli._langfuse_response_body_hint("\x1b[31mbad\x1b[0m \x07ok")
-    assert escaped_hint is not None
-    assert "\x1b" not in escaped_hint
-    assert "\x07" not in escaped_hint
-    assert "bad" in escaped_hint
-    assert "ok" in escaped_hint
-    long_hint = cli._langfuse_response_body_hint("x" * (cli._LANGFUSE_RESPONSE_HINT_MAX_CHARS + 1))
-    assert long_hint is not None
-    assert long_hint.endswith("...")
-    assert (
-        len(long_hint.removeprefix("Langfuse response: ")) == cli._LANGFUSE_RESPONSE_HINT_MAX_CHARS
-    )
-    assert cli._langfuse_http_error_reason(403) == "denied access"
-    assert cli._langfuse_http_error_reason(404) == "could not find the requested endpoint"
-    assert cli._langfuse_http_error_reason(429) == "rate limited Kensa"
-    assert cli._langfuse_http_error_reason(500) == "returned HTTP 500"
-    assert "request parameters" in cli._langfuse_http_error_next_step(400)
-    assert (
-        cli._langfuse_http_error_next_step(404)
-        == "Check the selected Langfuse region or custom base URL."
-    )
-    assert "trace read API" in cli._langfuse_http_error_next_step(404, label="traces")
-    assert (
-        cli._langfuse_http_error_next_step(500)
-        == "Check the selected Langfuse region or retry after Langfuse is healthy."
-    )
-    assert (
-        cli._langfuse_http_error_next_step(400)
-        == "Kensa reached Langfuse, but Langfuse rejected request parameters. "
-        "Upgrade Kensa if this persists, or file an issue with the response hint."
-    )
-    assert (
-        cli._langfuse_retry_next_step(500)
-        == "Retry after Langfuse is healthy, or check the selected Langfuse region."
-    )
 
 
 def test_eval_json_warns_on_malformed_artifact(
@@ -3791,7 +2954,7 @@ def test_init_langfuse_credentials_create_root_dotenv_and_connect(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -3838,7 +3001,7 @@ def test_init_langfuse_credentials_create_warns_for_unsupported_judge_provider(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -3871,7 +3034,7 @@ def test_init_langfuse_credentials_create_can_skip_judge_key(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -3907,7 +3070,7 @@ def test_init_langfuse_credentials_can_create_anthropic_judge_config(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -3936,7 +3099,7 @@ def test_init_langfuse_credentials_can_select_us_region(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -3962,7 +3125,7 @@ def test_init_langfuse_credentials_can_select_custom_base_url(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4031,7 +3194,7 @@ def test_init_langfuse_preserves_existing_base_url(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4114,7 +3277,7 @@ def test_init_langfuse_can_use_existing_env_file_without_editing_it(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4162,7 +3325,7 @@ def test_init_langfuse_uses_configured_dotenv_without_prompting(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4197,7 +3360,7 @@ def test_init_langfuse_uses_configured_dotenv_without_judge_key(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4231,7 +3394,7 @@ def test_init_langfuse_existing_env_file_connects_without_judge_key(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4271,7 +3434,7 @@ def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4309,7 +3472,7 @@ def test_init_langfuse_existing_env_file_warns_for_unsupported_judge_provider_wi
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4388,7 +3551,7 @@ def test_init_langfuse_existing_env_file_warns_for_unrecognized_judge_model(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: checks.append(kwargs) or {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4450,7 +3613,7 @@ def test_init_langfuse_existing_env_file_skips_judge_notice_for_local_result(
     _stub_langfuse_auth_check(monkeypatch)
     monkeypatch.setattr(
         cli,
-        "_fetch_langfuse_connected_export",
+        "fetch_langfuse_connected_export",
         lambda **kwargs: {"data": [], "meta": {"cursor": None}},
     )
 
@@ -4531,17 +3694,14 @@ def test_init_langfuse_connection_error_does_not_print_raw_urlopen_details(
     prompts = iter(["pk-test", "sk-test", "openai-test"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
     monkeypatch.setattr(cli.click, "prompt", lambda *args, **kwargs: next(prompts))
-    reason = socket.gaierror(8, "nodename nor servname provided, or not known")
 
     def fail_connect(args: Any) -> tuple[dict[str, Any], Path, Any]:
         del args
         raise ValueError(
-            cli._langfuse_transport_retry_exhausted_message(
-                "traces",
-                URLError(reason),
-                retry_count=0,
-                endpoint="https://cloud.langfuse.com",
-            )
+            "Langfuse could not be reached while fetching traces.\n"
+            "Endpoint: https://cloud.langfuse.com\n"
+            "Kensa could not resolve the Langfuse host.\n"
+            "Then run: kensa connect langfuse"
         )
 
     monkeypatch.setattr(cli, "_connect_provider", fail_connect)
