@@ -224,29 +224,13 @@ optional.
 </details>
 
 <details>
-<summary>How does mandatory trace redaction work?</summary>
+<summary>How does Kensa handle PII in traces?</summary>
 
-Trace redaction is mandatory and fails closed. When a trace source is configured,
-`kensa init` offers to install the `kensa[redaction]` dependencies through your
-package manager (`uv add --group traces 'kensa[redaction]'` when a `uv.lock` is
-present, otherwise `pip install 'kensa[redaction]'`), downloads and
-checksum-verifies the pinned `en_core_web_sm-3.8.0` spaCy model, and records its
-readiness in `.kensa/settings.json`. If any readiness or redaction step fails,
-trace import and payload exposure remain blocked.
-
-Every `kensa import` then runs key/path redaction, Kensa deterministic recognizers,
-detect-secrets, Presidio built-ins, and spaCy NER before anything is stored, and
-writes a `kensa.redactor.v2` manifest next to the artifact. Redacted values render
-as typed placeholders with readable counters (`[PERSON_1]`, `[EMAIL_ADDRESS_2]`)
-and stable aliases for repeated normalized values within each trace. `PERSON`,
-`ORGANIZATION`, `LOCATION`, and `NRP` values use Unicode `casefold()`, trimmed
-surrounding whitespace, and collapsed internal whitespace for alias identity. Secrets,
-URLs, crypto addresses, account identifiers, and other sensitive values retain exact
-matching. Coreference resolution, honorific stripping, nickname matching, and cross-type
-identity linking are out of scope. `kensa traces list/sample/get`, `kensa inspect`, and
-eval generation refuse to expose payloads from artifacts with missing, older, or unsafe
-manifests; re-import those with `kensa import`. Eval-only installs never pull the NLP stack:
-readiness, not installation, enforces the boundary.
+Every `kensa import` scans payloads with detect-secrets, Presidio, spaCy NER, and
+Kensa's own recognizers, then rewrites PII and secrets as typed placeholders like
+`[PERSON_1]` before anything is stored. Redaction fails closed: if the dependencies
+or the pinned model are missing, trace import and payload exposure stay blocked
+until `kensa init` sets them up.
 
 </details>
 
