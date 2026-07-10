@@ -68,12 +68,8 @@ Read `.kensa/settings.json` and use `init.evidence_source` when it is saved. Val
 are `langfuse`, `trace_export`, and `local`. If no saved source exists, infer it from the repo
 state or ask the user.
 
-All imports run mandatory redaction. If `kensa import` reports that redaction is not ready
-(missing dependencies, missing readiness in `.kensa/settings.json`, or a missing model), run
-`kensa init` to bootstrap readiness. Never try to bypass the boundary.
-Imported payloads are redacted with typed instance placeholders (`[PERSON_1]`); this is
-expected. Placeholders are stable only within one trace and intentionally unlinkable across
-traces; never use matching placeholder text to correlate separate traces.
+Trace access fails closed. If import or trace access reports a redaction blocker, run
+`kensa init` if needed, then re-import. Never use raw runtime traces as evidence.
 
 For `langfuse`:
 

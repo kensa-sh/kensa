@@ -30,17 +30,9 @@ Do:
    client, or module is missing instead of letting the boundary degrade to a no-model path.
 6. Wrap model calls with Kensa tracing helpers when needed so the persistent smoke eval records
    at least one LLM span.
-7. Run `kensa doctor` and fix harness blockers until it passes. When blocked on a missing
-   credential, name the exact variable and the dotenv file options in a single ask, then wait.
-8. Know what `kensa init` and `kensa doctor` do for mandatory trace redaction. When a trace
-   source is configured, `kensa init` offers to install the `kensa[redaction]` dependencies
-   through the project's package manager (`uv add --group traces 'kensa[redaction]'` with a
-   `uv.lock`, otherwise `pip install 'kensa[redaction]'`), downloads and checksum-verifies the
-   pinned `en_core_web_sm` spaCy model, and records readiness in `.kensa/settings.json`.
-   `kensa doctor` reports redaction dependency presence, model readiness, and any unsafe old
-   artifacts. If doctor reports redaction not ready, re-run `kensa init`; trace import and
-   payload exposure stay blocked until readiness exists. Never bypass this by editing the
-   `redaction` block in `.kensa/settings.json` by hand.
+7. Run `kensa doctor` and fix harness blockers until it passes. If redaction is not ready, rerun
+   `kensa init`; do not edit readiness settings manually. When blocked on a missing credential,
+   name the exact variable and the dotenv file options in a single ask, then wait.
 
 This skill is complete when `kensa doctor` passes; hand back to `kensa-evals`, which continues
 with the evidence stage in the same run. Do not import traces, inspect traces, propose eval

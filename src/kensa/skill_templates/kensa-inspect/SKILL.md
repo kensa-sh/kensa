@@ -17,16 +17,10 @@ Trace access:
    `kensa traces get <trace_id> --json`.
 2. If there is no latest import, tell the user to run `kensa import --from <provider> --source
    <file>` or ask for an explicit `--source`.
-3. Every trace read is gated on the artifact's sibling redaction manifest: payloads are exposed
-   only when the manifest is a safe `kensa.redactor.v2` manifest written by mandatory redaction.
-   When a read is blocked (missing, older, or unsafe manifest), the fix is to re-import with
-   `kensa import`; never work around the gate by reading artifact files or runtime
-   `.kensa/traces/runs/` directories directly — those contain raw payloads.
-4. Treat `TraceView.raw` as redacted inspection evidence only. Do not rely on provider-specific
-   raw schema in code. Redacted values appear as typed instance placeholders such as
-   `[PERSON_1]` or `[EMAIL_ADDRESS_2]`; the same placeholder means the same underlying value
-   only within one trace, which is evidence you can use when correlating that trace's spans.
-   Alias identities intentionally reset between traces and must not be correlated across them.
+3. Use `kensa traces` commands for payload access. If access is blocked, return to `kensa-evals`
+   for re-import; never open artifacts or `.kensa/traces/runs/` directly.
+4. Treat `TraceView.raw` as redacted evidence and avoid provider-specific schema.
+   Placeholder identities are trace-local.
 
 Before writing, read existing queue ids with `kensa inspect list --json`. Never re-propose an
 existing id, regardless of its status; items are never deleted, and later stages change only
