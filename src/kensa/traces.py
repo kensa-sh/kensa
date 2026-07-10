@@ -1444,14 +1444,12 @@ def import_redaction_manifest(artifact: Path | str) -> Any:
     return payload.get("redaction")
 
 
-def load_trace_views(
-    source: Path | str,
-) -> list[dict[str, Any]]:
+def load_trace_views(source: Path | str) -> list[dict[str, Any]]:
     """Load TraceView rows behind the mandatory payload-exposure gate.
 
     This is the single choke point for trace payload exposure: `traces list`,
-    `traces sample`, `traces get`, `inspect`, and generation all load rows
-    through it, and unsafe or missing redaction manifests block every caller.
+    `traces sample`, `traces get`, and `inspect` load rows through it. Unsafe or
+    missing redaction manifests block every caller, including generation workflows.
     """
 
     path = Path(source)

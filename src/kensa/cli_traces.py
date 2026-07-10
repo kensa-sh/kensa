@@ -14,10 +14,7 @@ from kensa.cli_output import (
     print_json_envelope,
     print_next_steps,
 )
-from kensa.constants import (
-    TRACE_IMPORT_LATEST_SCHEMA_VERSION,
-    TRACE_IMPORTS_DIR,
-)
+from kensa.constants import TRACE_IMPORT_LATEST_SCHEMA_VERSION, TRACE_IMPORTS_DIR
 from kensa.traces import load_trace_views, trace_view_summary
 
 
