@@ -63,7 +63,9 @@ def test_live_sm_readiness_and_redaction_pass(
             {
                 "id": "tr_live",
                 "trace_url": (
-                    "https://trace.example.com/AKIAIOSFODNN7EXAMPLE/alice.smith@example.com"
+                    "https://trace.example.com/%41KIAIOSFODNN7EXAMPLE/"
+                    "eyJhbGciOiJIUzI1NiJ9%2EeyJzdWIiOiIxIn0%2Esig-part/"
+                    "alice.smith%40example.com"
                 ),
                 "input": {
                     "message": (
@@ -72,6 +74,11 @@ def test_live_sm_readiness_and_redaction_pass(
                         "SSN 078-05-1120. api_token=AKIAIOSFODNN7EXAMPLE"
                     ),
                     "timestamp": "01/02/1990",
+                },
+                "attributes": {
+                    "Alice Smith": "person key",
+                    "AKIAIOSFODNN7EXAMPLE": "secret key",
+                    "+1-202-555-0182": "phone key",
                 },
                 "api_key": "sk-live-super-secret-value",
             }
@@ -94,9 +101,15 @@ def test_live_sm_readiness_and_redaction_pass(
     assert "078-05-1120" not in text
     assert "(212) 555-0182" not in text
     assert "[EMAIL_ADDRESS_" in text
+    attribute_keys = set(row["attributes"])
+    assert any(key.startswith("[PERSON_") for key in attribute_keys)
+    assert any(key.startswith("[SECRET_") for key in attribute_keys)
+    assert any(key.startswith("[PHONE_NUMBER_") for key in attribute_keys)
     rendered = out.read_text()
     assert "sk-live-super-secret-value" not in rendered
     assert "AKIAIOSFODNN7EXAMPLE" not in rendered
+    assert "%41KIAIOSFODNN7EXAMPLE" not in rendered
+    assert "%2EeyJzdWIiOiIxIn0%2E" not in rendered
     assert "alice.smith@example.com" not in rendered
     assert "01/02/1990" not in rendered
     manifest = result.redaction

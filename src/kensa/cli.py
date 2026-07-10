@@ -568,6 +568,8 @@ def init(
     evidence_environment: str | None,
 ) -> None:
     """Set up Kensa."""
+    if evidence_environment is not None and trace_source is None:
+        raise click.UsageError("--evidence-environment requires --trace-source.")
     selected_agent = cast(
         AgentInstructionChoice | None,
         agent_choice.lower() if agent_choice else None,
@@ -1319,6 +1321,13 @@ def _redaction_doctor_findings(
     next_steps: list[str] = []
     missing = [name for name, present in report["dependencies"].items() if not present]
     trace_source_configured = report["evidence_source"] is not None
+    if report["evidence_source"] == "langfuse" and report["evidence_environment"] is None:
+        problems.append(
+            "Langfuse evidence setup has no evidence environment; connected imports are blocked."
+        )
+        next_steps.append(
+            "Run kensa init --trace-source langfuse --evidence-environment <environment>."
+        )
     if missing and trace_source_configured:
         warnings.append(
             "trace redaction dependencies missing: "

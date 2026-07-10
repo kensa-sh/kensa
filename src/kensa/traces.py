@@ -18,6 +18,7 @@ from kensa.redact import (
     EvidenceEnvironment,
     RedactionResult,
     Redactor,
+    _safe_url_netloc,
     assert_safe_manifest,
 )
 
@@ -667,13 +668,9 @@ def safe_endpoint(endpoint: str) -> str:
     parsed = urlsplit(endpoint)
     if not parsed.scheme or not parsed.netloc:
         return endpoint
-    host = parsed.hostname or ""
-    try:
-        port_value = parsed.port
-    except ValueError:
-        port_value = None
-    port = f":{port_value}" if port_value else ""
-    return urlunsplit((parsed.scheme, f"{host}{port}", _safe_endpoint_path(parsed.path), "", ""))
+    return urlunsplit(
+        (parsed.scheme, _safe_url_netloc(parsed), _safe_endpoint_path(parsed.path), "", "")
+    )
 
 
 def _safe_endpoint_path(path: str) -> str:

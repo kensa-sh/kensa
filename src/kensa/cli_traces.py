@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+from pydantic import ValidationError
 
 from kensa.cli_output import (
     display_path,
@@ -19,9 +20,8 @@ from kensa.constants import (
     TRACE_IMPORT_LATEST_SCHEMA_VERSION,
     TRACE_IMPORTS_DIR,
 )
+from kensa.models import KensaSettings
 from kensa.traces import load_trace_views, trace_view_summary
-
-_EVIDENCE_ENVIRONMENTS = frozenset({"local", "staging", "production"})
 
 
 def read_evidence_environment() -> str:
@@ -42,9 +42,12 @@ def read_evidence_environment() -> str:
         raise ValueError(f"Invalid Kensa settings JSON: {display_path(settings_path)}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Kensa settings must be a JSON object: {display_path(settings_path)}")
-    environment = payload.get("evidence_environment")
-    if isinstance(environment, str) and environment in _EVIDENCE_ENVIRONMENTS:
-        return environment
+    try:
+        settings = KensaSettings.model_validate(payload)
+    except ValidationError as exc:
+        raise ValueError(f"Invalid Kensa settings: {display_path(settings_path)}") from exc
+    if settings.evidence_environment is not None:
+        return settings.evidence_environment
     raise ValueError(
         f"Kensa settings do not record a valid evidence_environment: "
         f"{display_path(settings_path)}. Re-run kensa init with --evidence-environment."

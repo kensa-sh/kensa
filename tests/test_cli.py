@@ -2345,6 +2345,20 @@ def test_init_noninteractive_environment_option_unblocks_langfuse_setup(
     assert _read_settings(tmp_path)["evidence_environment"] == "staging"
 
 
+def test_init_rejects_environment_without_trace_source(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["init", "--evidence-environment", "production"]) == 2
+
+    captured = capsys.readouterr()
+    assert "--evidence-environment requires --trace-source" in captured.err
+    assert not (tmp_path / ".kensa").exists()
+
+
 def test_init_reconfigures_evidence_environment(
     tmp_path: Path,
     monkeypatch,
@@ -2590,6 +2604,7 @@ def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
     assert "status: pending" in skill_texts["kensa-inspect"]
     assert "kensa inspect lint" in skill_texts["kensa-inspect"]
     assert "re-propose" in skill_texts["kensa-inspect"]
+    assert "Alias identities intentionally reset between traces" in skill_texts["kensa-inspect"]
     assert "Do not write pytest files" in skill_texts["kensa-inspect"]
     assert "Normally invoked by `kensa-evals`" in skill_texts["kensa-inspect"]
     assert "state-aware Kensa lifecycle" in skill_texts["kensa-evals"]
@@ -2598,6 +2613,8 @@ def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
     assert "source-specific instruction" not in skill_texts["kensa-evals"]
     assert "kensa import --from langfuse\n" in skill_texts["kensa-evals"]
     assert "kensa import --from langfuse --limit" not in skill_texts["kensa-evals"]
+    assert "stable only within one trace" in skill_texts["kensa-evals"]
+    assert "intentionally unlinkable across" in skill_texts["kensa-evals"]
     assert "ask before substantially expanding it" in skill_texts["kensa-evals"]
     assert "0. Detect state" in skill_texts["kensa-evals"]
     assert "1. Setup" in skill_texts["kensa-evals"]
@@ -4531,6 +4548,37 @@ def test_doctor_fails_when_production_redaction_is_degraded(
     assert any("production trace workflows are blocked" in error for error in payload["errors"])
 
 
+def test_doctor_fails_connected_setup_without_evidence_environment(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    fake_redaction,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_run_persistent_smoke",
+        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+    fake_redaction.make_ready(tmp_path, monkeypatch)
+    settings_path = tmp_path / ".kensa" / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "init": {"evidence_source": "langfuse"},
+            }
+        )
+    )
+
+    assert main(["doctor", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["redaction"]["ready"] is True
+    assert any("has no evidence environment" in error for error in payload["errors"])
+    assert any("--evidence-environment" in step for step in payload["next_steps"])
+
+
 def test_doctor_reports_missing_redaction_readiness_first(
     tmp_path: Path,
     monkeypatch,
@@ -4740,10 +4788,34 @@ def test_read_evidence_environment_states(tmp_path: Path, monkeypatch) -> None:
     settings_path.write_text(json.dumps({"schema_version": "kensa.settings.v1"}))
     with pytest.raises(ValueError, match="valid evidence_environment"):
         cli_traces.read_evidence_environment()
-    settings_path.write_text(json.dumps({"evidence_environment": "bogus"}))
-    with pytest.raises(ValueError, match="valid evidence_environment"):
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "wrong",
+                "evidence_environment": "local",
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="Invalid Kensa settings"):
         cli_traces.read_evidence_environment()
-    settings_path.write_text(json.dumps({"evidence_environment": "production"}))
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "evidence_environment": "bogus",
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="Invalid Kensa settings"):
+        cli_traces.read_evidence_environment()
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "evidence_environment": "production",
+            }
+        )
+    )
     assert cli_traces.read_evidence_environment() == "production"
 
     def fail_read_text(path: Path) -> str:

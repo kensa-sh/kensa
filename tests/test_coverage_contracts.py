@@ -783,6 +783,7 @@ def test_tracing_exporter_edge_paths(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_cli_module_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delitem(sys.modules, "kensa.cli", raising=False)
     monkeypatch.setattr("sys.argv", ["kensa", "--help"])
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "kensa" / "cli.py"
     with pytest.raises(SystemExit) as excinfo:
-        runpy.run_module("kensa.cli", run_name="__main__")
+        runpy.run_path(str(cli_path), run_name="__main__")
     assert excinfo.value.code == 0

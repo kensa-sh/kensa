@@ -1303,6 +1303,9 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(
     assert traces_module.safe_endpoint("https://collector.example.com") == (
         "https://collector.example.com"
     )
+    assert traces_module.safe_endpoint("https://[2001:db8::1]/path") == (
+        "https://[2001:db8::1]/path"
+    )
 
 
 def test_trace_import_internal_edge_paths(

@@ -25,7 +25,8 @@ Trace access:
 4. Treat `TraceView.raw` as redacted inspection evidence only. Do not rely on provider-specific
    raw schema in code. Redacted values appear as typed instance placeholders such as
    `[PERSON_1]` or `[EMAIL_ADDRESS_2]`; the same placeholder means the same underlying value
-   within one import, which is evidence you can use when correlating spans.
+   only within one trace, which is evidence you can use when correlating that trace's spans.
+   Alias identities intentionally reset between traces and must not be correlated across them.
 
 Before writing, read existing queue ids with `kensa inspect list --json`. Never re-propose an
 existing id, regardless of its status; items are never deleted, and later stages change only

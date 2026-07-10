@@ -496,6 +496,33 @@ def test_redactor_secret_keys_and_key_rewrites(
     assert "alice@example.com" in top
 
 
+def test_redactor_freeform_keys_use_full_detector_suite(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = ["Alice Smith"]
+    redaction_ready.secret_markers = ["AKIAV7EXAMPLEKEY"]
+    redaction_ready.phone_numbers = ["+1-202-555-0182"]
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value(
+        {
+            "attributes": {
+                "Alice Smith": "person key",
+                "AKIAV7EXAMPLEKEY": "secret key",
+                "+1-202-555-0182": "phone key",
+            },
+            "Alice Smith": "schema key",
+        }
+    )
+
+    assert redacted["attributes"] == {
+        "[PERSON_1]": "person key",
+        "[SECRET_1]": "secret key",
+        "[PHONE_NUMBER_1]": "phone key",
+    }
+    assert redacted["Alice Smith"] == "schema key"
+
+
 def test_redactor_scalar_type_preservation(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
@@ -594,6 +621,43 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     assert invalid_port["source"]["source_url"] == (
         "https://collector.example.com/[EMAIL_ADDRESS_1]"
     )
+
+
+def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = []
+    redaction_ready.secret_markers = ["AKIAIOSFODNN7EXAMPLE"]
+    redactor = Redactor(environment="local")
+    encoded_jwt = "eyJhbGciOiJIUzI1NiJ9%2EeyJzdWIiOiIxIn0%2Esig-part"
+
+    redacted = redactor.redact_value(
+        {
+            "source": {
+                "source_url": (
+                    "https://collector.example.com/%41KIAIOSFODNN7EXAMPLE/" + encoded_jwt
+                ),
+                "trace_url": "https://trace.example.com/safe%20segment",
+            }
+        }
+    )
+
+    assert redacted["source"]["source_url"] == (
+        "https://collector.example.com/[SECRET_1]/[SECRET_2]"
+    )
+    assert redacted["source"]["trace_url"] == "https://trace.example.com/safe%20segment"
+
+
+def test_redactor_locator_preserves_ipv6_brackets(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redactor = Redactor(environment="local")
+
+    redacted = redactor.redact_value(
+        {"source": {"source_url": "https://[2001:db8::1]/alice@example.com"}}
+    )
+
+    assert redacted["source"]["source_url"] == ("https://[2001:db8::1]/[EMAIL_ADDRESS_1]")
 
 
 def test_redactor_unknown_entity_and_conflicts_render_redacted(

@@ -73,7 +73,8 @@ All imports run mandatory redaction. If `kensa import` reports that redaction is
 to bootstrap readiness — never try to bypass the boundary. Connected imports also need an
 explicit `evidence_environment` in `.kensa/settings.json`, which `kensa init` records.
 Imported payloads are redacted with typed instance placeholders (`[PERSON_1]`); this is
-expected, and the placeholders stay stable within one import.
+expected. Placeholders are stable only within one trace and intentionally unlinkable across
+traces; never use matching placeholder text to correlate separate traces.
 
 For `langfuse`:
 

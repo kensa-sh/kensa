@@ -30,7 +30,7 @@ from enum import StrEnum
 from pathlib import Path
 from re import Match
 from typing import Any, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 REDACTOR_MANIFEST_VERSION = "kensa.redactor.v2"
 REDACTION_READINESS_SCHEMA_VERSION = "kensa.redaction_readiness.v1"
@@ -743,7 +743,9 @@ _RULESET = {
     "detect_secrets_plugins": [dict(plugin) for plugin in _DETECT_SECRETS_PLUGINS],
     "deterministic_recognizers": list(_DETERMINISTIC_RECOGNIZER_NAMES),
     "freeform_containers": sorted(_FREEFORM_CONTAINERS),
+    "freeform_key_detection": "full-value-suite",
     "language": LANGUAGE,
+    "locator_url_path_percent_decoding": "utf-8-replace",
     "phone_regions": list(_PHONE_REGIONS),
     "presidio_recognizers": list(_PRESIDIO_RECOGNIZER_NAMES),
     "presidio_score_threshold": _PRESIDIO_SCORE_THRESHOLD,
@@ -764,6 +766,18 @@ _RULESET = {
     "version": REDACTOR_MANIFEST_VERSION,
 }
 RULESET_HASH = hashlib.sha256(json.dumps(_RULESET, sort_keys=True).encode()).hexdigest()
+
+
+def _safe_url_netloc(parsed: SplitResult) -> str:
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port_value = parsed.port
+    except ValueError:
+        port_value = None
+    port = f":{port_value}" if port_value else ""
+    return f"{host}{port}"
 
 
 # --- span merge and rendering --------------------------------------------------------
@@ -1043,19 +1057,16 @@ class Redactor:
         return redacted
 
     def _render_key(self, key: str, *, rewritable: bool) -> str:
-        # Keys are identifiers, not prose: only the deterministic recognizers run
-        # on key text, so NER never rewrites schema-ish keys like `span_id`.
+        # Schema keys are identifiers and stay unchanged. Keys inside free-form
+        # payload containers are payload data and use the full detector suite.
         if not rewritable or not key.strip():
             return key
-        spans: list[RedactionSpan] = []
-        for _name, detector in _DETERMINISTIC_RECOGNIZERS:
-            spans.extend(detector(key))
-        merged = _merge_spans(spans)
-        if not merged:
+        redacted, span_count = self._redact_text(key, timing_exempt=False)
+        if span_count == 0:
             return key
-        self._span_count += len(merged)
+        self._span_count += span_count
         self._changed_value_count += 1
-        return self._render_merged(key, merged)
+        return redacted
 
     def _secret_value_alias(self, value: Any) -> str:
         canonical = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
@@ -1081,6 +1092,8 @@ class Redactor:
         redacted, span_count = self._redact_text(rendered, timing_exempt=self._timing_exempt(path))
         if span_count == 0:
             return value
+        # Typed placeholders are strings by contract; a sensitive numeric payload
+        # cannot remain a JSON number without retaining the original value.
         self._span_count += span_count
         self._changed_value_count += 1
         return redacted
@@ -1096,26 +1109,25 @@ class Redactor:
     def _redact_locator(self, value: str) -> tuple[str, int]:
         parsed = urlsplit(value)
         if parsed.scheme and parsed.netloc:
-            host = parsed.hostname or ""
-            try:
-                port_value = parsed.port
-            except ValueError:
-                port_value = None
-            port = f":{port_value}" if port_value else ""
-            path, span_count = self._redact_path(parsed.path)
-            return urlunsplit((parsed.scheme, f"{host}{port}", path, "", "")), span_count
+            # The host is intentional provenance. Userinfo, query, and fragment are
+            # dropped, while path segments are decoded for scanning before storage.
+            path, span_count = self._redact_path(parsed.path, decode_percent=True)
+            return urlunsplit(
+                (parsed.scheme, _safe_url_netloc(parsed), path, "", ""),
+            ), span_count
         return self._redact_path(value)
 
-    def _redact_path(self, value: str) -> tuple[str, int]:
-        parts = re.split(r"([/\\\\])", value)
+    def _redact_path(self, value: str, *, decode_percent: bool = False) -> tuple[str, int]:
+        parts = re.split(r"([/\\])", value)
         redacted_parts: list[str] = []
         span_count = 0
         for part in parts:
             if part in {"/", "\\"} or not part:
                 redacted_parts.append(part)
                 continue
-            redacted, count = self._redact_text(part, timing_exempt=False)
-            redacted_parts.append(redacted)
+            canonical = unquote(part) if decode_percent else part
+            redacted, count = self._redact_text(canonical, timing_exempt=False)
+            redacted_parts.append(part if count == 0 else redacted)
             span_count += count
         return "".join(redacted_parts), span_count
 
