@@ -2240,11 +2240,12 @@ def test_init_settings_write_preserves_harness_section(tmp_path: Path, monkeypat
 
 
 @pytest.mark.parametrize(
-    "source",
-    ["langfuse", "trace_export", "local"],
+    ("source", "expected_exit"),
+    [("langfuse", 1), ("trace_export", 0), ("local", 0)],
 )
 def test_init_trace_source_flag_persists_noninteractive_choice(
     source: str,
+    expected_exit: int,
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -2257,7 +2258,7 @@ def test_init_trace_source_flag_persists_noninteractive_choice(
         lambda: cli.redact.REDACTION_EXTRA_MODULES,
     )
 
-    assert main(["init", "--trace-source", source]) == 1
+    assert main(["init", "--trace-source", source]) == expected_exit
 
     output = capsys.readouterr().out
     assert "pip install 'kensa[redaction]'" in output
@@ -4553,7 +4554,7 @@ def test_configure_redaction_readiness_statuses(
 
 def test_redaction_init_failure_statuses() -> None:
     assert cli._redaction_init_failed("failed")
-    assert cli._redaction_init_failed("deferred")
+    assert not cli._redaction_init_failed("deferred")
     assert not cli._redaction_init_failed("ready")
     assert not cli._redaction_init_failed("skipped")
 

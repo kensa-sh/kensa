@@ -1625,7 +1625,7 @@ def _cmd_init_inner(
 def _redaction_init_failed(
     redaction_status: _RedactionInitStatus,
 ) -> bool:
-    return redaction_status in {"deferred", "failed"}
+    return redaction_status == "failed"
 
 
 def _redaction_install_command() -> str:
