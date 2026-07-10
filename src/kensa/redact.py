@@ -186,8 +186,8 @@ _CHUNK_OVERLAP = 500
 
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
 
-# Schema-owned TraceView and SpanView timing paths are exempt from DATE_TIME only;
-# every other entity and secret detector still applies to them.
+# Schema-owned TraceView and SpanView numeric timing values are preserved. String
+# values at these paths are exempt from DATE_TIME only, so other detectors still apply.
 _TIMING_PATH_ALLOWLIST = frozenset(
     {
         ("duration_ms",),
@@ -725,6 +725,7 @@ _RULESET = {
         "secret": _SCORE_SECRET,
     },
     "timing_path_allowlist": [list(path) for path in sorted(_TIMING_PATH_ALLOWLIST)],
+    "timing_numeric_policy": "preserve-schema-values",
     "version": REDACTOR_MANIFEST_VERSION,
 }
 RULESET_HASH = hashlib.sha256(json.dumps(_RULESET, sort_keys=True).encode()).hexdigest()
@@ -1074,8 +1075,10 @@ class Redactor:
         return redacted
 
     def _redact_numeric_leaf(self, value: int | float, path: tuple[str, ...]) -> Any:
+        if self._timing_exempt(path):
+            return value
         rendered = str(value)
-        redacted, span_count = self._redact_text(rendered, timing_exempt=self._timing_exempt(path))
+        redacted, span_count = self._redact_text(rendered, timing_exempt=False)
         if span_count == 0:
             return value
         # Typed placeholders are strings by contract; a sensitive numeric payload

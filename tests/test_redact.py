@@ -612,6 +612,35 @@ def test_redactor_timing_allowlist_exempts_date_time_only(
     assert timing_secret["timestamp"] == "[SECRET_1]"
 
 
+def test_redactor_preserves_schema_owned_numeric_timing_values(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = []
+    redactor = Redactor()
+    future_epoch_nano = 2_000_000_000_000_000_008
+    value = {
+        "started_at_unix_nano": future_epoch_nano,
+        "ended_at_unix_nano": future_epoch_nano,
+        "duration_ms": future_epoch_nano,
+        "spans": [
+            {
+                "started_at_unix_nano": future_epoch_nano,
+                "ended_at_unix_nano": future_epoch_nano,
+                "duration_ms": future_epoch_nano,
+            }
+        ],
+        "input": {"timestamp": future_epoch_nano},
+    }
+
+    redacted = redactor.redact_value(value)
+
+    assert redacted["started_at_unix_nano"] == future_epoch_nano
+    assert redacted["ended_at_unix_nano"] == future_epoch_nano
+    assert redacted["duration_ms"] == future_epoch_nano
+    assert redacted["spans"][0] == value["spans"][0]
+    assert redacted["input"]["timestamp"] == "[CREDIT_CARD_1]"
+
+
 def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
