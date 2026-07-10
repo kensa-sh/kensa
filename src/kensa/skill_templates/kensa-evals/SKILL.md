@@ -72,13 +72,15 @@ For `langfuse`:
 
 ```bash
 kensa connect langfuse
-kensa import --from langfuse --limit 50
+kensa import --from langfuse
 ```
 
 Langfuse imports need network access. Under a sandboxed harness that blocks network by default,
 request escalation for these commands instead of deferring or switching sources. Rate-limit
 backoff with retries is normal; let a healthy retry finish. Kensa supports both the legacy Langfuse
 trace API and observations-v2/events-only deployments.
+
+Use the CLI default import scope unless the user specifies one, and ask before substantially expanding it.
 
 For `trace_export`:
 
