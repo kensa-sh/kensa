@@ -38,6 +38,7 @@ Do:
    `uv.lock`, otherwise `pip install 'kensa[redaction]'`), downloads and checksum-verifies the
    pinned spaCy model, writes `.kensa/redaction.json`, and records an explicit
    `evidence_environment` (`local`, `staging`, or `production`) in `.kensa/settings.json`.
+   For noninteractive setup, pass `--evidence-environment` alongside `--trace-source`.
    `kensa doctor` reports redaction dependency presence, readiness, model tier, evidence
    environment, and any unsafe old artifacts. If doctor reports redaction not ready, re-run
    `kensa init`; trace import and payload exposure stay blocked until readiness exists. Never

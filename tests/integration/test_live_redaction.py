@@ -56,16 +56,23 @@ def test_live_sm_readiness_and_redaction_pass(
     with pytest.raises(redact.RedactionGateError, match="production"):
         redact.assert_redaction_ready(environment="production")
 
-    source = tmp_path / "traces.jsonl"
+    source = tmp_path / "AKIAIOSFODNN7EXAMPLE" / "alice.smith@example.com"
+    source.parent.mkdir()
     source.write_text(
         json.dumps(
             {
                 "id": "tr_live",
-                "input": (
-                    "Customer Alice Smith asked for a refund. "
-                    "Reach her at alice.smith@example.com or (212) 555-0182. "
-                    "SSN 078-05-1120. api_token=AKIAIOSFODNN7EXAMPLE"
+                "trace_url": (
+                    "https://trace.example.com/AKIAIOSFODNN7EXAMPLE/alice.smith@example.com"
                 ),
+                "input": {
+                    "message": (
+                        "Customer Alice Smith asked for a refund. "
+                        "Reach her at alice.smith@example.com or (212) 555-0182. "
+                        "SSN 078-05-1120. api_token=AKIAIOSFODNN7EXAMPLE"
+                    ),
+                    "timestamp": "01/02/1990",
+                },
                 "api_key": "sk-live-super-secret-value",
             }
         )
@@ -82,12 +89,16 @@ def test_live_sm_readiness_and_redaction_pass(
     )
 
     row = load_trace_views(out, environment="local")[0]
-    text = row["input"]
+    text = row["input"]["message"]
     assert "alice.smith@example.com" not in text
     assert "078-05-1120" not in text
     assert "(212) 555-0182" not in text
     assert "[EMAIL_ADDRESS_" in text
-    assert "sk-live-super-secret-value" not in out.read_text()
+    rendered = out.read_text()
+    assert "sk-live-super-secret-value" not in rendered
+    assert "AKIAIOSFODNN7EXAMPLE" not in rendered
+    assert "alice.smith@example.com" not in rendered
+    assert "01/02/1990" not in rendered
     manifest = result.redaction
     assert manifest["version"] == "kensa.redactor.v2"
     assert manifest["mandatory"] is True

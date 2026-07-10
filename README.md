@@ -104,6 +104,8 @@ For projects that track dependencies with `requirements.txt`, add `kensa`, then 
 
 In interactive mode, `kensa init` asks for the trace source and stores it in `.kensa/settings.json`.
 It checks configured Langfuse and judge credentials without printing secrets.
+For noninteractive connected setup, pass both choices explicitly, for example
+`kensa init --trace-source langfuse --evidence-environment staging`.
 
 ### CLI-only
 
@@ -236,11 +238,16 @@ checksum-verifies the pinned `en_core_web_lg-3.8.0` spaCy model (falling back to
 Every `kensa import` then runs key/path redaction, Kensa deterministic recognizers,
 detect-secrets, Presidio built-ins, and spaCy NER before anything is stored, and
 writes a `kensa.redactor.v2` manifest next to the artifact. Redacted values render
-as typed placeholders with stable per-run instance suffixes (`[PERSON_1]`,
-`[EMAIL_ADDRESS_2]`). `kensa traces list/sample/get`, `kensa inspect`, and eval
-generation refuse to expose payloads from artifacts with missing, older, or unsafe
-manifests; re-import those with `kensa import`. Eval-only installs never pull the
-NLP stack: readiness, not installation, enforces the boundary.
+as typed placeholders with readable counters (`[PERSON_1]`, `[EMAIL_ADDRESS_2]`)
+and stable aliases for repeated normalized values within each trace. `PERSON`,
+`ORGANIZATION`, `LOCATION`, and `NRP` values use Unicode `casefold()`, trimmed
+surrounding whitespace, and collapsed internal whitespace for alias identity. Secrets,
+URLs, crypto addresses, account identifiers, and other sensitive values retain exact
+matching. Coreference resolution, honorific stripping, nickname matching, and cross-type
+identity linking are out of scope. `kensa traces list/sample/get`, `kensa inspect`, and
+eval generation refuse to expose payloads from artifacts with missing, older, or unsafe
+manifests; re-import those with `kensa import`. Eval-only installs never pull the NLP stack:
+readiness, not installation, enforces the boundary.
 
 </details>
 

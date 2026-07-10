@@ -45,6 +45,7 @@ def _safe_manifest_dict(tier: str = "lg", **overrides: Any) -> dict[str, Any]:
         "language": "en",
         "value_redaction_applied": True,
         "redaction_available": True,
+        "ruleset_hash": redact.RULESET_HASH,
         "pseudonymization": "instance-counter",
         "model": {
             "name": "en_core_web_lg" if tier == "lg" else "en_core_web_sm",
@@ -352,7 +353,7 @@ def test_redactor_requires_readiness(
         Redactor(environment="local")
 
 
-def test_redactor_redacts_values_with_stable_instance_aliases(
+def test_redactor_redacts_values_with_stable_aliases(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redactor = Redactor(environment="local")
@@ -367,6 +368,110 @@ def test_redactor_redacts_values_with_stable_instance_aliases(
     assert redacted["other"] == "Ask Bob"
     again = Redactor(environment="local")
     assert redact_value(again, value) == redacted
+
+
+@pytest.mark.parametrize("entity_type", ["PERSON", "ORGANIZATION", "LOCATION", "NRP"])
+def test_redactor_normalizes_alias_identity_within_each_trace(
+    entity_type: str,
+    redaction_ready: FakeRedactionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = f"{entity_type}:"
+
+    def analyze(text: str) -> list[FakeRecognizerResult]:
+        if not text.startswith(prefix):
+            return []
+        return [FakeRecognizerResult(entity_type, len(prefix), len(text), 0.85)]
+
+    monkeypatch.setattr(redaction_ready, "analyze", analyze)
+    redactor = Redactor(environment="local")
+
+    result = redactor.redact_trace_view(
+        {"input": [f"{prefix}Straße  Group", f"{prefix}\tSTRASSE GROUP \n"]}
+    )
+
+    alias = f"[{entity_type}_1]"
+    assert result.trace["input"] == [f"{prefix}{alias}", f"{prefix}{alias}"]
+
+
+def test_redactor_scopes_alias_identity_to_each_trace(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redactor = Redactor(environment="local")
+
+    first = redactor.redact_trace_view({"input": "Alice"})
+    second = redactor.redact_trace_view({"input": "Alice"})
+
+    assert first.trace["input"] == "[PERSON_1]"
+    assert second.trace["input"] == "[PERSON_2]"
+    assert redactor.manifest()["entity_instance_counts"] == {"PERSON": 2}
+
+
+def test_redactor_keeps_entity_types_separate_for_same_text(
+    redaction_ready: FakeRedactionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redaction_ready.persons = []
+
+    def analyze(text: str) -> list[FakeRecognizerResult]:
+        entity_type, separator, _value = text.partition(":")
+        if not separator or entity_type not in {"PERSON", "ORGANIZATION"}:
+            return []
+        return [FakeRecognizerResult(entity_type, len(entity_type) + 1, len(text), 0.85)]
+
+    monkeypatch.setattr(redaction_ready, "analyze", analyze)
+    redactor = Redactor(environment="local")
+
+    result = redactor.redact_trace_view({"input": ["PERSON:Acme", "ORGANIZATION:Acme"]})
+
+    assert result.trace["input"] == ["PERSON:[PERSON_1]", "ORGANIZATION:[ORGANIZATION_1]"]
+
+
+def test_redactor_keeps_name_variants_distinct(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = ["Alice Smith", "Alice B. Smith"]
+    redactor = Redactor(environment="local")
+
+    result = redactor.redact_trace_view({"input": ["Alice Smith", "Alice B. Smith"]})
+
+    assert result.trace["input"] == ["[PERSON_1]", "[PERSON_2]"]
+
+
+def test_redactor_preserves_exact_alias_identity_for_sensitive_values(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    redaction_ready.persons = []
+    redaction_ready.secret_markers = ["tok_Live", "tok_live"]
+    redactor = Redactor(environment="local")
+    lower_crypto = "0x52908400098527886e0f7030069857d2e4169ee7"
+    upper_crypto = lower_crypto.upper().replace("0X", "0x")
+
+    result = redactor.redact_trace_view(
+        {
+            "input": [
+                "https://example.com/Case",
+                "https://example.com/case",
+                "tok_Live",
+                "tok_live",
+                lower_crypto,
+                upper_crypto,
+                "078-05-1120",
+                "078 05 1120",
+            ]
+        }
+    )
+
+    assert result.trace["input"] == [
+        "[URL_1]",
+        "[URL_2]",
+        "[SECRET_1]",
+        "[SECRET_2]",
+        "[CRYPTO_1]",
+        "[CRYPTO_2]",
+        "[US_SSN_1]",
+        "[US_SSN_2]",
+    ]
 
 
 def test_redactor_secret_keys_and_key_rewrites(
@@ -423,27 +528,72 @@ def test_redactor_timing_allowlist_exempts_date_time_only(
     redactor = Redactor(environment="local")
     value = {
         "started_at_unix_nano": "DOB 01/02/1990",
+        "spans": [
+            {
+                "started_at_unix_nano": "DOB 01/02/1990",
+                "ended_at_unix_nano": "DOB 01/02/1990",
+                "duration_ms": "DOB 01/02/1990",
+            }
+        ],
         "note": "DOB 01/02/1990",
+        "input": {"timestamp": "DOB 01/02/1990"},
+        "raw": {"created_at": "DOB 01/02/1990"},
+        "attributes": {"end_time": "DOB 01/02/1990"},
     }
     redacted = redactor.redact_value(value)
     assert redacted["started_at_unix_nano"] == "DOB 01/02/1990"
+    assert redacted["spans"][0] == {
+        "started_at_unix_nano": "DOB 01/02/1990",
+        "ended_at_unix_nano": "DOB 01/02/1990",
+        "duration_ms": "DOB 01/02/1990",
+    }
     assert redacted["note"] == "DOB [DATE_TIME_1]"
+    assert redacted["input"]["timestamp"] == "DOB [DATE_TIME_1]"
+    assert redacted["raw"]["created_at"] == "DOB [DATE_TIME_1]"
+    assert redacted["attributes"]["end_time"] == "DOB [DATE_TIME_1]"
     redaction_ready.secret_markers = ["tok_live"]
     timing_secret = redactor.redact_value({"timestamp": "tok_live"})
     assert timing_secret["timestamp"] == "[SECRET_1]"
 
 
-def test_redactor_provenance_subtree_is_exempt(
+def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
+    redaction_ready.secret_markers = ["sk-live-value"]
     redactor = Redactor(environment="local")
     trace = {
-        "source": {"source_url": "https://collector.example.com/v1"},
+        "schema_version": "kensa.trace_view.v1",
+        "source": {
+            "provider": "langfuse",
+            "import_run_id": "import-2026-07-10T00-00-00Z",
+            "imported_at": "2026-07-10T00:00:00Z",
+            "source_path": "/tmp/sk-live-value/alice@example.com",
+            "source_url": (
+                "https://collector.example.com/v1/sk-live-value/alice@example.com?token=raw"
+            ),
+            "trace_url": "https://trace.example.com/sk-live-value/alice@example.com",
+        },
         "input": "https://collector.example.com/v1",
     }
     redacted = redactor.redact_value(trace)
-    assert redacted["source"]["source_url"] == "https://collector.example.com/v1"
+    assert redacted["schema_version"] == "kensa.trace_view.v1"
+    assert redacted["source"]["provider"] == "langfuse"
+    assert redacted["source"]["import_run_id"] == "import-2026-07-10T00-00-00Z"
+    assert redacted["source"]["imported_at"] == "2026-07-10T00:00:00Z"
+    assert redacted["source"]["source_path"] == "/tmp/[SECRET_1]/[EMAIL_ADDRESS_1]"
+    assert redacted["source"]["source_url"] == (
+        "https://collector.example.com/v1/[SECRET_1]/[EMAIL_ADDRESS_1]"
+    )
+    assert redacted["source"]["trace_url"] == (
+        "https://trace.example.com/[SECRET_1]/[EMAIL_ADDRESS_1]"
+    )
     assert redacted["input"] == "[URL_1]"
+    invalid_port = redactor.redact_value(
+        {"source": {"source_url": "https://collector.example.com:bad/alice@example.com"}}
+    )
+    assert invalid_port["source"]["source_url"] == (
+        "https://collector.example.com/[EMAIL_ADDRESS_1]"
+    )
 
 
 def test_redactor_unknown_entity_and_conflicts_render_redacted(
@@ -633,9 +783,26 @@ def test_safe_manifest_accepts_safe_v2() -> None:
             _safe_manifest_dict(redaction_available=False),
             "while redaction was unavailable",
         ),
+        (_safe_manifest_dict(ruleset_hash="wrong"), "unknown ruleset"),
+        (_safe_manifest_dict(language="fr"), "unsupported language"),
         (_safe_manifest_dict(pseudonymization=None), "no pseudonymization scheme"),
+        (
+            _safe_manifest_dict(pseudonymization="anything"),
+            "unsupported pseudonymization scheme",
+        ),
         (_safe_manifest_dict(model=None), "no model metadata"),
         (_safe_manifest_dict(model={"tier": "lg"}), "corrupt model metadata"),
+        (
+            _safe_manifest_dict(
+                model={
+                    "name": "untrusted-0",
+                    "version": "3.8.0",
+                    "tier": "lg",
+                    "checksum_verified": True,
+                }
+            ),
+            "corrupt model metadata",
+        ),
         (
             _safe_manifest_dict(
                 model={
@@ -714,6 +881,11 @@ def test_assert_redaction_ready_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        redact,
+        "missing_redaction_dependencies",
+        lambda: redact.REDACTION_EXTRA_MODULES,
+    )
     with pytest.raises(RedactionNotReadyError, match="dependencies are missing"):
         assert_redaction_ready(environment="local")
 
@@ -943,6 +1115,11 @@ def test_ensure_redaction_ready_requires_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        redact,
+        "missing_redaction_dependencies",
+        lambda: redact.REDACTION_EXTRA_MODULES,
+    )
     with pytest.raises(RedactionNotReadyError, match="Install kensa"):
         ensure_redaction_ready()
 

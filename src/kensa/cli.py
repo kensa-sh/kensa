@@ -556,14 +556,28 @@ def import_command(
     default=None,
     help="Persist the selected trace source.",
 )
-def init(agent_choice: str | None, trace_source: str | None) -> None:
+@click.option(
+    "--evidence-environment",
+    type=click.Choice(_EVIDENCE_ENVIRONMENT_CHOICES, case_sensitive=False),
+    default=None,
+    help="Persist the evidence environment: local, staging, or production.",
+)
+def init(
+    agent_choice: str | None,
+    trace_source: str | None,
+    evidence_environment: str | None,
+) -> None:
     """Set up Kensa."""
     selected_agent = cast(
         AgentInstructionChoice | None,
         agent_choice.lower() if agent_choice else None,
     )
     selected_source = cast(EvidenceSource | None, trace_source.lower() if trace_source else None)
-    code = _cmd_init(selected_source, selected_agent)
+    selected_environment = cast(
+        EvidenceEnvironmentName | None,
+        evidence_environment.lower() if evidence_environment else None,
+    )
+    code = _cmd_init(selected_source, selected_agent, selected_environment)
     raise click.exceptions.Exit(code)
 
 
@@ -1258,18 +1272,22 @@ def _name_tokens(name: str) -> tuple[str, ...]:
 
 def _doctor_redaction_report() -> dict[str, Any]:
     missing = redact.missing_redaction_dependencies()
+    settings = _read_settings()
+    environment = settings.evidence_environment
     readiness: redact.RedactionReadiness | None = None
     readiness_error: str | None = None
     try:
-        readiness = redact.read_redaction_readiness()
+        readiness = redact.assert_redaction_ready(environment=environment or "local")
     except redact.RedactionError as exc:
         readiness_error = str(exc)
-    settings = _read_settings()
-    environment = settings.evidence_environment
+        try:
+            readiness = redact.read_redaction_readiness()
+        except redact.RedactionError:
+            readiness = None
     unsafe_artifacts = _unsafe_import_artifacts(environment or "local")
     return {
         "dependencies": {name: name not in missing for name in redact.REDACTION_EXTRA_MODULES},
-        "ready": not missing and readiness is not None and readiness.redaction_available,
+        "ready": readiness_error is None and readiness is not None,
         "readiness": readiness.to_dict() if readiness is not None else None,
         "readiness_error": readiness_error,
         "model_tier": readiness.model_tier if readiness is not None else None,
@@ -1293,7 +1311,10 @@ def _unsafe_import_artifacts(environment: str) -> list[str]:
     ]
 
 
-def _redaction_doctor_findings(report: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _redaction_doctor_findings(
+    report: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    problems: list[str] = []
     warnings: list[str] = []
     next_steps: list[str] = []
     missing = [name for name, present in report["dependencies"].items() if not present]
@@ -1305,11 +1326,16 @@ def _redaction_doctor_findings(report: dict[str, Any]) -> tuple[list[str], list[
             + ". Install kensa[redaction]."
         )
     if report["readiness_error"]:
-        warnings.append(str(report["readiness_error"]))
+        finding = str(report["readiness_error"])
+        if trace_source_configured:
+            problems.append(finding)
+        else:
+            warnings.append(finding)
     if not report["ready"] and trace_source_configured:
-        warnings.append(
+        finding = (
             "mandatory trace redaction is not ready; trace import and payload exposure are blocked."
         )
+        problems.append(finding)
         next_steps.append("Run kensa init to bootstrap mandatory trace redaction.")
     warnings.extend(
         f"unsafe trace artifact blocked from exposure (re-import required): {artifact}"
@@ -1317,7 +1343,7 @@ def _redaction_doctor_findings(report: dict[str, Any]) -> tuple[list[str], list[
     )
     if report["unsafe_artifacts"]:
         next_steps.append("Re-import blocked trace artifacts with kensa import.")
-    return warnings, next_steps
+    return problems, warnings, next_steps
 
 
 def _print_doctor_redaction(report: dict[str, Any]) -> None:
@@ -1343,7 +1369,10 @@ def _doctor_result(args: Any) -> dict[str, Any]:
     warnings: list[str] = [_ENV_SAFETY_WARNING]
     next_steps: list[str] = []
     redaction_report = _doctor_redaction_report()
-    redaction_warnings, redaction_next_steps = _redaction_doctor_findings(redaction_report)
+    redaction_problems, redaction_warnings, redaction_next_steps = _redaction_doctor_findings(
+        redaction_report
+    )
+    problems.extend(redaction_problems)
     warnings.extend(redaction_warnings)
     next_steps.extend(redaction_next_steps)
     eval_readiness = _latest_eval_readiness()
@@ -1573,6 +1602,7 @@ def _record_harness_readiness(*, ready: bool, warnings: list[str]) -> bool:
 def _cmd_init(
     evidence_source: EvidenceSource | None = None,
     agent_choice: AgentInstructionChoice | None = None,
+    evidence_environment: EvidenceEnvironmentName | None = None,
 ) -> int:
     steps = _Steps() if _is_interactive() else None
     if steps is None:
@@ -1580,7 +1610,9 @@ def _cmd_init(
     else:
         steps.start("kensa init")
     try:
-        return _cmd_init_inner(steps, evidence_source, agent_choice)
+        if evidence_environment is None:
+            return _cmd_init_inner(steps, evidence_source, agent_choice)
+        return _cmd_init_inner(steps, evidence_source, agent_choice, evidence_environment)
     except KeyboardInterrupt:
         _init_item(steps, "interrupted.", ok=False, err=True)
         if steps is not None:
@@ -1592,6 +1624,7 @@ def _cmd_init_inner(
     steps: _Steps | None,
     explicit_evidence_source: EvidenceSource | None = None,
     explicit_agent_choice: AgentInstructionChoice | None = None,
+    explicit_evidence_environment: EvidenceEnvironmentName | None = None,
 ) -> int:
     settings = _read_settings()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
@@ -1605,7 +1638,14 @@ def _cmd_init_inner(
     redaction_status = _configure_redaction_readiness(steps, evidence_source)
     environment: EvidenceEnvironmentName | None = None
     if evidence_source is not None:
-        environment = _select_evidence_environment(steps, evidence_source)
+        if explicit_evidence_environment is None:
+            environment = _select_evidence_environment(steps, evidence_source)
+        else:
+            environment = _select_evidence_environment(
+                steps,
+                evidence_source,
+                explicit_environment=explicit_evidence_environment,
+            )
         _record_evidence_environment(environment)
         if environment is not None:
             _init_item(steps, f"evidence environment: {environment}")
@@ -1633,6 +1673,10 @@ def _redaction_init_failed(
     environment: EvidenceEnvironmentName | None,
 ) -> bool:
     if redaction_status == "failed":
+        return True
+    if evidence_source == "langfuse" and environment is None:
+        return True
+    if environment == "production" and redaction_status == "degraded":
         return True
     if redaction_status != "deferred":
         return False
@@ -1737,7 +1781,11 @@ def _configure_redaction_readiness(
 def _select_evidence_environment(
     steps: _Steps | None,
     evidence_source: EvidenceSource,
+    *,
+    explicit_environment: EvidenceEnvironmentName | None = None,
 ) -> EvidenceEnvironmentName | None:
+    if explicit_environment is not None:
+        return explicit_environment
     current = _read_settings().evidence_environment
     if current is not None:
         return current

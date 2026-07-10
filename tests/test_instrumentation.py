@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import kensa
-from kensa import cli_traces, tracing
+from kensa import cli_traces, redact, tracing
 from kensa.tracing import record_llm_call, record_tool_call
 
 
@@ -84,6 +84,7 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
                     "language": "en",
                     "value_redaction_applied": True,
                     "redaction_available": True,
+                    "ruleset_hash": redact.RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
                         "name": "en_core_web_lg",

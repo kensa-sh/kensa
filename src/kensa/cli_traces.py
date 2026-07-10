@@ -36,12 +36,19 @@ def read_evidence_environment() -> str:
         return "local"
     try:
         payload = json.loads(settings_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return "local"
-    environment = payload.get("evidence_environment") if isinstance(payload, dict) else None
+    except OSError as exc:
+        raise ValueError(f"Could not read Kensa settings: {display_path(settings_path)}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid Kensa settings JSON: {display_path(settings_path)}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Kensa settings must be a JSON object: {display_path(settings_path)}")
+    environment = payload.get("evidence_environment")
     if isinstance(environment, str) and environment in _EVIDENCE_ENVIRONMENTS:
         return environment
-    return "local"
+    raise ValueError(
+        f"Kensa settings do not record a valid evidence_environment: "
+        f"{display_path(settings_path)}. Re-run kensa init with --evidence-environment."
+    )
 
 
 def cmd_traces(args: Any) -> int:

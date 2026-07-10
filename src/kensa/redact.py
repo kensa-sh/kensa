@@ -30,6 +30,7 @@ from enum import StrEnum
 from pathlib import Path
 from re import Match
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 REDACTOR_MANIFEST_VERSION = "kensa.redactor.v2"
 REDACTION_READINESS_SCHEMA_VERSION = "kensa.redaction_readiness.v1"
@@ -116,6 +117,14 @@ class EntityType(StrEnum):
 
 
 _KNOWN_ENTITY_LABELS = frozenset(str(entity) for entity in EntityType)
+_NORMALIZED_ALIAS_ENTITY_TYPES = frozenset(
+    {
+        str(EntityType.LOCATION),
+        str(EntityType.NRP),
+        str(EntityType.ORGANIZATION),
+        str(EntityType.PERSON),
+    }
+)
 
 # Catalog entities with no built-in implementation in the pinned Presidio release and no
 # Kensa deterministic recognizer in this pass. Deferred to the future list (AC 62); their
@@ -193,32 +202,35 @@ _CHUNK_OVERLAP = 500
 
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
 
-# Schema-owned timing fields are exempt from DATE_TIME only; every other entity and
-# secret scanning still applies to them (folded into the ruleset hash).
-_TIMING_FIELD_ALLOWLIST = frozenset(
+# Schema-owned TraceView and SpanView timing paths are exempt from DATE_TIME only;
+# every other entity and secret detector still applies to them.
+_TIMING_PATH_ALLOWLIST = frozenset(
     {
-        "checked_at",
-        "created_at",
-        "duration_ms",
-        "endTime",
-        "end_time",
-        "end_time_unix_nano",
-        "ended_at_unix_nano",
-        "imported_at",
-        "startTime",
-        "start_time",
-        "start_time_unix_nano",
-        "started_at_unix_nano",
-        "timeUnixNano",
-        "time_unix_nano",
-        "timestamp",
+        ("duration_ms",),
+        ("ended_at_unix_nano",),
+        ("spans", "[]", "duration_ms"),
+        ("spans", "[]", "ended_at_unix_nano"),
+        ("spans", "[]", "started_at_unix_nano"),
+        ("started_at_unix_nano",),
     }
 )
-# Kensa-generated provenance subtree on TraceView rows; trace_url is sanitized with
-# safe_endpoint at import time. The top-level schema_version value is a Kensa
-# constant written by the importer itself and can never carry payload data. Both
-# are folded into the ruleset hash.
-_PROVENANCE_PATHS = (("source",), ("schema_version",))
+# Only Kensa-generated provenance leaves bypass value detection. Source paths and
+# URLs retain useful structure but have every path segment redacted.
+_PROVENANCE_PATHS = frozenset(
+    {
+        ("schema_version",),
+        ("source", "import_run_id"),
+        ("source", "imported_at"),
+        ("source", "provider"),
+    }
+)
+_PROVENANCE_LOCATOR_PATHS = frozenset(
+    {
+        ("source", "source_path"),
+        ("source", "source_url"),
+        ("source", "trace_url"),
+    }
+)
 # Dict keys may only be rewritten inside free-form payload containers, never where the
 # key is part of the TraceView/SpanView schema.
 _FREEFORM_CONTAINERS = frozenset({"attributes", "raw", "input", "output", "events", "metadata"})
@@ -721,6 +733,11 @@ _DETERMINISTIC_RECOGNIZER_NAMES = (
 )
 
 _RULESET = {
+    "alias_normalization": {
+        "entity_types": sorted(_NORMALIZED_ALIAS_ENTITY_TYPES),
+        "steps": ["unicode-casefold", "trim", "collapse-whitespace"],
+    },
+    "alias_scope": "trace",
     "chunk_chars": _CHUNK_CHARS,
     "chunk_overlap": _CHUNK_OVERLAP,
     "detect_secrets_plugins": [dict(plugin) for plugin in _DETECT_SECRETS_PLUGINS],
@@ -730,7 +747,8 @@ _RULESET = {
     "phone_regions": list(_PHONE_REGIONS),
     "presidio_recognizers": list(_PRESIDIO_RECOGNIZER_NAMES),
     "presidio_score_threshold": _PRESIDIO_SCORE_THRESHOLD,
-    "provenance_paths": [list(path) for path in _PROVENANCE_PATHS],
+    "provenance_locator_paths": [list(path) for path in sorted(_PROVENANCE_LOCATOR_PATHS)],
+    "provenance_paths": [list(path) for path in sorted(_PROVENANCE_PATHS)],
     "pseudonymization": PSEUDONYMIZATION_SCHEME,
     "secret_key_pattern": _SECRET_KEY.pattern,
     "spacy_entity_mapping": _SPACY_ENTITY_MAPPING,
@@ -742,7 +760,7 @@ _RULESET = {
         "pattern": _SCORE_PATTERN,
         "secret": _SCORE_SECRET,
     },
-    "timing_field_allowlist": sorted(_TIMING_FIELD_ALLOWLIST),
+    "timing_path_allowlist": [list(path) for path in sorted(_TIMING_PATH_ALLOWLIST)],
     "version": REDACTOR_MANIFEST_VERSION,
 }
 RULESET_HASH = hashlib.sha256(json.dumps(_RULESET, sort_keys=True).encode()).hexdigest()
@@ -910,9 +928,9 @@ def _load_engine(readiness: RedactionReadiness) -> _EngineHandle:
 class Redactor:
     """Run-level redaction engine: one instance per import run, one artifact.
 
-    Caches the analyzer, holds the in-memory value-to-alias map for stable
-    instance-counter pseudonymization, and accumulates artifact-level manifest
-    stats. The alias map is discarded with the instance and never persisted.
+    Caches the analyzer, holds a trace-scoped in-memory value-to-alias map and
+    run-level readable counters, and accumulates artifact-level manifest stats.
+    Alias identities are discarded between traces and never persisted.
     """
 
     def __init__(
@@ -940,6 +958,7 @@ class Redactor:
         return self._environment
 
     def redact_trace_view(self, trace: dict[str, Any]) -> RedactionResult:
+        self._alias_map.clear()
         spans_before = self._span_count
         changed_before = self._changed_value_count
         redacted = cast(dict[str, Any], self.redact_value(trace))
@@ -1045,7 +1064,13 @@ class Redactor:
     def _redact_string_leaf(self, value: str, path: tuple[str, ...]) -> str:
         if self._is_provenance_path(path):
             return value
-        redacted, span_count = self._redact_text(value, timing_exempt=self._timing_exempt(path))
+        if path in _PROVENANCE_LOCATOR_PATHS:
+            redacted, span_count = self._redact_locator(value)
+        else:
+            redacted, span_count = self._redact_text(
+                value,
+                timing_exempt=self._timing_exempt(path),
+            )
         self._span_count += span_count
         if redacted != value:
             self._changed_value_count += 1
@@ -1062,11 +1087,37 @@ class Redactor:
 
     @staticmethod
     def _timing_exempt(path: tuple[str, ...]) -> bool:
-        return bool(path) and path[-1] in _TIMING_FIELD_ALLOWLIST
+        return path in _TIMING_PATH_ALLOWLIST
 
     @staticmethod
     def _is_provenance_path(path: tuple[str, ...]) -> bool:
-        return any(path[: len(prefix)] == prefix for prefix in _PROVENANCE_PATHS)
+        return path in _PROVENANCE_PATHS
+
+    def _redact_locator(self, value: str) -> tuple[str, int]:
+        parsed = urlsplit(value)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ""
+            try:
+                port_value = parsed.port
+            except ValueError:
+                port_value = None
+            port = f":{port_value}" if port_value else ""
+            path, span_count = self._redact_path(parsed.path)
+            return urlunsplit((parsed.scheme, f"{host}{port}", path, "", "")), span_count
+        return self._redact_path(value)
+
+    def _redact_path(self, value: str) -> tuple[str, int]:
+        parts = re.split(r"([/\\\\])", value)
+        redacted_parts: list[str] = []
+        span_count = 0
+        for part in parts:
+            if part in {"/", "\\"} or not part:
+                redacted_parts.append(part)
+                continue
+            redacted, count = self._redact_text(part, timing_exempt=False)
+            redacted_parts.append(redacted)
+            span_count += count
+        return "".join(redacted_parts), span_count
 
     def _redact_text(self, text: str, *, timing_exempt: bool) -> tuple[str, int]:
         if not text.strip():
@@ -1135,7 +1186,10 @@ class Redactor:
         return self._alias(span.entity_type, text[span.start : span.end])
 
     def _alias(self, entity_type: str, original: str) -> str:
-        key = (entity_type, original)
+        identity = original
+        if entity_type in _NORMALIZED_ALIAS_ENTITY_TYPES:
+            identity = " ".join(original.casefold().split())
+        key = (entity_type, identity)
         existing = self._alias_map.get(key)
         if existing is not None:
             return existing
@@ -1209,17 +1263,21 @@ def _manifest_problem(
         return "trace artifact was written without mandatory value redaction"
     if manifest.get("redaction_available") is not True:
         return "trace artifact was written while redaction was unavailable"
+    if manifest.get("ruleset_hash") != RULESET_HASH:
+        return "trace artifact redaction manifest records an unknown ruleset"
+    if manifest.get("language") != LANGUAGE:
+        return "trace artifact redaction manifest records an unsupported language"
     if not manifest.get("pseudonymization"):
         return "trace artifact redaction manifest records no pseudonymization scheme"
+    if manifest.get("pseudonymization") != PSEUDONYMIZATION_SCHEME:
+        return "trace artifact redaction manifest records an unsupported pseudonymization scheme"
     model = manifest.get("model")
     if not isinstance(model, dict):
         return "trace artifact redaction manifest has no model metadata"
     tier = model.get("tier")
-    if (
-        not model.get("name")
-        or not model.get("version")
-        or tier not in {spec.tier for spec in _PINNED_SPACY_MODELS}
-    ):
+    model_tuple = (model.get("name"), model.get("version"), tier)
+    pinned_tuples = {(spec.name, spec.version, spec.tier) for spec in _PINNED_SPACY_MODELS}
+    if model_tuple not in pinned_tuples:
         return "trace artifact redaction manifest records corrupt model metadata"
     if model.get("checksum_verified") is not True:
         return "trace artifact redaction manifest records an unverified model"

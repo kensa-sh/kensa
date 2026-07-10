@@ -7,8 +7,10 @@ from typing import Any, cast
 import pytest
 from conftest import FakeRedactionEnv
 
+from kensa import redact
 from kensa import traces as traces_module
 from kensa.redact import (
+    RULESET_HASH,
     RedactionError,
     RedactionGateError,
     RedactionNotReadyError,
@@ -82,6 +84,7 @@ def _write_safe_sibling_manifest(artifact: Path, *, tier: str = "lg") -> Path:
                     "language": "en",
                     "value_redaction_applied": True,
                     "redaction_available": True,
+                    "ruleset_hash": RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
                         "name": "en_core_web_lg" if tier == "lg" else "en_core_web_sm",
@@ -349,6 +352,11 @@ def test_import_requires_redaction_readiness_before_reading_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        redact,
+        "missing_redaction_dependencies",
+        lambda: redact.REDACTION_EXTRA_MODULES,
+    )
     source = tmp_path / "traces.jsonl"
     source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
     out = tmp_path / "imports" / "blocked.jsonl"
