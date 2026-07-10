@@ -224,16 +224,13 @@ optional.
 </details>
 
 <details>
-<summary>How do I enable strict value redaction?</summary>
+<summary>How does Kensa handle PII in traces?</summary>
 
-Install the extra and download the spaCy model it relies on:
-
-```bash
-uv add --dev "kensa[redaction]"
-uv run python -m spacy download en_core_web_sm
-```
-
-Without the model, imports fall back to key-only redaction.
+Every `kensa import` scans payloads with detect-secrets, Presidio, spaCy NER, and
+Kensa's own recognizers, then rewrites PII and secrets as typed placeholders like
+`[PERSON_1]` before anything is stored. Redaction fails closed: if the dependencies
+or the pinned model are missing, trace import and payload exposure stay blocked
+until `kensa init` sets them up.
 
 </details>
 

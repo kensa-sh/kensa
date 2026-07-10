@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from langfuse import Langfuse
 
-from kensa import cli
+from kensa import redact
 from kensa import traces as traces_module
 from kensa.providers import langfuse as langfuse_provider
 
@@ -103,27 +103,42 @@ def _assert_non_empty_data(payload: dict[str, Any], *, provider: str) -> None:
     )
 
 
+def _prepare_live_redaction_readiness(tmp_path: Path) -> None:
+    """Bootstrap redaction readiness for live connected import tests."""
+
+    missing = redact.missing_redaction_dependencies()
+    if missing:
+        pytest.skip(f"kensa[redaction] extra not installed: {', '.join(missing)}")
+    os.environ["KENSA_MODELS_DIR"] = str(tmp_path / "models")
+    original_cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        redact.ensure_redaction_ready()
+    finally:
+        os.chdir(original_cwd)
+
+
 def _import_live_payload(
     *,
     provider: str,
     payload: dict[str, Any],
-    endpoint: str,
-    project: str | None,
-    since: str,
     tmp_path: Path,
 ) -> None:
+    _prepare_live_redaction_readiness(tmp_path)
     out = tmp_path / f"{provider}.jsonl"
-    result = cli._import_connected_payload(
-        provider=provider,
-        payload=payload,
-        out=out,
-        endpoint=endpoint,
-        project=project,
-        since=since,
-        limit=_live_limit(),
-        max_payload_bytes=_payload_size(payload),
-        redact="keys",
-    )
+    original_cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        result = traces_module.import_trace_records(
+            provider=provider,
+            payload=payload,
+            source_label=f"{provider}:connected",
+            out=out,
+            limit=_live_limit(),
+            max_payload_bytes=_payload_size(payload),
+        )
+    finally:
+        os.chdir(original_cwd)
 
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert result.records_written > 0
@@ -204,9 +219,6 @@ def test_live_langfuse_connected_import_writes_non_empty_records(tmp_path: Path)
     _import_live_payload(
         provider="langfuse",
         payload=payload,
-        endpoint=endpoint,
-        project=None,
-        since=since,
         tmp_path=tmp_path,
     )
 
@@ -232,8 +244,5 @@ def test_live_langfuse_observations_only_import_writes_non_empty_records(
     _import_live_payload(
         provider="langfuse",
         payload=payload,
-        endpoint=endpoint,
-        project=None,
-        since=since,
         tmp_path=tmp_path,
     )

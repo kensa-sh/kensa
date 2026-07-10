@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import kensa
-from kensa import cli_traces, tracing
+from kensa import cli_traces, redact, tracing
 from kensa.tracing import record_llm_call, record_tool_call
 
 
@@ -75,6 +76,26 @@ def test_instrument_run_directory_writes_manifest(tmp_path: Path) -> None:
 
 def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> None:
     source = tmp_path / "spans.jsonl"
+    source.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "ruleset_hash": redact.RULESET_HASH,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_sm",
+                        "version": "3.8.0",
+                        "checksum_verified": True,
+                    },
+                }
+            }
+        )
+    )
     source.write_text(
         json.dumps(
             {
@@ -121,6 +142,10 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
         )
         + "\n"
     )
+    manifest_path = source.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
 
     assert (
         cli_traces.cmd_traces(

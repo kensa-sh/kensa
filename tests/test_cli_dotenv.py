@@ -16,7 +16,7 @@ def _write_pyproject(path: Path, dotenv: str | None = None) -> None:
 
 
 def _patch_trace_list(monkeypatch: pytest.MonkeyPatch, assertion: Any | None = None) -> None:
-    def fake_load_trace_views(_source: Path) -> list[dict[str, Any]]:
+    def fake_load_trace_views(_source: Path, **_kwargs: Any) -> list[dict[str, Any]]:
         if assertion is not None:
             assertion()
         return []

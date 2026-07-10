@@ -42,3 +42,15 @@ jobs:
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
       - run: uv build
+
+  # Run redaction with real spaCy/Presidio dependencies and the pinned small model.
+  redaction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.11
+      - run: uv sync --group dev --python 3.11
+      - run: uv pip install ".[redaction]"
+      - run: uv run pytest -q -m "not live"
+      - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live

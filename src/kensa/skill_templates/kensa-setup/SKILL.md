@@ -30,8 +30,9 @@ Do:
    client, or module is missing instead of letting the boundary degrade to a no-model path.
 6. Wrap model calls with Kensa tracing helpers when needed so the persistent smoke eval records
    at least one LLM span.
-7. Run `kensa doctor` and fix harness blockers until it passes. When blocked on a missing
-   credential, name the exact variable and the dotenv file options in a single ask, then wait.
+7. Run `kensa doctor` and fix harness blockers until it passes. If redaction is not ready, rerun
+   `kensa init`; do not edit readiness settings manually. When blocked on a missing credential,
+   name the exact variable and the dotenv file options in a single ask, then wait.
 
 This skill is complete when `kensa doctor` passes; hand back to `kensa-evals`, which continues
 with the evidence stage in the same run. Do not import traces, inspect traces, propose eval

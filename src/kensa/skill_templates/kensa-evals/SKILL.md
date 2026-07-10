@@ -68,6 +68,9 @@ Read `.kensa/settings.json` and use `init.evidence_source` when it is saved. Val
 are `langfuse`, `trace_export`, and `local`. If no saved source exists, infer it from the repo
 state or ask the user.
 
+Trace access fails closed. If import or trace access reports a redaction blocker, run
+`kensa init` if needed, then re-import. Never use raw runtime traces as evidence.
+
 For `langfuse`:
 
 ```bash

@@ -1,73 +1,33 @@
-"""Trace reservoir and bounded import helpers."""
+"""Trace reservoir and bounded import helpers with mandatory redaction."""
 
 from __future__ import annotations
 
 import hashlib
-import importlib
-import importlib.metadata
 import json
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from kensa.redact import (
+    RedactionGateError,
+    RedactionResult,
+    Redactor,
+    _safe_url_netloc,
+    assert_safe_manifest,
+)
+
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
 TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v1"
-REDACTOR_VERSION = "kensa.redactor.v1"
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
-_REDACTION_PLACEHOLDER = "[redacted]"
-_STRICT_SPACY_MODEL = "en_core_web_sm"
-_STRICT_SPACY_MODEL_VERSION = "3.8.0"
-_PRESIDIO_ENTITY_SOURCE = "presidio_analyzer.AnalyzerEngine.get_supported_entities(language='en')"
-_STRICT_TEXT_LEAF_KEYS = frozenset(
-    {
-        "answer",
-        "completion",
-        "content",
-        "description",
-        "error",
-        "exception.message",
-        "input",
-        "input.value",
-        "kensa.feedback.comment",
-        "kensa.score.comment",
-        "kensa.step.state_summary",
-        "message",
-        "output",
-        "output.value",
-        "prompt",
-        "query",
-        "question",
-        "reason",
-        "request",
-        "response",
-        "result",
-        "state_summary",
-        "status.message",
-        "status_message",
-        "summary",
-        "text",
-    }
-)
-_STRICT_RULESET = {
-    "secret_key_pattern": _SECRET_KEY.pattern,
-    "strict_text_leaf_keys": sorted(_STRICT_TEXT_LEAF_KEYS),
-    "value_scanners": ["detect-secrets", "presidio"],
-    "presidio_entities": _PRESIDIO_ENTITY_SOURCE,
-    "spacy_model": _STRICT_SPACY_MODEL,
-    "spacy_model_version": _STRICT_SPACY_MODEL_VERSION,
-}
-_STRICT_RULESET_HASH = hashlib.sha256(
-    json.dumps(_STRICT_RULESET, sort_keys=True).encode()
-).hexdigest()
-RedactionMode = Literal["off", "keys", "strict"]
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_ENDPOINT_PLACEHOLDER = "[redacted]"
 _IMPORT_PROVIDERS = frozenset({"json", "jsonl", "otlp", "langfuse", "local-jsonl"})
 _TRACE_VIEW_KEYS = (
     "schema_version",
@@ -216,24 +176,23 @@ class _JsonSpanRowContract(BaseModel):
         return value
 
 
-def _unredacted_manifest() -> dict[str, Any]:
+def _raw_source_manifest() -> dict[str, Any]:
+    """Explicit raw-source marker for runtime trial telemetry.
+
+    Runtime trace run directories contain raw payloads. They are never directly
+    exposable as evidence; `safe_manifest` always treats them as unsafe, and they
+    become evidence only through `kensa import`.
+    """
+
     return {
-        "mode": "off",
-        "requested_mode": "off",
-        "version": REDACTOR_VERSION,
-        "ruleset_hash": _STRICT_RULESET_HASH,
-        "secret_keys_redacted": False,
-        "values_redacted": False,
-        "strict": {
-            "available": False,
-            "dependencies": {},
-            "entities": [],
-            "entity_source": _PRESIDIO_ENTITY_SOURCE,
-            "fallback_reason": None,
-            "spacy_model": _STRICT_SPACY_MODEL,
-            "spacy_model_version": _STRICT_SPACY_MODEL_VERSION,
-            "text_leaf_keys": sorted(_STRICT_TEXT_LEAF_KEYS),
-        },
+        "raw_source": True,
+        "mandatory": False,
+        "value_redaction_applied": False,
+        "redaction_available": False,
+        "note": (
+            "Runtime trial telemetry contains raw payloads. Run kensa import to "
+            "produce redacted trace evidence."
+        ),
     }
 
 
@@ -246,7 +205,7 @@ class TraceManifest:
     files: list[str]
     span_count: int
     trace_count: int
-    redaction: dict[str, Any] = field(default_factory=_unredacted_manifest)
+    redaction: dict[str, Any] = field(default_factory=_raw_source_manifest)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -278,7 +237,7 @@ class TraceSource:
             imported_at=self.imported_at,
             source_path=self.source_path,
             source_url=self.source_url,
-            trace_url=trace_url,
+            trace_url=safe_endpoint(str(trace_url)) if trace_url is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -379,66 +338,6 @@ class ImportResult:
     warnings: list[str] = field(default_factory=list)
 
 
-@dataclass
-class _StrictValueRedactor:
-    detect_secret: Callable[[str], bool]
-    redact_pii: Callable[[str], tuple[str, bool]]
-    dependencies: dict[str, str]
-    presidio_entities: tuple[str, ...]
-
-    def redact(self, value: str) -> tuple[str, bool]:
-        if self.detect_secret(value):
-            return _REDACTION_PLACEHOLDER, True
-        return self.redact_pii(value)
-
-
-@dataclass
-class _RedactionContext:
-    requested_mode: RedactionMode
-    mode: RedactionMode
-    strict_redactor: _StrictValueRedactor | None = None
-    fallback_reason: str | None = None
-    secret_keys_redacted: bool = False
-    values_redacted: bool = False
-
-    @classmethod
-    def create(cls, mode: RedactionMode) -> _RedactionContext:
-        _validate_redaction_mode(mode)
-        if mode != "strict":
-            return cls(requested_mode=mode, mode=mode)
-        try:
-            return cls(
-                requested_mode=mode,
-                mode=mode,
-                strict_redactor=_load_strict_value_redactor(),
-            )
-        except RuntimeError as exc:
-            return cls(requested_mode=mode, mode="keys", fallback_reason=str(exc))
-
-    def to_manifest(self) -> dict[str, Any]:
-        strict = {
-            "available": self.strict_redactor is not None,
-            "dependencies": self.strict_redactor.dependencies if self.strict_redactor else {},
-            "entities": list(self.strict_redactor.presidio_entities)
-            if self.strict_redactor
-            else [],
-            "entity_source": _PRESIDIO_ENTITY_SOURCE,
-            "fallback_reason": self.fallback_reason,
-            "spacy_model": _STRICT_SPACY_MODEL,
-            "spacy_model_version": _STRICT_SPACY_MODEL_VERSION,
-            "text_leaf_keys": sorted(_STRICT_TEXT_LEAF_KEYS),
-        }
-        return {
-            "mode": self.mode,
-            "requested_mode": self.requested_mode,
-            "version": REDACTOR_VERSION,
-            "ruleset_hash": _STRICT_RULESET_HASH,
-            "secret_keys_redacted": self.secret_keys_redacted,
-            "values_redacted": self.values_redacted,
-            "strict": strict,
-        }
-
-
 def trace_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -463,7 +362,7 @@ def write_trace_manifest(
         files=files or ["spans.jsonl"],
         span_count=span_count,
         trace_count=trace_count,
-        redaction=redaction if redaction is not None else _unredacted_manifest(),
+        redaction=redaction if redaction is not None else _raw_source_manifest(),
     )
     path = Path(run_dir)
     path.mkdir(parents=True, exist_ok=True)
@@ -479,11 +378,93 @@ def import_trace_source(
     out: Path | str,
     limit: int,
     max_payload_bytes: int,
-    redact: RedactionMode = "keys",
-    project: str | None = None,
-    since: str | None = None,
-    endpoint: str | None = None,
 ) -> ImportResult:
+    """Import a bounded local trace export file through mandatory redaction."""
+
+    normalized_provider = _validated_import_arguments(
+        provider=provider,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+    )
+    if source is None:
+        raise ValueError("file trace imports require --source")
+    redactor = Redactor()
+    source_path = Path(source)
+    bytes_read = _bounded_size(source_path, max_payload_bytes)
+    data = _decode_source(normalized_provider, source_path)
+    return _write_redacted_import(
+        parse_provider=normalized_provider,
+        provenance_provider=_trace_source_provider(normalized_provider, source_path),
+        data=data,
+        redactor=redactor,
+        stored_source=source_label or source,
+        out=out,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+        bytes_read=bytes_read,
+    )
+
+
+def import_trace_records(
+    *,
+    provider: str,
+    payload: Any,
+    source_label: str,
+    out: Path | str,
+    limit: int,
+    max_payload_bytes: int,
+) -> ImportResult:
+    """Import decoded in-memory trace records through mandatory redaction."""
+
+    return _import_trace_records(
+        provider=provider,
+        payload=payload,
+        source_label=source_label,
+        out=out,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+        redactor=None,
+    )
+
+
+def _import_trace_records(
+    *,
+    provider: str,
+    payload: Any,
+    source_label: str,
+    out: Path | str,
+    limit: int,
+    max_payload_bytes: int,
+    redactor: Redactor | None,
+) -> ImportResult:
+    normalized_provider = _validated_import_arguments(
+        provider=provider,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+    )
+    active_redactor = redactor if redactor is not None else Redactor()
+    bytes_read = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    if bytes_read > max_payload_bytes:
+        raise ValueError(f"payload exceeds --max-payload-bytes: {bytes_read} > {max_payload_bytes}")
+    return _write_redacted_import(
+        parse_provider=normalized_provider,
+        provenance_provider=normalized_provider,
+        data=_decode_payload(normalized_provider, payload),
+        redactor=active_redactor,
+        stored_source=source_label,
+        out=out,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+        bytes_read=bytes_read,
+    )
+
+
+def _validated_import_arguments(
+    *,
+    provider: str,
+    limit: int,
+    max_payload_bytes: int,
+) -> str:
     if limit < 1:
         raise ValueError("--limit must be at least 1")
     if max_payload_bytes < 1:
@@ -491,47 +472,51 @@ def import_trace_source(
     normalized_provider = provider.lower()
     if normalized_provider not in _IMPORT_PROVIDERS:
         raise ValueError(f"unsupported trace import provider: {provider}")
-    if source is None:
-        raise ValueError(
-            "v1 trace imports read bounded trace export files; pass --source. "
-            "Live vendor API pulls with --project/--since are deferred."
-        )
-    source_path = Path(source)
-    bytes_read = _bounded_size(source_path, max_payload_bytes)
-    stored_source = source_label or source
-    endpoint_value = endpoint if redact == "off" else safe_endpoint(endpoint) if endpoint else None
+    return normalized_provider
+
+
+def _write_redacted_import(
+    *,
+    parse_provider: str,
+    provenance_provider: str,
+    data: Any,
+    redactor: Redactor,
+    stored_source: str,
+    out: Path | str,
+    limit: int,
+    max_payload_bytes: int,
+    bytes_read: int,
+) -> ImportResult:
     imported_at = trace_timestamp()
     import_run_id = f"import-{imported_at.replace(':', '-')}"
     trace_source = TraceSource(
-        provider=_trace_source_provider(normalized_provider, source_path),
+        provider=provenance_provider,
         import_run_id=import_run_id,
         imported_at=imported_at,
-        source_path=_source_path_for_provenance(stored_source),
-        source_url=endpoint_value or _source_url_for_provenance(stored_source),
+        source_path=None,
+        source_url=None,
         trace_url=None,
     )
     trace_views = _import_trace_views(
-        provider=normalized_provider,
-        source_path=source_path,
+        provider=parse_provider,
+        data=data,
         limit=limit,
         trace_source=trace_source,
     )
     span_count = sum(len(trace.spans) for trace in trace_views)
     output = Path(out)
-    redaction_context = _RedactionContext.create(redact)
-    rendered = "".join(
-        json.dumps(_redact(trace.to_dict(), context=redaction_context), sort_keys=True) + "\n"
-        for trace in trace_views
-    )
-    _write_text_atomic(output, rendered)
-    redaction_manifest = redaction_context.to_manifest()
+    results: list[RedactionResult] = [
+        redactor.redact_trace_view(trace.to_dict()) for trace in trace_views
+    ]
+    artifact_bytes = "".join(
+        json.dumps(result.trace, sort_keys=True) + "\n" for result in results
+    ).encode("utf-8")
+    _write_bytes_atomic(output, artifact_bytes)
+    redaction_manifest = redactor.manifest()
     manifest_path = _write_import_manifest(
         output,
-        provider=trace_source.provider,
-        source=stored_source,
-        project=project,
-        since=since,
-        endpoint=endpoint_value,
+        provider=provenance_provider,
+        artifact_sha256=hashlib.sha256(artifact_bytes).hexdigest(),
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         records_written=len(trace_views),
@@ -539,14 +524,9 @@ def import_trace_source(
         bytes_read=bytes_read,
         redaction=redaction_manifest,
     )
-    warnings = _sensitive_warnings([trace.to_dict() for trace in trace_views], redaction_context)
-    if endpoint:
-        if redact == "off":
-            warnings.append("endpoint stored verbatim including any credentials (--redact off)")
-        else:
-            warnings.append("endpoint recorded in import provenance")
+    warnings = _redaction_warnings(redaction_manifest)
     return ImportResult(
-        provider=trace_source.provider,
+        provider=provenance_provider,
         source=stored_source,
         out_path=output,
         records_written=len(trace_views),
@@ -556,6 +536,30 @@ def import_trace_source(
         redaction=redaction_manifest,
         warnings=warnings,
     )
+
+
+def _redaction_warnings(
+    redaction_manifest: dict[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    if redaction_manifest.get("secret_keys_redacted"):
+        warnings.append("secret-like fields were redacted")
+    changed = int(redaction_manifest.get("changed_value_count") or 0)
+    if changed:
+        warnings.append(f"mandatory value redaction changed {changed} value(s)")
+    return warnings
+
+
+def _decode_source(provider: str, source_path: Path) -> Any:
+    if provider in {"json", "jsonl", "local-jsonl"}:
+        return _read_json_records(source_path)
+    return json.loads(source_path.read_text())
+
+
+def _decode_payload(provider: str, payload: Any) -> Any:
+    if provider in {"json", "jsonl", "local-jsonl"}:
+        return _coerce_json_records(payload)
+    return payload
 
 
 def _bounded_size(path: Path, max_payload_bytes: int) -> int:
@@ -587,29 +591,18 @@ def _local_capture_manifest(source: Path) -> dict[str, Any] | None:
     return None
 
 
-def _source_path_for_provenance(source: str) -> str | None:
-    if "://" in source or source.endswith(":connected"):
-        return None
-    return source
-
-
-def _source_url_for_provenance(source: str) -> str | None:
-    return source if "://" in source else None
-
-
-def _write_text_atomic(output: Path, text: str) -> None:
+def _write_bytes_atomic(output: Path, data: bytes) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
+            "wb",
             dir=output.parent,
             prefix=f".{output.name}.",
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            temp_file.write(text)
+            temp_file.write(data)
         temp_path.replace(output)
     finally:
         if temp_path is not None and temp_path.exists():
@@ -620,10 +613,7 @@ def _write_import_manifest(
     output: Path,
     *,
     provider: str,
-    source: str,
-    project: str | None,
-    since: str | None,
-    endpoint: Any,
+    artifact_sha256: str,
     limit: int,
     max_payload_bytes: int,
     records_written: int,
@@ -635,10 +625,7 @@ def _write_import_manifest(
         "schema_version": "kensa.trace_import_manifest.v1",
         "created_at": trace_timestamp(),
         "provider": provider,
-        "source": source,
-        "project": project,
-        "since": since,
-        "endpoint": endpoint,
+        "artifact_sha256": artifact_sha256,
         "limit": limit,
         "max_payload_bytes": max_payload_bytes,
         "records_written": records_written,
@@ -656,20 +643,16 @@ def safe_endpoint(endpoint: str) -> str:
     parsed = urlsplit(endpoint)
     if not parsed.scheme or not parsed.netloc:
         return endpoint
-    host = parsed.hostname or ""
-    try:
-        port_value = parsed.port
-    except ValueError:
-        port_value = None
-    port = f":{port_value}" if port_value else ""
-    return urlunsplit((parsed.scheme, f"{host}{port}", _safe_endpoint_path(parsed.path), "", ""))
+    return urlunsplit(
+        (parsed.scheme, _safe_url_netloc(parsed), _safe_endpoint_path(parsed.path), "", "")
+    )
 
 
 def _safe_endpoint_path(path: str) -> str:
     if not path:
         return ""
     parts = [
-        _REDACTION_PLACEHOLDER if _SECRET_KEY.search(part) else part for part in path.split("/")
+        _ENDPOINT_PLACEHOLDER if _SECRET_KEY.search(part) else part for part in path.split("/")
     ]
     return "/".join(parts)
 
@@ -677,25 +660,24 @@ def _safe_endpoint_path(path: str) -> str:
 def _import_trace_views(
     *,
     provider: str,
-    source_path: Path,
+    data: Any,
     limit: int,
     trace_source: TraceSource,
 ) -> list[TraceView]:
     if provider in {"json", "jsonl", "local-jsonl"}:
-        return _import_json_trace_views(source_path, limit, trace_source)
+        return _import_json_trace_views(_dict_items(data), limit, trace_source)
     if provider == "otlp":
-        return _import_otlp_trace_views(source_path, limit, trace_source)
+        return _import_otlp_trace_views(data, limit, trace_source)
     if provider == "langfuse":
-        return _import_langfuse_trace_views(source_path, limit, trace_source)
+        return _import_langfuse_trace_views(data, limit, trace_source)
     raise ValueError(f"unsupported trace import provider: {provider}")
 
 
 def _import_json_trace_views(
-    source: Path,
+    records: list[dict[str, Any]],
     limit: int,
     trace_source: TraceSource,
 ) -> list[TraceView]:
-    records = _read_json_records(source)
     if _records_are_span_rows(records):
         return _group_json_span_rows(records, limit, trace_source)
     traces: list[TraceView] = []
@@ -709,12 +691,7 @@ def _import_json_trace_views(
 def _read_json_records(path: Path) -> list[dict[str, Any]]:
     text = path.read_text()
     if path.suffix == ".json":
-        data = json.loads(text)
-        if isinstance(data, list):
-            return _dict_items(data)
-        if isinstance(data, dict) and isinstance(data.get("traces"), list):
-            return _dict_items(data["traces"])
-        return [data] if isinstance(data, dict) else []
+        return _coerce_json_records(json.loads(text))
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
         if not line.strip():
@@ -723,6 +700,14 @@ def _read_json_records(path: Path) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _coerce_json_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return _dict_items(data)
+    if isinstance(data, dict) and isinstance(data.get("traces"), list):
+        return _dict_items(data["traces"])
+    return [data] if isinstance(data, dict) else []
 
 
 def _records_are_span_rows(records: list[dict[str, Any]]) -> bool:
@@ -864,11 +849,10 @@ def _json_span_view(span: dict[str, Any], *, trace_id: str) -> SpanView:
 
 
 def _import_otlp_trace_views(
-    source: Path,
+    data: Any,
     limit: int,
     trace_source: TraceSource,
 ) -> list[TraceView]:
-    data = json.loads(source.read_text())
     resource_spans = data.get("resourceSpans", []) if isinstance(data, dict) else []
     grouped: OrderedDict[str, list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]] = (
         OrderedDict()
@@ -961,11 +945,10 @@ def _otlp_span_view(
 
 
 def _import_langfuse_trace_views(
-    source: Path,
+    data: Any,
     limit: int,
     trace_source: TraceSource,
 ) -> list[TraceView]:
-    data = json.loads(source.read_text())
     if isinstance(data, dict) and "data" in data:
         return _langfuse_observation_trace_views(data.get("data", []), limit, trace_source)
     raw_traces = data.get("traces", data) if isinstance(data, dict) else data
@@ -1420,14 +1403,73 @@ def _otlp_links(value: Any) -> list[dict[str, Any]]:
     ]
 
 
-def load_trace_views(source: Path | str) -> list[dict[str, Any]]:
-    path = Path(source)
-    rows: list[dict[str, Any]] = []
+def _read_import_manifest(artifact: Path) -> dict[str, Any] | None:
+    manifest_path = artifact.with_suffix(".manifest.json")
     try:
-        lines = path.read_text().splitlines()
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def import_redaction_manifest(artifact: Path | str) -> Any:
+    """Read the redaction block from an artifact's sibling manifest.
+
+    The sibling `<artifact>.manifest.json` file is the source of truth for
+    manifest lookup; `latest.json` pointers are a convenience only. Returns
+    None when the sibling manifest is absent or unreadable, which exposure
+    gates treat as unsafe.
+    """
+
+    manifest = _read_import_manifest(Path(artifact))
+    return manifest.get("redaction") if manifest is not None else None
+
+
+def _artifact_gate_error(problem: str) -> RedactionGateError:
+    return RedactionGateError(
+        f"Trace payload exposure blocked: {problem}. "
+        "Re-import traces with kensa import after mandatory redaction is ready."
+    )
+
+
+def _read_verified_artifact(path: Path) -> str:
+    manifest = _read_import_manifest(path)
+    assert_safe_manifest(manifest.get("redaction") if manifest is not None else None)
+    expected_sha256 = manifest.get("artifact_sha256") if manifest is not None else None
+    if not isinstance(expected_sha256, str) or _SHA256_HEX.fullmatch(expected_sha256) is None:
+        raise _artifact_gate_error("trace artifact manifest has no valid artifact SHA-256")
+    try:
+        content = path.read_bytes()
     except OSError as exc:
         raise ValueError(f"Could not read trace import artifact {path}: {exc}") from exc
-    for index, line in enumerate(lines, start=1):
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise _artifact_gate_error("trace artifact does not match its redaction manifest")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(_reimport_trace_message(path)) from exc
+
+
+def safe_import_artifact(artifact: Path | str) -> bool:
+    try:
+        _read_verified_artifact(Path(artifact))
+    except (RedactionGateError, ValueError):
+        return False
+    return True
+
+
+def load_trace_views(source: Path | str) -> list[dict[str, Any]]:
+    """Load TraceView rows behind the mandatory payload-exposure gate.
+
+    This is the single choke point for trace payload exposure: `traces list`,
+    `traces sample`, `traces get`, and `inspect` load rows through it. Unsafe or
+    missing redaction manifests block every caller, including generation workflows.
+    """
+
+    path = Path(source)
+    text = _read_verified_artifact(path)
+    rows: list[dict[str, Any]] = []
+    for index, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -1481,166 +1523,6 @@ def _reimport_trace_message(path: Path) -> str:
     )
 
 
-def _validate_redaction_mode(mode: str) -> None:
-    if mode not in {"off", "keys", "strict"}:
-        raise ValueError("--redact must be one of: off, keys, strict")
-
-
-def _redact(
-    value: Any,
-    mode: RedactionMode = "keys",
-    *,
-    context: _RedactionContext | None = None,
-    path: tuple[str, ...] = (),
-) -> Any:
-    redaction_context = context or _RedactionContext.create(mode)
-    if redaction_context.mode == "off":
-        return value
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            text_key = str(key)
-            if _SECRET_KEY.search(text_key):
-                redaction_context.secret_keys_redacted = True
-                redacted[text_key] = _REDACTION_PLACEHOLDER
-            else:
-                redacted[text_key] = _redact(
-                    item,
-                    context=redaction_context,
-                    path=(*path, text_key),
-                )
-        return redacted
-    if isinstance(value, list):
-        return [_redact(item, context=redaction_context, path=(*path, "[]")) for item in value]
-    if (
-        isinstance(value, str)
-        and redaction_context.strict_redactor
-        and _should_scan_strict_value(path)
-    ):
-        redacted_value, changed = redaction_context.strict_redactor.redact(value)
-        redaction_context.values_redacted = redaction_context.values_redacted or changed
-        return redacted_value
-    return value
-
-
-def _should_scan_strict_value(path: tuple[str, ...]) -> bool:
-    if not path:
-        return False
-    leaf = path[-1].lower()
-    if leaf in _STRICT_TEXT_LEAF_KEYS:
-        return True
-    return leaf.endswith((".message", ".content", ".prompt", ".completion", ".summary"))
-
-
-def _load_strict_value_redactor() -> _StrictValueRedactor:
-    try:
-        scan_module = cast(Any, importlib.import_module("detect_secrets.core.scan"))
-        settings_module = cast(Any, importlib.import_module("detect_secrets.settings"))
-        analyzer_engine = cast(Any, importlib.import_module("presidio_analyzer"))
-        nlp_engine_module = cast(Any, importlib.import_module("presidio_analyzer.nlp_engine"))
-        scan_line = scan_module.scan_line
-        default_settings = settings_module.default_settings
-        analyzer_engine_type = analyzer_engine.AnalyzerEngine
-        nlp_engine_provider_type = nlp_engine_module.NlpEngineProvider
-    except ImportError as exc:
-        raise RuntimeError(f"strict redaction dependencies unavailable: {exc}") from exc
-
-    configuration = {
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "en", "model_name": _STRICT_SPACY_MODEL}],
-    }
-    try:
-        provider = nlp_engine_provider_type(nlp_configuration=configuration)
-        nlp_engine = provider.create_engine()
-        analyzer = analyzer_engine_type(nlp_engine=nlp_engine, supported_languages=["en"])
-        presidio_entities = tuple(
-            sorted(str(entity) for entity in analyzer.get_supported_entities(language="en"))
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Presidio analyzer unavailable: {exc}") from exc
-    if not presidio_entities:
-        raise RuntimeError("Presidio analyzer unavailable: no supported English entities")
-
-    def detect_secret(value: str) -> bool:
-        if not value.strip():
-            return False
-        line = f"value = {json.dumps(value)}"
-        with default_settings():
-            try:
-                return bool(scan_line(line))
-            except TypeError:
-                pass
-            try:
-                return bool(
-                    scan_line(
-                        filename="kensa-trace-import.jsonl",
-                        line=line,
-                        line_number=1,
-                    )
-                )
-            except TypeError:
-                return bool(scan_line("kensa-trace-import.jsonl", line, 1))
-
-    def redact_pii(value: str) -> tuple[str, bool]:
-        results = analyzer.analyze(text=value, language="en", entities=list(presidio_entities))
-        spans = sorted({(result.start, result.end) for result in results}, reverse=True)
-        redacted = value
-        for start, end in spans:
-            redacted = redacted[:start] + _REDACTION_PLACEHOLDER + redacted[end:]
-        return redacted, bool(spans)
-
-    return _StrictValueRedactor(
-        detect_secret=detect_secret,
-        redact_pii=redact_pii,
-        dependencies={
-            "detect-secrets": _package_version("detect-secrets"),
-            "en-core-web-sm": _package_version("en-core-web-sm"),
-            "presidio-analyzer": _package_version("presidio-analyzer"),
-            "spacy": _package_version("spacy"),
-        },
-        presidio_entities=presidio_entities,
-    )
-
-
-def _package_version(package: str) -> str:
-    try:
-        return importlib.metadata.version(package)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
-def _sensitive_warnings(
-    records: list[dict[str, Any]],
-    redaction_context: _RedactionContext | None = None,
-) -> list[str]:
-    if redaction_context is None:
-        redaction_context = _RedactionContext.create("keys")
-        redaction_context.secret_keys_redacted = any(_contains_secret_key(row) for row in records)
-
-    warnings: list[str] = []
-    if redaction_context.fallback_reason:
-        warnings.append(
-            "strict redaction unavailable; fell back to key-only redaction: "
-            f"{redaction_context.fallback_reason}"
-        )
-    if redaction_context.secret_keys_redacted:
-        warnings.append("secret-like fields were redacted")
-    if redaction_context.values_redacted:
-        warnings.append("strict value redaction was applied")
-    return warnings
-
-
-def _contains_secret_key(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(
-            _SECRET_KEY.search(str(key)) or _contains_secret_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_contains_secret_key(item) for item in value)
-    return False
-
-
 def _dict_items(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -1668,9 +1550,12 @@ __all__ = [
     "TraceManifest",
     "TraceSource",
     "TraceView",
+    "import_redaction_manifest",
+    "import_trace_records",
     "import_trace_source",
     "load_trace_views",
     "safe_endpoint",
+    "safe_import_artifact",
     "trace_timestamp",
     "trace_view_summary",
     "write_trace_manifest",

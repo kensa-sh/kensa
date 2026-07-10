@@ -28,6 +28,16 @@ Kensa OSS should write local artifacts only.
 
 Local `.env` files and `.kensa/` runtime outputs must remain uncommitted.
 
+## Redacting PII
+
+`kensa import` redacts PII and secrets from every trace before it is stored, and
+`kensa traces`, `kensa inspect`, and eval generation refuse to expose artifacts
+without a safe redaction manifest. Redaction fails closed: missing dependencies or
+models block imports instead of degrading. Runtime run directories under
+`.kensa/traces/runs/` still contain raw telemetry; keep them uncommitted.
+Schema timing fields remain unredacted to preserve ordering and latency; timestamps
+can still correlate traces with external records.
+
 ## Out Of Scope
 
 - Vulnerabilities in upstream dependencies

@@ -11,7 +11,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 from collections.abc import Callable
@@ -28,7 +27,7 @@ import click
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from kensa import cli_inspect, cli_output, cli_traces
+from kensa import cli_inspect, cli_output, cli_traces, redact
 from kensa.constants import (
     CLI_EPILOG,
     CLI_LOGO,
@@ -49,12 +48,18 @@ from kensa.constants import (
 )
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
-from kensa.models import AgentInstruction, EvidenceSource, InspectStatus, KensaSettings
+from kensa.models import (
+    AgentInstruction,
+    EvidenceSource,
+    InspectStatus,
+    KensaSettings,
+)
 from kensa.traces import (
     ImportResult,
-    RedactionMode,
+    _import_trace_records,
     import_trace_source,
     safe_endpoint,
+    safe_import_artifact,
 )
 
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -203,6 +208,7 @@ _TRACE_SOURCE_LABELS: dict[str, str] = {
     "langfuse": "Langfuse",
     "local": "No traces? Capture local run",
 }
+_RedactionInitStatus = Literal["ready", "deferred", "failed", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -479,9 +485,8 @@ def connect_langfuse(
     ),
 )
 @click.option("--source", default=None, help="Local export file to import.")
-@click.option("--endpoint", default=None, help="One-off endpoint provenance override.")
-@click.option("--project", default=None, help="Provider project name.")
-@click.option("--since", default=None, help="Provider time window, for example 7d.")
+@click.option("--endpoint", default=None, help="One-off connected provider endpoint override.")
+@click.option("--since", default=None, help="Connected provider time window, for example 7d.")
 @click.option(
     "--limit",
     default=None,
@@ -496,13 +501,6 @@ def connect_langfuse(
     help="Maximum local import payload size.",
 )
 @click.option(
-    "--redact",
-    default="keys",
-    show_default=True,
-    type=click.Choice(["off", "keys", "strict"]),
-    help="Redaction mode for imported trace data.",
-)
-@click.option(
     "--langfuse-mode",
     default="auto",
     show_default=True,
@@ -514,24 +512,20 @@ def import_command(
     provider: str,
     source: str | None,
     endpoint: str | None,
-    project: str | None,
     since: str | None,
     limit: int | None,
     max_payload_bytes: int,
-    redact: str,
     langfuse_mode: LangfuseImportMode,
     json_output: bool,
 ) -> None:
-    """Import traces into Kensa."""
+    """Import traces into Kensa through mandatory redaction."""
     args = SimpleNamespace(
         provider=provider,
         source=source,
         endpoint=endpoint,
-        project=project,
         since=since,
         limit=limit,
         max_payload_bytes=max_payload_bytes,
-        redact=redact,
         langfuse_mode=langfuse_mode,
         json=json_output,
     )
@@ -553,7 +547,10 @@ def import_command(
     default=None,
     help="Persist the selected trace source.",
 )
-def init(agent_choice: str | None, trace_source: str | None) -> None:
+def init(
+    agent_choice: str | None,
+    trace_source: str | None,
+) -> None:
     """Set up Kensa."""
     selected_agent = cast(
         AgentInstructionChoice | None,
@@ -922,6 +919,7 @@ def _cmd_doctor(args: Any) -> int:
             exit_code=int(result["exit_code"]),
             summary=str(result["summary"]),
             data={
+                "redaction": result["redaction"],
                 "non_local_endpoint_markers": result["non_local_endpoint_markers"],
                 "misplaced_workflows": result["misplaced_workflows"],
                 "readiness_recorded": result["readiness_recorded"],
@@ -938,6 +936,7 @@ def _cmd_doctor(args: Any) -> int:
 
     next_steps = list(result["next_steps"])
     cli_output.step("kensa doctor")
+    _print_doctor_redaction(result["redaction"])
     for warning in result["warnings"]:
         cli_output.item(f"warning: {warning}", ok=False)
     if result["problems"]:
@@ -1251,10 +1250,103 @@ def _name_tokens(name: str) -> tuple[str, ...]:
     return tuple(part for part in normalized.split("_") if part)
 
 
+def _doctor_redaction_report() -> dict[str, Any]:
+    missing = redact.missing_redaction_dependencies()
+    settings = _read_settings()
+    readiness: redact.RedactionReadiness | None = None
+    readiness_error: str | None = None
+    try:
+        readiness = redact.assert_redaction_ready()
+    except redact.RedactionError as exc:
+        readiness_error = str(exc)
+        try:
+            readiness = redact.read_redaction_readiness()
+        except redact.RedactionError:
+            readiness = None
+    unsafe_artifacts = _unsafe_import_artifacts()
+    return {
+        "dependencies": {name: name not in missing for name in redact.REDACTION_EXTRA_MODULES},
+        "ready": readiness_error is None and readiness is not None,
+        "readiness": readiness.to_dict() if readiness is not None else None,
+        "readiness_error": readiness_error,
+        "evidence_source": settings.init.evidence_source,
+        "unsafe_artifacts": unsafe_artifacts,
+    }
+
+
+def _unsafe_import_artifacts() -> list[str]:
+    if not TRACE_IMPORTS_DIR.exists():
+        return []
+    return [
+        str(cli_output.display_path(artifact))
+        for artifact in sorted(TRACE_IMPORTS_DIR.glob("*.jsonl"))
+        if not safe_import_artifact(artifact)
+    ]
+
+
+def _redaction_doctor_findings(
+    report: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    problems: list[str] = []
+    warnings: list[str] = []
+    next_steps: list[str] = []
+    missing = [name for name, present in report["dependencies"].items() if not present]
+    trace_source_configured = report["evidence_source"] is not None
+    if missing and trace_source_configured:
+        warnings.append(
+            "trace redaction dependencies missing: "
+            + ", ".join(missing)
+            + ". Install kensa[redaction]."
+        )
+    if report["readiness_error"]:
+        finding = str(report["readiness_error"])
+        if trace_source_configured:
+            problems.append(finding)
+        else:
+            warnings.append(finding)
+    if not report["ready"] and trace_source_configured:
+        finding = (
+            "mandatory trace redaction is not ready; trace import and payload exposure are blocked."
+        )
+        problems.append(finding)
+        next_steps.append("Run kensa init to bootstrap mandatory trace redaction.")
+    warnings.extend(
+        f"unsafe trace artifact blocked from exposure (re-import required): {artifact}"
+        for artifact in report["unsafe_artifacts"]
+    )
+    if report["unsafe_artifacts"]:
+        next_steps.append("Re-import blocked trace artifacts with kensa import.")
+    return problems, warnings, next_steps
+
+
+def _print_doctor_redaction(report: dict[str, Any]) -> None:
+    missing = [name for name, present in report["dependencies"].items() if not present]
+    if missing:
+        cli_output.item(f"Redaction dependencies missing: {', '.join(missing)}", ok=False)
+    else:
+        cli_output.item("Redaction dependencies: present")
+    if report["ready"]:
+        readiness = report["readiness"]
+        cli_output.item(
+            f"Redaction readiness: ready, model {readiness['model']}-{readiness['model_version']}"
+        )
+    else:
+        cli_output.item("Redaction readiness: missing", ok=False)
+    for artifact in report["unsafe_artifacts"]:
+        cli_output.item(f"Unsafe trace artifact (re-import required): {artifact}", ok=False)
+
+
 def _doctor_result(args: Any) -> dict[str, Any]:
     problems: list[str] = []
     warnings: list[str] = [_ENV_SAFETY_WARNING]
     next_steps: list[str] = []
+    redaction_report = _doctor_redaction_report()
+    redaction_problems, redaction_warnings, redaction_next_steps = _redaction_doctor_findings(
+        redaction_report
+    )
+    problems.extend(redaction_problems)
+    warnings.extend(redaction_warnings)
+    next_steps.extend(redaction_next_steps)
     eval_readiness = _latest_eval_readiness()
     allow_suspicious_harness = bool(getattr(args, "allow_suspicious_harness", False))
     endpoints = _non_local_endpoint_markers()
@@ -1333,6 +1425,7 @@ def _doctor_result(args: Any) -> dict[str, Any]:
         "problems": problems,
         "warnings": warnings,
         "next_steps": next_steps,
+        "redaction": redaction_report,
         "non_local_endpoint_markers": sorted(endpoints),
         "misplaced_workflows": [str(cli_output.display_path(path)) for path in misplaced_workflows],
         "readiness_recorded": readiness_recorded,
@@ -1510,6 +1603,7 @@ def _cmd_init_inner(
     )
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
     added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
+    redaction_status = _configure_redaction_readiness(steps, evidence_source)
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
     for notice in notices:
@@ -1517,11 +1611,103 @@ def _cmd_init_inner(
     if steps is None:
         _init_item(steps, "Kensa setup files created.")
     _print_setup_handoff(steps=steps, instruction_key=instruction_key)
+    failed = connection_status == "failed" or _redaction_init_failed(
+        redaction_status,
+    )
     if steps is not None:
-        steps.end(
-            "Setup files ready" if connection_status != "failed" else "[red]Setup incomplete[/red]"
+        steps.end("Setup files ready" if not failed else "[red]Setup incomplete[/red]")
+    return 1 if failed else 0
+
+
+def _redaction_init_failed(
+    redaction_status: _RedactionInitStatus,
+) -> bool:
+    return redaction_status == "failed"
+
+
+def _redaction_install_command() -> str:
+    if (_project_config_root() / "uv.lock").exists():
+        return "uv add --group traces 'kensa[redaction]'"
+    return "pip install 'kensa[redaction]'"
+
+
+def _redaction_install_argv(command: str) -> list[str]:
+    if command.startswith("uv "):
+        return ["uv", "add", "--group", "traces", "kensa[redaction]"]
+    return [sys.executable, "-m", "pip", "install", "kensa[redaction]"]
+
+
+def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
+    missing = redact.missing_redaction_dependencies()
+    if not missing:
+        _init_item(steps, "redaction dependencies present")
+        return True
+    command = _redaction_install_command()
+    if not _is_interactive():
+        _init_notice(
+            steps,
+            "Trace redaction dependencies missing: "
+            + ", ".join(missing)
+            + f". Run {command}, then re-run kensa init.",
         )
-    return 1 if connection_status == "failed" else 0
+        return False
+    if not click.confirm(f"Install trace redaction dependencies ({command})?", default=True):
+        _init_notice(steps, f"Skipped install. Run {command}, then re-run kensa init.")
+        return False
+    completed = subprocess.run(_redaction_install_argv(command), check=False)
+    if completed.returncode == 0 and not redact.missing_redaction_dependencies():
+        _init_item(steps, "installed kensa[redaction] dependencies")
+        return True
+    _init_item(steps, "redaction dependency install failed", ok=False, err=True)
+    return False
+
+
+def _configure_redaction_readiness(
+    steps: _Steps | None,
+    evidence_source: EvidenceSource | None,
+) -> _RedactionInitStatus:
+    if evidence_source is None:
+        return "skipped"
+    connected = evidence_source == "langfuse"
+    if steps is not None:
+        steps.step("Mandatory trace redaction")
+    if not _ensure_redaction_dependencies(steps):
+        if connected:
+            _init_item(
+                steps,
+                "Langfuse evidence setup requires the redaction dependencies.",
+                ok=False,
+                err=True,
+            )
+            return "failed"
+        _init_notice(
+            steps,
+            "Trace import stays blocked until the redaction dependencies are installed "
+            "and kensa init is re-run.",
+        )
+        return "deferred"
+    try:
+        with cli_output.wait_status("Preparing redaction model"):
+            readiness = redact.ensure_redaction_ready()
+    except redact.RedactionError as exc:
+        _init_item(steps, f"redaction model bootstrap failed: {exc}", ok=False, err=True)
+        if connected:
+            return "failed"
+        _init_notice(
+            steps,
+            "Trace import, sampling, inspection, and generation stay blocked until "
+            "kensa init prepares a redaction model.",
+        )
+        return "deferred"
+    _init_item(
+        steps,
+        f"redaction model ready: {readiness.model}-{readiness.model_version}",
+    )
+    _init_item(
+        steps,
+        f"readiness recorded: {cli_output.display_path(redact.settings_path())}",
+    )
+    return "ready"
 
 
 def _print_init_added_files(paths: list[Path], *, steps: _Steps | None = None) -> None:
@@ -2599,6 +2785,20 @@ def _cmd_import(args: Any) -> int:
             "Connected imports are only implemented for Langfuse; pass --source.",
             json_output=json_output,
         )
+    connected_only_options = [
+        option
+        for option, value in (
+            ("--endpoint", getattr(args, "endpoint", None)),
+            ("--since", getattr(args, "since", None)),
+        )
+        if args.source and value is not None
+    ]
+    if connected_only_options:
+        return _import_argument_error(
+            f"{', '.join(connected_only_options)} can only be used with connected imports, "
+            "not with --source.",
+            json_output=json_output,
+        )
     args.limit = _resolve_import_limit(
         provider=provider,
         source=getattr(args, "source", None),
@@ -2611,13 +2811,9 @@ def _cmd_import(args: Any) -> int:
             result = import_trace_source(
                 provider=provider,
                 source=args.source,
-                endpoint=args.endpoint,
-                project=args.project,
-                since=args.since,
                 out=out,
                 limit=args.limit,
                 max_payload_bytes=args.max_payload_bytes,
-                redact=args.redact,
             )
         else:
             result = _connected_import(args, out=out)
@@ -2637,8 +2833,6 @@ def _cmd_import(args: Any) -> int:
         result,
         timestamp=timestamp,
         source_mode=source_mode,
-        project=args.project,
-        since=args.since,
     )
     if json_output:
         _print_import_json(
@@ -2669,14 +2863,18 @@ def _resolve_import_limit(*, provider: str, source: str | None, limit: int | Non
     return _IMPORT_DEFAULT_LIMIT
 
 
-def _connected_import(args: Any, *, out: Path) -> ImportResult:
+def _connected_import(
+    args: Any,
+    *,
+    out: Path,
+) -> ImportResult:
     provider = str(args.provider)
     connection = _load_connection(provider)
     endpoint = str(getattr(args, "endpoint", None) or connection.get("endpoint") or "")
-    project = getattr(args, "project", None) or connection.get("project")
     if not endpoint:
         raise ValueError(f"{provider} connection is missing an endpoint")
     if provider == "langfuse":
+        redactor = redact.Redactor()
         payload = _connected_langfuse_payload(
             connection,
             endpoint=endpoint,
@@ -2689,17 +2887,17 @@ def _connected_import(args: Any, *, out: Path) -> ImportResult:
         )
     else:
         raise ValueError(f"unsupported connected import provider: {provider}")
-    return _import_connected_payload(
-        provider=provider,
-        payload=payload,
-        out=out,
-        endpoint=endpoint,
-        project=project if isinstance(project, str) else None,
-        since=getattr(args, "since", None),
-        limit=int(args.limit),
-        max_payload_bytes=int(args.max_payload_bytes),
-        redact=str(args.redact),
-    )
+    with cli_output.wait_status("Writing trace import"):
+        # Redact fetched payloads in memory; raw connected payloads never transit disk.
+        return _import_trace_records(
+            provider=provider,
+            payload=payload,
+            source_label=f"{provider}:connected",
+            out=out,
+            limit=int(args.limit),
+            max_payload_bytes=int(args.max_payload_bytes),
+            redactor=redactor,
+        )
 
 
 def _load_connection(provider: str) -> dict[str, Any]:
@@ -2752,61 +2950,11 @@ def _required_env(name: str, *, provider: str) -> str:
     return _required_env_values((name,), provider=provider)[name]
 
 
-def _import_connected_payload(
-    *,
-    provider: str,
-    payload: dict[str, Any],
-    out: Path,
-    endpoint: str,
-    project: str | None,
-    since: str | None,
-    limit: int,
-    max_payload_bytes: int,
-    redact: str,
-) -> ImportResult:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            suffix=".json",
-            prefix=f".{provider}-connected-",
-            dir=out.parent,
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(json.dumps(payload, sort_keys=True))
-        with cli_output.wait_status("Writing trace import"):
-            return import_trace_source(
-                provider=provider,
-                source=str(temp_path),
-                source_label=f"{provider}:connected",
-                endpoint=endpoint,
-                project=project,
-                since=since,
-                out=out,
-                limit=limit,
-                max_payload_bytes=max_payload_bytes,
-                redact=_redaction_mode(redact),
-            )
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-
-def _redaction_mode(value: str) -> RedactionMode:
-    if value not in {"off", "keys", "strict"}:
-        raise ValueError("--redact must be one of: off, keys, strict")
-    return cast(RedactionMode, value)
-
-
 def _write_trace_import_latest(
     result: ImportResult,
     *,
     timestamp: int,
     source_mode: str,
-    project: str | None,
-    since: str | None,
 ) -> Path:
     latest_path = TRACE_IMPORTS_DIR / "latest.json"
     payload = {
@@ -2819,9 +2967,6 @@ def _write_trace_import_latest(
         else None,
         "timestamp": timestamp,
         "created_at": _utc_now_iso(),
-        "source": result.source,
-        "project": project,
-        "since": since,
         "records_written": result.records_written,
         "span_count": result.span_count,
     }

@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from conftest import FakeRedactionEnv
 
+from kensa import redact
 from kensa import traces as traces_module
+from kensa.redact import (
+    RULESET_HASH,
+    RedactionError,
+    RedactionGateError,
+    RedactionNotReadyError,
+)
 from kensa.traces import (
+    import_redaction_manifest,
+    import_trace_records,
     import_trace_source,
     load_trace_views,
     trace_view_summary,
@@ -62,6 +72,36 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def _write_safe_sibling_manifest(artifact: Path) -> Path:
+    manifest_path = artifact.with_suffix(".manifest.json")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.trace_import_manifest.v1",
+                "artifact_sha256": hashlib.sha256(
+                    artifact.read_bytes() if artifact.exists() else b""
+                ).hexdigest(),
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "ruleset_hash": RULESET_HASH,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_sm",
+                        "version": "3.8.0",
+                        "checksum_verified": True,
+                    },
+                },
+            }
+        )
+    )
+    return manifest_path
+
+
 def _assert_trace_view_shape(trace: dict[str, Any]) -> None:
     assert set(trace) == TRACE_VIEW_KEYS
     assert trace["schema_version"] == traces_module.TRACE_VIEW_SCHEMA_VERSION
@@ -109,15 +149,23 @@ def test_trace_manifest_round_trip(tmp_path: Path) -> None:
     )
 
     assert manifest.to_dict()["schema_version"] == "kensa.trace_manifest.v1"
-    assert json.loads((run_dir / "manifest.json").read_text())["span_count"] == 3
-    assert json.loads((run_dir / "manifest.json").read_text())["redaction"]["mode"] == "off"
-    assert (
-        json.loads((run_dir / "manifest.json").read_text())["redaction"]["secret_keys_redacted"]
-        is False
-    )
+    payload = json.loads((run_dir / "manifest.json").read_text())
+    assert payload["span_count"] == 3
+    # Runtime trial telemetry is marked as raw source data, never mode-based.
+    assert payload["redaction"]["raw_source"] is True
+    assert payload["redaction"]["mandatory"] is False
+    assert payload["redaction"]["value_redaction_applied"] is False
+    assert "kensa import" in payload["redaction"]["note"]
+    # Exposure gates always treat runtime trial manifests as unsafe.
+    from kensa.redact import safe_manifest
+
+    assert safe_manifest(payload["redaction"]) is False
 
 
-def test_import_jsonl_records_write_trace_views_and_manifest(tmp_path: Path) -> None:
+def test_import_jsonl_records_write_trace_views_and_manifest(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "traces.jsonl"
     source.write_text(
         json.dumps(
@@ -142,7 +190,6 @@ def test_import_jsonl_records_write_trace_views_and_manifest(tmp_path: Path) -> 
         out=out,
         limit=1,
         max_payload_bytes=source.stat().st_size,
-        endpoint="https://user:secret@collector.example.com:4318/v1/api-token/ingest?token=x",
     )
 
     rows = _read_jsonl(out)
@@ -153,7 +200,7 @@ def test_import_jsonl_records_write_trace_views_and_manifest(tmp_path: Path) -> 
     assert result.manifest_path == out.with_suffix(".manifest.json")
     assert result.warnings == [
         "secret-like fields were redacted",
-        "endpoint recorded in import provenance",
+        "mandatory value redaction changed 2 value(s)",
     ]
     assert row["id"] == "tr_1"
     assert row["name"] == "refund"
@@ -161,26 +208,35 @@ def test_import_jsonl_records_write_trace_views_and_manifest(tmp_path: Path) -> 
     assert row["status"] == "unknown"
     assert row["input"] == "hello"
     assert row["output"] is None
-    assert row["attributes"] == {"api_key": "[redacted]"}
-    assert row["raw"]["api_key"] == "[redacted]"
+    assert row["attributes"] == {"api_key": "[SECRET_1]"}
+    assert row["raw"]["api_key"] == "[SECRET_1]"
     assert row["source"]["provider"] == "jsonl"
-    assert row["source"]["source_path"] == str(source)
-    assert row["source"]["source_url"] == (
-        "https://collector.example.com:4318/v1/[redacted]/ingest"
-    )
+    assert row["source"]["source_path"] is None
+    assert row["source"]["source_url"] is None
     assert result.manifest_path is not None
     manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["endpoint"] == "https://collector.example.com:4318/v1/[redacted]/ingest"
+    assert manifest["artifact_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+    assert {"source", "project", "since", "endpoint"}.isdisjoint(manifest)
     assert manifest["records_written"] == 1
     assert manifest["trace_count"] == 1
     assert manifest["span_count"] == 0
-    assert manifest["redaction"]["mode"] == "keys"
-    assert manifest["redaction"]["requested_mode"] == "keys"
-    assert manifest["redaction"]["secret_keys_redacted"] is True
-    assert manifest["redaction"]["version"] == traces_module.REDACTOR_VERSION
+    redaction = manifest["redaction"]
+    assert redaction["version"] == "kensa.redactor.v2"
+    assert redaction["mandatory"] is True
+    assert redaction["value_redaction_applied"] is True
+    assert redaction["redaction_available"] is True
+    assert redaction["secret_keys_redacted"] is True
+    assert redaction["changed_value_count"] == 2
+    assert redaction["pseudonymization"] == "instance-counter"
+    assert redaction["model"]["name"] == "en_core_web_sm"
+    # The gated load path accepts the freshly written artifact.
+    assert load_trace_views(out) == rows
 
 
-def test_import_json_records_spans_without_synthetic_semantics(tmp_path: Path) -> None:
+def test_import_json_records_spans_without_synthetic_semantics(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "trace-spans.json"
     source.write_text(
         json.dumps(
@@ -232,7 +288,10 @@ def test_import_json_records_spans_without_synthetic_semantics(tmp_path: Path) -
     assert "kensa.final_output" not in span["attributes"]
 
 
-def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(tmp_path: Path) -> None:
+def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     run_dir = tmp_path / ".kensa" / "traces" / "runs" / "local"
     run_dir.mkdir(parents=True)
     (run_dir / "manifest.json").write_text(
@@ -286,144 +345,55 @@ def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(tmp_path: Path
     assert row["duration_ms"] == 0.001
 
 
-def test_import_redaction_off_preserves_values(tmp_path: Path) -> None:
-    source = tmp_path / "traces.jsonl"
-    source.write_text(json.dumps({"id": "tr_1", "api_key": "secret"}) + "\n")
-    out = tmp_path / "imports" / "json.jsonl"
-
-    result = import_trace_source(
-        provider="jsonl",
-        source=str(source),
-        out=out,
-        limit=1,
-        max_payload_bytes=source.stat().st_size,
-        endpoint="https://user:secret@collector.example.com/v1/api-token/ingest?token=x",
-        redact="off",
-    )
-
-    row = _read_jsonl(out)[0]
-    assert row["attributes"]["api_key"] == "secret"
-    assert row["source"]["source_url"] == (
-        "https://user:secret@collector.example.com/v1/api-token/ingest?token=x"
-    )
-    assert result.warnings == ["endpoint stored verbatim including any credentials (--redact off)"]
-    assert result.manifest_path is not None
-    manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["endpoint"] == (
-        "https://user:secret@collector.example.com/v1/api-token/ingest?token=x"
-    )
-    assert manifest["redaction"]["mode"] == "off"
-    assert manifest["redaction"]["secret_keys_redacted"] is False
-
-
-def test_import_strict_redacts_detect_secrets_values(
+def test_import_requires_redaction_readiness_before_reading_payloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "traces.jsonl"
-    source.write_text(json.dumps({"id": "tr_1", "input": "tok_live"}) + "\n")
-    out = tmp_path / "imports" / "detect-secrets.jsonl"
-
-    def fake_loader() -> traces_module._StrictValueRedactor:
-        return traces_module._StrictValueRedactor(
-            detect_secret=lambda value: value == "tok_live",
-            redact_pii=lambda value: (value, False),
-            dependencies={
-                "detect-secrets": "test",
-                "en-core-web-sm": "test",
-                "presidio-analyzer": "test",
-                "spacy": "test",
-            },
-            presidio_entities=("EMAIL_ADDRESS", "PERSON"),
-        )
-
-    monkeypatch.setattr(traces_module, "_load_strict_value_redactor", fake_loader)
-
-    result = import_trace_source(
-        provider="jsonl",
-        source=str(source),
-        out=out,
-        limit=1,
-        max_payload_bytes=source.stat().st_size,
-        redact="strict",
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        redact,
+        "missing_redaction_dependencies",
+        lambda: redact.REDACTION_EXTRA_MODULES,
     )
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
+    out = tmp_path / "imports" / "blocked.jsonl"
 
-    row = _read_jsonl(out)[0]
-    assert row["input"] == "[redacted]"
-    assert row["raw"]["input"] == "[redacted]"
-    assert result.warnings == ["strict value redaction was applied"]
-    assert result.manifest_path is not None
-    manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["redaction"]["mode"] == "strict"
-    assert manifest["redaction"]["requested_mode"] == "strict"
-    assert manifest["redaction"]["ruleset_hash"] == traces_module._STRICT_RULESET_HASH
-    assert manifest["redaction"]["strict"]["available"] is True
-    assert manifest["redaction"]["strict"]["entities"] == ["EMAIL_ADDRESS", "PERSON"]
-    assert manifest["redaction"]["strict"]["entity_source"] == traces_module._PRESIDIO_ENTITY_SOURCE
-    assert manifest["redaction"]["strict"]["dependencies"]["presidio-analyzer"] == "test"
-    assert "input" in manifest["redaction"]["strict"]["text_leaf_keys"]
-    assert manifest["redaction"]["values_redacted"] is True
+    with pytest.raises(RedactionNotReadyError, match="Install kensa"):
+        import_trace_source(
+            provider="jsonl",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
+        )
+    assert not out.exists()
 
 
-def test_import_strict_skips_identifiers_and_redacts_free_text_paths(
+def test_import_redacts_values_with_stable_instance_aliases(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    redaction_ready: FakeRedactionEnv,
 ) -> None:
     source = tmp_path / "traces.jsonl"
     source.write_text(
         json.dumps(
             {
-                "trace_id": "trace_Alice",
-                "span_id": "span_Alice",
-                "name": "Alice",
-                "kind": "tool",
-                "tool_name": "Alice",
-                "status": "ok",
-                "status_message": "Alice failed after emailing alice@example.com",
+                "id": "tr_1",
                 "input": "Ask Alice at alice@example.com",
-                "attributes": {
-                    "custom": "Alice custom",
-                    "input.value": "Email alice@example.com",
-                    "kensa.step.state_summary": "Alice summary",
-                    "openinference.tool.name": "Alice",
-                    "service.name": "Alice service",
-                },
-                "events": [
+                "output": "Alice replied",
+                "spans": [
                     {
-                        "name": "Alice",
-                        "attributes": {
-                            "exception.message": "Alice exploded",
-                            "service.name": "Alice service",
-                        },
+                        "span_id": "span_1",
+                        "status_message": "Alice failed after emailing alice@example.com",
+                        "attributes": {"detail": "Alice again"},
+                        "events": [{"attributes": {"exception.message": "Alice exploded"}}],
                     }
                 ],
             }
         )
         + "\n"
     )
-    out = tmp_path / "imports" / "strict-paths.jsonl"
-    scanned: list[str] = []
-
-    def fake_loader() -> traces_module._StrictValueRedactor:
-        def redact_pii(value: str) -> tuple[str, bool]:
-            scanned.append(value)
-            redacted = value.replace("Alice", "[redacted]")
-            redacted = redacted.replace("alice@example.com", "[redacted]")
-            return redacted, redacted != value
-
-        return traces_module._StrictValueRedactor(
-            detect_secret=lambda value: False,
-            redact_pii=redact_pii,
-            dependencies={
-                "detect-secrets": "test",
-                "en-core-web-sm": "test",
-                "presidio-analyzer": "test",
-                "spacy": "test",
-            },
-            presidio_entities=("EMAIL_ADDRESS", "PERSON"),
-        )
-
-    monkeypatch.setattr(traces_module, "_load_strict_value_redactor", fake_loader)
+    out = tmp_path / "imports" / "aliases.jsonl"
 
     result = import_trace_source(
         provider="jsonl",
@@ -431,315 +401,254 @@ def test_import_strict_skips_identifiers_and_redacts_free_text_paths(
         out=out,
         limit=1,
         max_payload_bytes=source.stat().st_size,
-        redact="strict",
     )
 
     row = _read_jsonl(out)[0]
     span = row["spans"][0]
-    assert row["id"] == "trace_Alice"
-    assert span["id"] == "span_Alice"
-    assert span["name"] == "Alice"
-    assert span["tool_name"] == "Alice"
-    assert span["status"] == "ok"
-    assert span["status_message"] == "[redacted] failed after emailing [redacted]"
-    assert span["input"] == "Ask [redacted] at [redacted]"
-    assert span["attributes"]["custom"] == "Alice custom"
-    assert span["attributes"]["input.value"] == "Email [redacted]"
-    assert span["attributes"]["kensa.step.state_summary"] == "[redacted] summary"
-    assert span["attributes"]["openinference.tool.name"] == "Alice"
-    assert span["attributes"]["service.name"] == "Alice service"
-    assert span["events"][0]["name"] == "Alice"
-    assert span["events"][0]["attributes"]["exception.message"] == "[redacted] exploded"
-    assert span["events"][0]["attributes"]["service.name"] == "Alice service"
-    assert "Alice failed after emailing alice@example.com" in scanned
-    assert "Ask Alice at alice@example.com" in scanned
-    assert "Email alice@example.com" in scanned
-    assert "Alice summary" in scanned
-    assert "Alice exploded" in scanned
-    assert result.warnings == ["strict value redaction was applied"]
+    # One value keeps one alias across input, output, and span fields (AC 48).
+    assert row["input"] == "Ask [PERSON_1] at [EMAIL_ADDRESS_1]"
+    assert row["output"] == "[PERSON_1] replied"
+    assert span["status_message"] == "[PERSON_1] failed after emailing [EMAIL_ADDRESS_1]"
+    assert span["attributes"]["detail"] == "[PERSON_1] again"
+    assert span["events"][0]["attributes"]["exception.message"] == "[PERSON_1] exploded"
+    assert span["raw"]["status_message"] == ("[PERSON_1] failed after emailing [EMAIL_ADDRESS_1]")
+    assert result.redaction["entity_instance_counts"]["PERSON"] == 1
+    assert result.redaction["entity_instance_counts"]["EMAIL_ADDRESS"] == 1
+    assert "mandatory value redaction changed" in result.warnings[0]
+    # Alias determinism: re-importing identical input yields identical aliases.
+    rerun_out = tmp_path / "imports" / "aliases-rerun.jsonl"
+    import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=rerun_out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+    assert _read_jsonl(rerun_out) == [row]
+    # The value-to-alias map is never persisted anywhere in the artifact or manifest.
+    assert result.manifest_path is not None
+    persisted = out.read_text() + result.manifest_path.read_text()
+    assert "Alice" not in persisted
+    assert "alice@example.com" not in persisted
 
 
-def test_import_strict_redacts_presidio_values(
+def test_import_detect_secrets_hits_redact_whole_values(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    redaction_ready: FakeRedactionEnv,
 ) -> None:
     source = tmp_path / "traces.jsonl"
-    source.write_text(
-        json.dumps({"id": "tr_1", "input": "Email Alice at alice@example.com"}) + "\n"
+    source.write_text(json.dumps({"id": "tr_1", "input": "tok_live"}) + "\n")
+    out = tmp_path / "imports" / "detect-secrets.jsonl"
+
+    result = import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
     )
-    out = tmp_path / "imports" / "presidio.jsonl"
 
-    def fake_loader() -> traces_module._StrictValueRedactor:
-        def redact_pii(value: str) -> tuple[str, bool]:
-            redacted = value.replace("Alice", "[redacted]")
-            redacted = redacted.replace("alice@example.com", "[redacted]")
-            return redacted, redacted != value
+    row = _read_jsonl(out)[0]
+    assert row["input"] == "[SECRET_1]"
+    assert row["raw"]["input"] == "[SECRET_1]"
+    assert result.redaction["redacted_span_count"] >= 2
 
-        return traces_module._StrictValueRedactor(
-            detect_secret=lambda value: False,
-            redact_pii=redact_pii,
-            dependencies={
-                "detect-secrets": "test",
-                "en-core-web-sm": "test",
-                "presidio-analyzer": "test",
-                "spacy": "test",
-            },
-            presidio_entities=("CREDIT_CARD", "EMAIL_ADDRESS", "PERSON", "US_SSN"),
+
+def test_import_fails_closed_and_writes_nothing_on_redaction_errors(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "tr_1", "input": "Alice"}) + "\n")
+    out = tmp_path / "imports" / "failing.jsonl"
+    redaction_ready.analyzer_error = RuntimeError("model exploded")
+
+    with pytest.raises(RedactionError, match="value redaction failed"):
+        import_trace_source(
+            provider="jsonl",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
         )
+    assert not out.exists()
+    assert not out.with_suffix(".manifest.json").exists()
 
-    monkeypatch.setattr(traces_module, "_load_strict_value_redactor", fake_loader)
 
-    result = import_trace_source(
-        provider="jsonl",
-        source=str(source),
+def test_import_trace_records_shares_the_redaction_pipeline(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    payload = {
+        "traces": [
+            {
+                "id": "trace_1",
+                "input": "Alice needs help",
+                "observations": [{"id": "obs_1", "type": "TOOL", "input": {"query": "Alice"}}],
+            }
+        ]
+    }
+    out = tmp_path / "imports" / "connected.jsonl"
+
+    result = import_trace_records(
+        provider="langfuse",
+        payload=payload,
+        source_label="langfuse:connected",
         out=out,
-        limit=1,
-        max_payload_bytes=source.stat().st_size,
-        redact="strict",
+        limit=10,
+        max_payload_bytes=10_000,
     )
 
     row = _read_jsonl(out)[0]
-    assert row["input"] == "Email [redacted] at [redacted]"
-    assert result.warnings == ["strict value redaction was applied"]
-    assert result.manifest_path is not None
-    manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["redaction"]["strict"]["entities"] == [
-        "CREDIT_CARD",
-        "EMAIL_ADDRESS",
-        "PERSON",
-        "US_SSN",
-    ]
-    assert manifest["redaction"]["values_redacted"] is True
+    assert result.provider == "langfuse"
+    assert result.source == "langfuse:connected"
+    assert result.bytes_read == len(json.dumps(payload, sort_keys=True).encode())
+    assert row["input"] == "[PERSON_1] needs help"
+    assert row["spans"][0]["input"] == {"query": "[PERSON_1]"}
+    assert row["source"]["source_path"] is None
+    assert result.redaction["version"] == "kensa.redactor.v2"
 
 
-def test_import_strict_redacts_with_real_presidio_and_spacy_model(tmp_path: Path) -> None:
-    pytest.importorskip("detect_secrets")
-    pytest.importorskip("en_core_web_sm")
-    pytest.importorskip("presidio_analyzer")
-    pytest.importorskip("spacy")
+def test_import_trace_records_enforces_payload_bound_in_memory(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    payload = {"traces": [{"id": "tr_1", "input": "x" * 200}]}
+    with pytest.raises(ValueError, match="payload exceeds --max-payload-bytes"):
+        import_trace_records(
+            provider="langfuse",
+            payload=payload,
+            source_label="langfuse:connected",
+            out=tmp_path / "imports" / "bounded.jsonl",
+            limit=10,
+            max_payload_bytes=64,
+        )
+    assert not (tmp_path / "imports" / "bounded.jsonl").exists()
+
+
+def test_import_trace_records_accepts_json_record_payloads(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    result = import_trace_records(
+        provider="jsonl",
+        payload=[{"id": "tr_mem", "input": "Alice"}],
+        source_label="memory:test",
+        out=tmp_path / "imports" / "records.jsonl",
+        limit=5,
+        max_payload_bytes=10_000,
+    )
+    row = _read_jsonl(result.out_path)[0]
+    assert row["id"] == "tr_mem"
+    assert row["input"] == "[PERSON_1]"
+
+
+def test_load_trace_views_reports_unreadable_artifacts(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "missing-artifact.jsonl"
+    _write_safe_sibling_manifest(artifact)
+    with pytest.raises(ValueError, match="Could not read trace import artifact"):
+        load_trace_views(artifact)
+
+
+def test_load_trace_views_gates_on_the_sibling_manifest(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    artifact = tmp_path / "artifact.jsonl"
+    artifact.write_text(json.dumps(_minimal_trace_view()) + "\n")
+
+    with pytest.raises(RedactionGateError, match="no redaction manifest"):
+        load_trace_views(artifact)
+
+    manifest_path = artifact.with_suffix(".manifest.json")
+    manifest_path.write_text("{")
+    with pytest.raises(RedactionGateError, match="no redaction manifest"):
+        load_trace_views(artifact)
+
+    manifest_path.write_text(json.dumps(["not", "a", "dict"]))
+    with pytest.raises(RedactionGateError, match="no redaction manifest"):
+        load_trace_views(artifact)
+
+    manifest_path.write_text(
+        json.dumps({"redaction": {"version": "kensa.redactor.v1", "mode": "strict"}})
+    )
+    with pytest.raises(RedactionGateError, match=r"kensa\.redactor\.v2"):
+        load_trace_views(artifact)
+
+    manifest_path.write_text(json.dumps({"redaction": {"raw_source": True}}))
+    with pytest.raises(RedactionGateError, match="raw source telemetry"):
+        load_trace_views(artifact)
+
+    _write_safe_sibling_manifest(artifact)
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("artifact_sha256")
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RedactionGateError, match="no valid artifact SHA-256"):
+        load_trace_views(artifact)
+
+    _write_safe_sibling_manifest(artifact)
+    assert load_trace_views(artifact) == [_minimal_trace_view()]
+    assert import_redaction_manifest(artifact)["version"] == "kensa.redactor.v2"
+
+
+def test_load_trace_views_rejects_artifact_replaced_after_manifest(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
+    artifact = tmp_path / "imports" / "traces.jsonl"
+    import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=artifact,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    replacement = _minimal_trace_view()
+    replacement["input"] = "alice@example.com"
+    artifact.write_text(json.dumps(replacement) + "\n")
+
+    with pytest.raises(RedactionGateError, match="does not match its redaction manifest"):
+        load_trace_views(artifact)
+
+
+def test_import_sanitizes_trace_urls_with_safe_endpoint(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "traces.jsonl"
     source.write_text(
-        json.dumps({"id": "tr_1", "input": "Please email alice@example.com after the run."}) + "\n"
+        json.dumps(
+            {
+                "id": "tr_1",
+                "trace_url": "https://user:pw@trace.example.com/v1/api-token/tr_1",
+            }
+        )
+        + "\n"
     )
-    out = tmp_path / "imports" / "real-presidio.jsonl"
+    out = tmp_path / "imports" / "trace-url.jsonl"
 
-    result = import_trace_source(
+    import_trace_source(
         provider="jsonl",
         source=str(source),
         out=out,
         limit=1,
         max_payload_bytes=source.stat().st_size,
-        redact="strict",
     )
 
     row = _read_jsonl(out)[0]
-    assert "alice@example.com" not in row["input"]
-    assert "[redacted]" in row["input"]
-    assert "strict value redaction was applied" in result.warnings
-    assert result.redaction["mode"] == "strict"
-    assert "EMAIL_ADDRESS" in result.redaction["strict"]["entities"]
-
-
-def test_import_strict_falls_back_to_key_redaction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "traces.jsonl"
-    source.write_text(json.dumps({"id": "tr_1", "api_key": "secret", "input": "Alice"}) + "\n")
-    out = tmp_path / "imports" / "strict.jsonl"
-
-    def missing_loader() -> traces_module._StrictValueRedactor:
-        raise RuntimeError("Presidio analyzer unavailable: model missing")
-
-    monkeypatch.setattr(traces_module, "_load_strict_value_redactor", missing_loader)
-
-    result = import_trace_source(
-        provider="jsonl",
-        source=str(source),
-        out=out,
-        limit=1,
-        max_payload_bytes=source.stat().st_size,
-        redact="strict",
-    )
-
-    row = _read_jsonl(out)[0]
-    assert row["raw"]["api_key"] == "[redacted]"
-    assert row["input"] == "Alice"
-    assert result.warnings == [
-        (
-            "strict redaction unavailable; fell back to key-only redaction: "
-            "Presidio analyzer unavailable: model missing"
-        ),
-        "secret-like fields were redacted",
-    ]
-    assert result.manifest_path is not None
-    manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["redaction"]["mode"] == "keys"
-    assert manifest["redaction"]["requested_mode"] == "strict"
-    assert manifest["redaction"]["strict"]["available"] is False
-    assert manifest["redaction"]["strict"]["fallback_reason"] == (
-        "Presidio analyzer unavailable: model missing"
-    )
-
-
-def test_strict_value_redactor_loader_scans_detect_secrets_and_presidio(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeSettings:
-        def __enter__(self) -> None:
-            return None
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-    class FakeProvider:
-        def __init__(self, nlp_configuration: dict[str, object]) -> None:
-            assert nlp_configuration["nlp_engine_name"] == "spacy"
-
-        def create_engine(self) -> str:
-            return "nlp-engine"
-
-    class FakeAnalyzer:
-        def __init__(self, nlp_engine: str, supported_languages: list[str]) -> None:
-            assert nlp_engine == "nlp-engine"
-            assert supported_languages == ["en"]
-
-        def get_supported_entities(self, language: str) -> list[str]:
-            assert language == "en"
-            return ["PERSON", "EMAIL_ADDRESS", "US_SSN"]
-
-        def analyze(self, text: str, language: str, entities: list[str]) -> list[SimpleNamespace]:
-            assert language == "en"
-            assert entities == ["EMAIL_ADDRESS", "PERSON", "US_SSN"]
-            start = text.index("alice@example.com")
-            end = start + len("alice@example.com")
-            return [SimpleNamespace(start=start, end=end)]
-
-    def scan_line(*args: object, **kwargs: object) -> list[str]:
-        line = str(args[0] if len(args) == 1 else kwargs.get("line", ""))
-        if len(args) == 1 and ("keyword-token" in line or "legacy-token" in line):
-            raise TypeError
-        if kwargs and "legacy-token" in line:
-            raise TypeError
-        if len(args) > 1:
-            line = str(args[1])
-        return ["secret"] if "token" in line else []
-
-    def fake_import_module(name: str) -> object:
-        modules = {
-            "detect_secrets.core.scan": SimpleNamespace(scan_line=scan_line),
-            "detect_secrets.settings": SimpleNamespace(default_settings=FakeSettings),
-            "presidio_analyzer": SimpleNamespace(AnalyzerEngine=FakeAnalyzer),
-            "presidio_analyzer.nlp_engine": SimpleNamespace(NlpEngineProvider=FakeProvider),
-        }
-        return modules[name]
-
-    def fake_version(package: str) -> str:
-        if package == "spacy":
-            raise traces_module.importlib.metadata.PackageNotFoundError
-        return f"{package}-version"
-
-    monkeypatch.setattr(traces_module.importlib, "import_module", fake_import_module)
-    monkeypatch.setattr(traces_module.importlib.metadata, "version", fake_version)
-
-    redactor = traces_module._load_strict_value_redactor()
-
-    assert redactor.presidio_entities == ("EMAIL_ADDRESS", "PERSON", "US_SSN")
-    assert redactor.dependencies == {
-        "detect-secrets": "detect-secrets-version",
-        "en-core-web-sm": "en-core-web-sm-version",
-        "presidio-analyzer": "presidio-analyzer-version",
-        "spacy": "unknown",
-    }
-    assert redactor.detect_secret(" ") is False
-    assert redactor.detect_secret("token") is True
-    assert redactor.detect_secret("keyword-token") is True
-    assert redactor.detect_secret("legacy-token") is True
-    assert redactor.redact_pii("Email alice@example.com")[0] == "Email [redacted]"
-
-
-def test_strict_value_redactor_loader_reports_missing_dependencies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing_import(_name: str) -> object:
-        raise ImportError("missing")
-
-    monkeypatch.setattr(traces_module.importlib, "import_module", missing_import)
-
-    with pytest.raises(RuntimeError, match="strict redaction dependencies unavailable"):
-        traces_module._load_strict_value_redactor()
-
-
-def test_strict_value_redactor_loader_reports_presidio_setup_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class BrokenProvider:
-        def __init__(self, nlp_configuration: dict[str, object]) -> None:
-            assert nlp_configuration
-
-        def create_engine(self) -> str:
-            raise ValueError("model missing")
-
-    def fake_import_module(name: str) -> object:
-        modules = {
-            "detect_secrets.core.scan": SimpleNamespace(scan_line=lambda *args, **kwargs: []),
-            "detect_secrets.settings": SimpleNamespace(default_settings=lambda: None),
-            "presidio_analyzer": SimpleNamespace(AnalyzerEngine=object),
-            "presidio_analyzer.nlp_engine": SimpleNamespace(NlpEngineProvider=BrokenProvider),
-        }
-        return modules[name]
-
-    monkeypatch.setattr(traces_module.importlib, "import_module", fake_import_module)
-
-    with pytest.raises(RuntimeError, match="Presidio analyzer unavailable"):
-        traces_module._load_strict_value_redactor()
-
-
-def test_strict_value_redactor_loader_rejects_empty_entity_sets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeSettings:
-        def __enter__(self) -> None:
-            return None
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-    class FakeProvider:
-        def __init__(self, nlp_configuration: dict[str, object]) -> None:
-            assert nlp_configuration
-
-        def create_engine(self) -> str:
-            return "nlp-engine"
-
-    class EmptyAnalyzer:
-        def __init__(self, nlp_engine: str, supported_languages: list[str]) -> None:
-            assert nlp_engine
-            assert supported_languages
-
-        def get_supported_entities(self, language: str) -> list[str]:
-            assert language == "en"
-            return []
-
-    def fake_import_module(name: str) -> object:
-        modules = {
-            "detect_secrets.core.scan": SimpleNamespace(scan_line=lambda *args, **kwargs: []),
-            "detect_secrets.settings": SimpleNamespace(default_settings=FakeSettings),
-            "presidio_analyzer": SimpleNamespace(AnalyzerEngine=EmptyAnalyzer),
-            "presidio_analyzer.nlp_engine": SimpleNamespace(NlpEngineProvider=FakeProvider),
-        }
-        return modules[name]
-
-    monkeypatch.setattr(traces_module.importlib, "import_module", fake_import_module)
-
-    with pytest.raises(RuntimeError, match="no supported English entities"):
-        traces_module._load_strict_value_redactor()
+    assert row["source"]["trace_url"] == "https://trace.example.com/v1/[redacted]/tr_1"
 
 
 @pytest.mark.parametrize("provider", ["json", "jsonl"])
 def test_import_json_trace_records_accept_trace_id_without_id(
     provider: str,
     tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
 ) -> None:
     source = tmp_path / f"trace.{provider}"
     row = {"trace_id": "tr_1", "input": "hello"}
@@ -765,7 +674,10 @@ def test_import_json_trace_records_accept_trace_id_without_id(
     assert imported["spans"] == []
 
 
-def test_import_otlp_records_groups_spans_into_trace_view(tmp_path: Path) -> None:
+def test_import_otlp_records_groups_spans_into_trace_view(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "otlp.json"
     source.write_text(
         json.dumps(
@@ -885,7 +797,7 @@ def test_import_otlp_records_groups_spans_into_trace_view(tmp_path: Path) -> Non
     assert span["status"] == "error"
     assert span["events"][0]["attributes"]["exception.message"] == "boom"
     assert span["attributes"]["links"][0]["trace_id"] == "linked"
-    assert span["attributes"]["authorization"] == "[redacted]"
+    assert span["attributes"]["authorization"] == "[SECRET_1]"
     assert span["attributes"]["raw"] == "plain"
     assert span["attributes"]["unknown"] == {"other": "value"}
 
@@ -916,7 +828,10 @@ def test_import_otlp_records_groups_spans_into_trace_view(tmp_path: Path) -> Non
     assert out.read_text() == ""
 
 
-def test_import_langfuse_records_preserve_trace_and_observation_fields(tmp_path: Path) -> None:
+def test_import_langfuse_records_preserve_trace_and_observation_fields(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "langfuse.json"
     source.write_text(
         json.dumps(
@@ -974,8 +889,6 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(tmp_path:
         out=out,
         limit=10,
         max_payload_bytes=source.stat().st_size,
-        project="support-agent",
-        since="24h",
     )
 
     rows = _read_jsonl(out)
@@ -1002,8 +915,7 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(tmp_path:
     assert row["spans"][1]["name"] == "summarize"
     assert row["spans"][1]["kind"] == "llm"
     manifest = json.loads(out.with_suffix(".manifest.json").read_text())
-    assert manifest["project"] == "support-agent"
-    assert manifest["since"] == "24h"
+    assert {"source", "project", "since", "endpoint"}.isdisjoint(manifest)
     assert manifest["trace_count"] == 1
     assert manifest["span_count"] == 2
 
@@ -1032,7 +944,10 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(tmp_path:
     assert trace_only_row["spans"] == []
 
 
-def test_import_langfuse_records_accepts_official_data_envelope(tmp_path: Path) -> None:
+def test_import_langfuse_records_accepts_official_data_envelope(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "langfuse-observations.json"
     source.write_text(
         json.dumps(
@@ -1113,7 +1028,10 @@ def test_import_langfuse_records_accepts_official_data_envelope(tmp_path: Path) 
     assert limited.span_count == 2
 
 
-def test_import_langfuse_observation_rows_group_by_trace_id(tmp_path: Path) -> None:
+def test_import_langfuse_observation_rows_group_by_trace_id(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "langfuse-observation-groups.json"
     source.write_text(
         json.dumps(
@@ -1192,6 +1110,7 @@ def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path
     }
     source.write_text(json.dumps(trace) + "\n")
 
+    _write_safe_sibling_manifest(source)
     rows = load_trace_views(source)
 
     assert rows == [trace]
@@ -1207,11 +1126,15 @@ def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path
 
     old_artifact = tmp_path / "old.jsonl"
     old_artifact.write_text('{"id":"tr_old","spans":[]}\n')
+    _write_safe_sibling_manifest(old_artifact)
     with pytest.raises(ValueError, match="Re-import traces with kensa import"):
         load_trace_views(old_artifact)
 
 
-def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(tmp_path: Path) -> None:
+def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
     source = tmp_path / "trace.jsonl"
     source.write_text(json.dumps({"id": "tr_1"}) + "\n")
 
@@ -1247,7 +1170,7 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(tmp_pa
             limit=1,
             max_payload_bytes=100,
         )
-    with pytest.raises(ValueError, match="bounded trace export"):
+    with pytest.raises(ValueError, match="require --source"):
         import_trace_source(
             provider="jsonl",
             source=None,
@@ -1263,10 +1186,6 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(tmp_pa
             limit=1,
             max_payload_bytes=100,
         )
-    with pytest.raises(ValueError, match="--redact"):
-        traces_module._validate_redaction_mode("bad")
-    assert traces_module._should_scan_strict_value(()) is False
-
     no_trace_id = tmp_path / "no-trace-id.jsonl"
     no_trace_id.write_text(json.dumps({"input": "missing"}) + "\n")
     no_trace_out = tmp_path / "no-trace-out.jsonl"
@@ -1360,10 +1279,6 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(tmp_pa
         )
     assert not no_span_out.exists()
 
-    assert traces_module._sensitive_warnings([{"nested": [{"api_key": "secret"}]}]) == [
-        "secret-like fields were redacted"
-    ]
-    assert traces_module._contains_secret_key(["plain"]) is False
     assert traces_module.safe_endpoint("collector") == "collector"
     assert traces_module.safe_endpoint("https://collector.example.com:bad/path") == (
         "https://collector.example.com/path"
@@ -1375,6 +1290,34 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(tmp_pa
     assert traces_module.safe_endpoint("https://collector.example.com") == (
         "https://collector.example.com"
     )
+    assert traces_module.safe_endpoint("https://[2001:db8::1]/path") == (
+        "https://[2001:db8::1]/path"
+    )
+
+
+def test_atomic_trace_write_preserves_exact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "atomic.jsonl"
+    modes: list[str] = []
+    named_temporary_file = traces_module.tempfile.NamedTemporaryFile
+
+    def tracking_named_temporary_file(*args: Any, **kwargs: Any) -> Any:
+        modes.append(str(args[0]))
+        return named_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(
+        traces_module.tempfile,
+        "NamedTemporaryFile",
+        tracking_named_temporary_file,
+    )
+    artifact_bytes = b'{"id":"one"}\n{"id":"two"}\n'
+
+    traces_module._write_bytes_atomic(output, artifact_bytes)
+
+    assert modes == ["wb"]
+    assert output.read_bytes() == artifact_bytes
 
 
 def test_trace_import_internal_edge_paths(
@@ -1397,13 +1340,13 @@ def test_trace_import_internal_edge_paths(
 
     monkeypatch.setattr(Path, "replace", fail_replace)
     with pytest.raises(OSError, match="replace failed"):
-        traces_module._write_text_atomic(output, "data")
+        traces_module._write_bytes_atomic(output, b"data")
     assert not list(output.parent.glob(f".{output.name}.*"))
 
     with pytest.raises(ValueError, match="unsupported trace import provider"):
         traces_module._import_trace_views(
             provider="missing",
-            source_path=source,
+            data=[],
             limit=1,
             trace_source=traces_module.TraceSource(
                 provider="jsonl",
@@ -1467,41 +1410,38 @@ def test_trace_import_internal_edge_paths(
 
 def test_load_trace_views_rejects_invalid_trace_view_rows(tmp_path: Path) -> None:
     source = tmp_path / "bad.jsonl"
-    source.write_text("\n{\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
 
-    source.write_text("[]\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    def assert_invalid(content: str, match: str = "Re-import traces with kensa import") -> None:
+        source.write_text(content)
+        _write_safe_sibling_manifest(source)
+        with pytest.raises(ValueError, match=match):
+            load_trace_views(source)
+
+    assert_invalid("\n{\n")
+    assert_invalid("[]\n")
 
     trace = _minimal_trace_view()
     invalid = dict(trace)
     invalid["extra"] = True
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["source"] = {}
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["spans"] = {}
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["spans"] = [{}]
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["id"] = ""
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="missing id"):
+    assert_invalid(json.dumps(invalid) + "\n", "missing id")
+
+    source.write_bytes(b"\xff")
+    _write_safe_sibling_manifest(source)
+    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
         load_trace_views(source)

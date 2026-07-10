@@ -64,12 +64,21 @@ class KensaHarnessSettings(KensaModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class KensaRedactionSettings(KensaModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: Literal["en_core_web_sm"]
+    model_version: str
+    checksum_verified: bool
+
+
 class KensaSettings(KensaModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: Literal["kensa.settings.v1"] = "kensa.settings.v1"
     init: KensaInitSettings = Field(default_factory=KensaInitSettings)
     harness: KensaHarnessSettings = Field(default_factory=KensaHarnessSettings)
+    redaction: KensaRedactionSettings | None = None
 
 
 class InspectStatus(StrEnum):

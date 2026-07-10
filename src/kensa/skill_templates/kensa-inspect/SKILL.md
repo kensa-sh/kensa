@@ -17,8 +17,10 @@ Trace access:
    `kensa traces get <trace_id> --json`.
 2. If there is no latest import, tell the user to run `kensa import --from <provider> --source
    <file>` or ask for an explicit `--source`.
-3. Treat `TraceView.raw` as redacted inspection evidence only. Do not rely on provider-specific
-   raw schema in code.
+3. Use `kensa traces` commands for payload access. If access is blocked, return to `kensa-evals`
+   for re-import; never open artifacts or `.kensa/traces/runs/` directly.
+4. Treat `TraceView.raw` as redacted evidence and avoid provider-specific schema.
+   Placeholder identities are trace-local.
 
 Before writing, read existing queue ids with `kensa inspect list --json`. Never re-propose an
 existing id, regardless of its status; items are never deleted, and later stages change only

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import runpy
 import subprocess
@@ -356,8 +357,27 @@ def test_cli_edge_paths(
     )
     monkeypatch.delenv("PRODUCTION_URL", raising=False)
     assert cli._run_doctor_check().returncode == 0
-
     trace_source = tmp_path / "traces.jsonl"
+    trace_source.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "ruleset_hash": cli.redact.RULESET_HASH,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_sm",
+                        "version": "3.8.0",
+                        "checksum_verified": True,
+                    },
+                }
+            }
+        )
+    )
     trace_source.write_text(
         json.dumps(
             {
@@ -385,6 +405,10 @@ def test_cli_edge_paths(
         )
         + "\n"
     )
+    manifest_path = trace_source.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_sha256"] = hashlib.sha256(trace_source.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
     assert (
         cli_traces.cmd_traces(
             argparse.Namespace(traces_command="sample", source=str(trace_source), json=False)
@@ -415,6 +439,9 @@ def test_cli_edge_paths(
     )
     empty_source = tmp_path / "empty.jsonl"
     empty_source.write_text("")
+    empty_manifest = dict(manifest)
+    empty_manifest["artifact_sha256"] = hashlib.sha256(empty_source.read_bytes()).hexdigest()
+    empty_source.with_suffix(".manifest.json").write_text(json.dumps(empty_manifest))
     assert (
         cli_traces.cmd_traces(
             argparse.Namespace(traces_command="sample", source=str(empty_source), json=False)
@@ -451,7 +478,7 @@ def test_cli_edge_paths(
     monkeypatch.setattr(
         cli_traces,
         "load_trace_views",
-        lambda source: (_ for _ in ()).throw(ValueError("bad source")),
+        lambda source, **kwargs: (_ for _ in ()).throw(ValueError("bad source")),
     )
     assert (
         cli_traces.cmd_traces(argparse.Namespace(traces_command="list", source="bad", json=False))
@@ -755,6 +782,7 @@ def test_tracing_exporter_edge_paths(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_cli_module_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delitem(sys.modules, "kensa.cli", raising=False)
     monkeypatch.setattr("sys.argv", ["kensa", "--help"])
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "kensa" / "cli.py"
     with pytest.raises(SystemExit) as excinfo:
-        runpy.run_module("kensa.cli", run_name="__main__")
+        runpy.run_path(str(cli_path), run_name="__main__")
     assert excinfo.value.code == 0
