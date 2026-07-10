@@ -139,8 +139,9 @@ Recommended agent flow: `kensa-evals`: setup -> evidence -> inspect -> approval 
 
 Trace imports read bounded trace export files from JSON, JSONL, OTLP, and Langfuse. Connected
 Langfuse imports use metadata from `kensa connect langfuse`. By default, `connect` verifies
-credentials before saving metadata; use `--configure-only` for metadata-only setup. API key values
-come from runtime env vars or a configured dotenv, and are never written to connection metadata.
+credentials (without reading trace data) before saving metadata; use `--configure-only` for
+metadata-only setup. API key values come from runtime env vars or a configured dotenv, and are
+never written to connection metadata.
 
 Run `kensa --help` or `kensa <command> --help` for the full CLI reference. Use `--json` when a
 coding agent needs a stable machine-readable response.

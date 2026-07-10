@@ -188,11 +188,6 @@ class _ConnectionCheck:
     credential_envs: tuple[str, ...]
     endpoint_reachable: bool = False
     authenticated: bool = False
-    trace_read: bool = False
-
-    @property
-    def import_ready(self) -> bool:
-        return self.endpoint_reachable and self.authenticated and self.trace_read
 
 
 class _ConnectionCheckError(ValueError):
@@ -2472,14 +2467,10 @@ def _connection_checks_payload(check: _ConnectionCheck | None) -> dict[str, bool
         return {
             "endpoint": False,
             "auth": False,
-            "trace_read": False,
-            "import_ready": False,
         }
     return {
         "endpoint": check.endpoint_reachable,
         "auth": check.authenticated,
-        "trace_read": check.trace_read,
-        "import_ready": check.import_ready,
     }
 
 
@@ -2496,14 +2487,6 @@ def _print_connection_check(check: _ConnectionCheck) -> None:
         ok=check.authenticated,
         err=not check.authenticated,
     )
-    if check.authenticated:
-        cli_output.item(
-            "trace import read access verified"
-            if check.trace_read
-            else "trace import read access failed",
-            ok=check.trace_read,
-            err=not check.trace_read,
-        )
 
 
 def _connect_provider(args: Any) -> tuple[dict[str, Any], Path, _ConnectionCheck | None]:
@@ -2598,18 +2581,7 @@ def _check_connection(args: Any, metadata: dict[str, Any]) -> _ConnectionCheck:
         except ValueError as exc:
             check = replace(check, endpoint_reachable=getattr(exc, "status_code", None) is not None)
             raise _ConnectionCheckError(str(exc), check=check) from exc
-        check = replace(check, endpoint_reachable=True, authenticated=True)
-        try:
-            fetch_langfuse_connected_export(
-                endpoint=endpoint,
-                since=None,
-                limit=1,
-                public_key=public_key,
-                secret_key=secret_key,
-            )
-        except ValueError as exc:
-            raise _ConnectionCheckError(str(exc), check=check) from exc
-        return replace(check, trace_read=True)
+        return replace(check, endpoint_reachable=True, authenticated=True)
     raise ValueError(f"unsupported connection provider: {provider}")
 
 
