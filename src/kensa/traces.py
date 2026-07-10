@@ -15,7 +15,6 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from kensa.redact import (
-    EvidenceEnvironment,
     RedactionResult,
     Redactor,
     _safe_url_netloc,
@@ -379,7 +378,6 @@ def import_trace_source(
     project: str | None = None,
     since: str | None = None,
     endpoint: str | None = None,
-    environment: EvidenceEnvironment | str | None = None,
 ) -> ImportResult:
     """Import a bounded local trace export file through mandatory redaction."""
 
@@ -393,7 +391,7 @@ def import_trace_source(
             "v1 trace imports read bounded trace export files; pass --source. "
             "Live vendor API pulls with --project/--since are deferred."
         )
-    redactor = Redactor(environment=environment)
+    redactor = Redactor()
     source_path = Path(source)
     bytes_read = _bounded_size(source_path, max_payload_bytes)
     data = _decode_source(normalized_provider, source_path)
@@ -424,7 +422,6 @@ def import_trace_records(
     project: str | None = None,
     since: str | None = None,
     endpoint: str | None = None,
-    environment: EvidenceEnvironment | str | None = None,
 ) -> ImportResult:
     """Import decoded in-memory trace records through mandatory redaction.
 
@@ -438,7 +435,7 @@ def import_trace_records(
         limit=limit,
         max_payload_bytes=max_payload_bytes,
     )
-    redactor = Redactor(environment=environment)
+    redactor = Redactor()
     bytes_read = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
     if bytes_read > max_payload_bytes:
         raise ValueError(f"payload exceeds --max-payload-bytes: {bytes_read} > {max_payload_bytes}")
@@ -1449,8 +1446,6 @@ def import_redaction_manifest(artifact: Path | str) -> Any:
 
 def load_trace_views(
     source: Path | str,
-    *,
-    environment: EvidenceEnvironment | str | None = None,
 ) -> list[dict[str, Any]]:
     """Load TraceView rows behind the mandatory payload-exposure gate.
 
@@ -1460,7 +1455,7 @@ def load_trace_views(
     """
 
     path = Path(source)
-    assert_safe_manifest(import_redaction_manifest(path), environment=environment)
+    assert_safe_manifest(import_redaction_manifest(path))
     rows: list[dict[str, Any]] = []
     try:
         lines = path.read_text().splitlines()

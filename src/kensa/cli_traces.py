@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-from pydantic import ValidationError
 
 from kensa.cli_output import (
     display_path,
@@ -16,49 +15,17 @@ from kensa.cli_output import (
     print_next_steps,
 )
 from kensa.constants import (
-    KENSA_SETTINGS_PATH,
     TRACE_IMPORT_LATEST_SCHEMA_VERSION,
     TRACE_IMPORTS_DIR,
 )
-from kensa.models import KensaSettings
 from kensa.traces import load_trace_views, trace_view_summary
-
-
-def read_evidence_environment() -> str:
-    """Read-time evidence environment for payload-exposure gates.
-
-    Local-only workflows treat a missing setting as local; connected import
-    strictness is enforced at import time, not here.
-    """
-
-    settings_path = Path.cwd() / KENSA_SETTINGS_PATH
-    if not settings_path.exists():
-        return "local"
-    try:
-        payload = json.loads(settings_path.read_text())
-    except OSError as exc:
-        raise ValueError(f"Could not read Kensa settings: {display_path(settings_path)}") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid Kensa settings JSON: {display_path(settings_path)}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"Kensa settings must be a JSON object: {display_path(settings_path)}")
-    try:
-        settings = KensaSettings.model_validate(payload)
-    except ValidationError as exc:
-        raise ValueError(f"Invalid Kensa settings: {display_path(settings_path)}") from exc
-    if settings.evidence_environment is not None:
-        return settings.evidence_environment
-    raise ValueError(
-        f"Kensa settings do not record a valid evidence_environment: "
-        f"{display_path(settings_path)}. Re-run kensa init with --evidence-environment."
-    )
 
 
 def cmd_traces(args: Any) -> int:
     json_output = bool(getattr(args, "json", False))
     try:
         source_path = resolve_trace_view_source(getattr(args, "source", None))
-        traces = load_trace_views(source_path, environment=read_evidence_environment())
+        traces = load_trace_views(source_path)
     except ValueError as exc:
         if json_output:
             print_json_envelope(

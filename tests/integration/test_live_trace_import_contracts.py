@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 import pytest
 from langfuse import Langfuse
@@ -105,24 +104,16 @@ def _assert_non_empty_data(payload: dict[str, Any], *, provider: str) -> None:
 
 
 def _prepare_live_redaction_readiness(tmp_path: Path) -> None:
-    """Bootstrap sm-only redaction readiness for live connected import tests."""
+    """Bootstrap redaction readiness for live connected import tests."""
 
     missing = redact.missing_redaction_dependencies()
     if missing:
         pytest.skip(f"kensa[redaction] extra not installed: {', '.join(missing)}")
     os.environ["KENSA_MODELS_DIR"] = str(tmp_path / "models")
-    original_download = redact._download_model_wheel
-
-    def download_sm_only(spec: redact.SpacyModelSpec, destination: Path) -> None:
-        if spec.tier == "lg":
-            raise redact.RedactionBootstrapError("live tests use the sm model only")
-        original_download(spec, destination)
-
     original_cwd = Path.cwd()
     os.chdir(tmp_path)
     try:
-        with mock.patch.object(redact, "_download_model_wheel", download_sm_only):
-            redact.ensure_redaction_ready()
+        redact.ensure_redaction_ready()
     finally:
         os.chdir(original_cwd)
 
@@ -151,7 +142,6 @@ def _import_live_payload(
             since=since,
             limit=_live_limit(),
             max_payload_bytes=_payload_size(payload),
-            environment="local",
         )
     finally:
         os.chdir(original_cwd)

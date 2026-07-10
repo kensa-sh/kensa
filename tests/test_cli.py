@@ -190,7 +190,7 @@ def kensa_run():
     _write_persistent_smoke(eval_dir)
 
 
-def _write_safe_import_manifest(artifact: Path, *, tier: str = "lg") -> None:
+def _write_safe_import_manifest(artifact: Path) -> None:
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.with_suffix(".manifest.json").write_text(
         json.dumps(
@@ -205,26 +205,14 @@ def _write_safe_import_manifest(artifact: Path, *, tier: str = "lg") -> None:
                     "ruleset_hash": cli.redact.RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
-                        "name": "en_core_web_lg" if tier == "lg" else "en_core_web_sm",
+                        "name": "en_core_web_sm",
                         "version": "3.8.0",
-                        "tier": tier,
-                        "fallback_used": tier == "sm",
                         "checksum_verified": True,
                     },
                 },
             }
         )
     )
-
-
-def _write_settings_evidence_environment(tmp_path: Path, environment: str) -> None:
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {"schema_version": "kensa.settings.v1"}
-    if settings_path.exists():
-        payload = json.loads(settings_path.read_text())
-    payload["evidence_environment"] = environment
-    settings_path.write_text(json.dumps(payload))
 
 
 def _write_latest_import_pointer(tmp_path: Path, artifact: Path) -> None:
@@ -562,14 +550,9 @@ def test_doctor_passes_and_records_readiness(
     fake_redaction.make_ready(tmp_path, monkeypatch)
     _write_ready_harness(tmp_path / "tests" / "evals")
     (tmp_path / ".kensa").mkdir(exist_ok=True)
-    (tmp_path / ".kensa" / "settings.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "trace_export"},
-            }
-        )
-    )
+    settings = _read_settings(tmp_path)
+    settings["init"] = {"evidence_source": "trace_export"}
+    (tmp_path / ".kensa" / "settings.json").write_text(json.dumps(settings))
     (tmp_path / ".kensa" / "readiness.json").write_text("{}")
 
     code = main(["doctor"])
@@ -1826,7 +1809,6 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     redaction_ready,
 ) -> None:
     monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
-    _write_settings_evidence_environment(tmp_path, "local")
     monkeypatch.setenv("TEST_LANGFUSE_PUBLIC", "lf-public-value")
     monkeypatch.setenv("TEST_LANGFUSE_SECRET", "lf-secret-value")
     _stub_langfuse_auth_check(monkeypatch)
@@ -2002,7 +1984,6 @@ def test_new_cli_helper_edge_paths(
                 max_payload_bytes=1000,
             ),
             out=tmp_path / ".kensa" / "traces" / "imports" / "bad.jsonl",
-            environment="local",
         )
     (tmp_path / ".kensa" / "connections" / "langfuse.json").write_text(
         json.dumps({"provider": "langfuse", "endpoint": ""})
@@ -2018,7 +1999,6 @@ def test_new_cli_helper_edge_paths(
                 max_payload_bytes=1000,
             ),
             out=tmp_path / ".kensa" / "traces" / "imports" / "langfuse.jsonl",
-            environment="local",
         )
     with pytest.raises(ValueError, match="Missing Langfuse credentials"):
         cli._connected_langfuse_payload(
@@ -2260,12 +2240,11 @@ def test_init_settings_write_preserves_harness_section(tmp_path: Path, monkeypat
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_exit"),
-    [("langfuse", 1), ("trace_export", 0), ("local", 0)],
+    "source",
+    ["langfuse", "trace_export", "local"],
 )
 def test_init_trace_source_flag_persists_noninteractive_choice(
     source: str,
-    expected_exit: int,
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -2278,16 +2257,13 @@ def test_init_trace_source_flag_persists_noninteractive_choice(
         lambda: cli.redact.REDACTION_EXTRA_MODULES,
     )
 
-    # Without the redaction dependencies, local-only scaffolding completes with
-    # import blocked, while connected Langfuse evidence setup exits non-zero.
-    assert main(["init", "--trace-source", source]) == expected_exit
+    assert main(["init", "--trace-source", source]) == 1
 
     output = capsys.readouterr().out
     assert "pip install 'kensa[redaction]'" in output
     settings = _read_settings(tmp_path)
     assert settings["init"]["evidence_source"] == source
-    if source == "local":
-        assert settings["evidence_environment"] == "local"
+    assert "redaction" not in settings
 
 
 @pytest.mark.parametrize("source", ["langfuse", "trace_export", "local"])
@@ -2301,113 +2277,22 @@ def test_init_bootstraps_redaction_readiness_when_deps_present(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    (tmp_path / ".kensa" / "redaction.json").unlink()
+    settings_path = tmp_path / ".kensa" / "settings.json"
+    settings = json.loads(settings_path.read_text())
+    del settings["redaction"]
+    settings_path.write_text(json.dumps(settings))
 
-    expected_exit = 1 if source == "langfuse" else 0
-    assert main(["init", "--trace-source", source]) == expected_exit
+    assert main(["init", "--trace-source", source]) == 0
 
     output = capsys.readouterr().out
     assert "redaction dependencies present" in output
-    assert "redaction model ready: en_core_web_lg-3.8.0 (lg)" in output
-    readiness = json.loads((tmp_path / ".kensa" / "redaction.json").read_text())
-    assert readiness["schema_version"] == "kensa.redaction_readiness.v1"
-    assert readiness["model_tier"] == "lg"
+    assert "redaction model ready: en_core_web_sm-3.8.0" in output
     settings = _read_settings(tmp_path)
-    if source == "langfuse":
-        # Connected imports never infer an environment from silence.
-        assert "evidence_environment" not in settings
-        assert "connected imports stay blocked" in output
-    else:
-        assert settings["evidence_environment"] == "local"
-
-
-def test_init_noninteractive_environment_option_unblocks_langfuse_setup(
-    tmp_path: Path,
-    monkeypatch,
-    fake_redaction,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    fake_redaction.make_ready(tmp_path, monkeypatch)
-
-    assert (
-        main(
-            [
-                "init",
-                "--trace-source",
-                "langfuse",
-                "--evidence-environment",
-                "staging",
-            ]
-        )
-        == 0
-    )
-    assert _read_settings(tmp_path)["evidence_environment"] == "staging"
-
-
-def test_init_rejects_environment_without_trace_source(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    assert main(["init", "--evidence-environment", "production"]) == 2
-
-    captured = capsys.readouterr()
-    assert "--evidence-environment requires --trace-source" in captured.err
-    assert not (tmp_path / ".kensa").exists()
-
-
-def test_init_reconfigures_evidence_environment(
-    tmp_path: Path,
-    monkeypatch,
-    fake_redaction,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    fake_redaction.make_ready(tmp_path, monkeypatch)
-    _write_settings_evidence_environment(tmp_path, "local")
-
-    assert (
-        main(
-            [
-                "init",
-                "--trace-source",
-                "trace_export",
-                "--evidence-environment",
-                "staging",
-            ]
-        )
-        == 0
-    )
-    assert _read_settings(tmp_path)["evidence_environment"] == "staging"
-
-
-def test_init_blocks_degraded_redaction_in_production(
-    tmp_path: Path,
-    monkeypatch,
-    fake_redaction,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    fake_redaction.make_ready(tmp_path, monkeypatch, tier="sm")
-    degraded = cli.redact.read_redaction_readiness(tmp_path)
-    assert degraded is not None
-    monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: degraded)
-
-    assert (
-        main(
-            [
-                "init",
-                "--trace-source",
-                "trace_export",
-                "--evidence-environment",
-                "production",
-            ]
-        )
-        == 1
-    )
+    assert settings["redaction"] == {
+        "model": "en_core_web_sm",
+        "model_version": "3.8.0",
+        "checksum_verified": True,
+    }
 
 
 def test_init_agent_all_flag_scaffolds_all_agent_instructions(
@@ -2886,7 +2771,6 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
     monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_select_evidence_environment", lambda steps, source: "local")
     keys = iter(["\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -2934,7 +2818,6 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
     monkeypatch.setattr(cli.shutil, "which", lambda command: "/bin/codex")
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
     monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_select_evidence_environment", lambda steps, source: "local")
     keys = iter(["j", "j", "j", "\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -2958,7 +2841,6 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
     monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_select_evidence_environment", lambda steps, source: "local")
     keys = iter(["x", "\r", "\r"])
     console = Console(record=True, highlight=False)
     monkeypatch.setattr(cli_output, "CONSOLE", console)
@@ -2997,7 +2879,6 @@ def test_init_explicit_auto_agent_summary_uses_resolved_agent(
     )
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
     monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_select_evidence_environment", lambda steps, source: "local")
     keys = iter(["\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -4118,7 +3999,6 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
     )
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
     monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_select_evidence_environment", lambda steps, source: "local")
     keys = iter(["\r", *(["j"] * source_index), "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -4480,8 +4360,7 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
         "_run_persistent_smoke",
         lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
     )
-    fake_redaction.make_ready(tmp_path, monkeypatch, tier="sm")
-    _write_settings_evidence_environment(tmp_path, "staging")
+    fake_redaction.make_ready(tmp_path, monkeypatch)
     settings_payload = json.loads((tmp_path / ".kensa" / "settings.json").read_text())
     settings_payload["init"] = {"evidence_source": "langfuse"}
     (tmp_path / ".kensa" / "settings.json").write_text(json.dumps(settings_payload))
@@ -4500,9 +4379,11 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
     payload = json.loads(capsys.readouterr().out)
     redaction = payload["data"]["redaction"]
     assert redaction["ready"] is True
-    assert redaction["model_tier"] == "sm"
-    assert redaction["fallback_used"] is True
-    assert redaction["evidence_environment"] == "staging"
+    assert redaction["readiness"] == {
+        "model": "en_core_web_sm",
+        "model_version": "3.8.0",
+        "checksum_verified": True,
+    }
     assert redaction["dependencies"] == {
         "spacy": True,
         "presidio_analyzer": True,
@@ -4516,67 +4397,8 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
     assert main(["doctor"]) == 0
     output = capsys.readouterr().out
     assert "Redaction dependencies: present" in output
-    assert "Redaction readiness: ready, model tier sm (degraded sm fallback)" in output
-    assert "Evidence environment: staging" in output
+    assert "Redaction readiness: ready, model en_core_web_sm-3.8.0" in output
     assert "Unsafe trace artifact (re-import required)" in output
-
-
-def test_doctor_fails_when_production_redaction_is_degraded(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-    fake_redaction,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "_run_persistent_smoke",
-        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
-    )
-    fake_redaction.make_ready(tmp_path, monkeypatch, tier="sm")
-    _write_settings_evidence_environment(tmp_path, "production")
-    settings_payload = json.loads((tmp_path / ".kensa" / "settings.json").read_text())
-    settings_payload["init"] = {"evidence_source": "langfuse"}
-    (tmp_path / ".kensa" / "settings.json").write_text(json.dumps(settings_payload))
-
-    assert main(["doctor", "--json"]) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    redaction = payload["data"]["redaction"]
-    assert redaction["ready"] is False
-    assert redaction["model_tier"] == "sm"
-    assert any("production trace workflows are blocked" in error for error in payload["errors"])
-
-
-def test_doctor_fails_connected_setup_without_evidence_environment(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-    fake_redaction,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "_run_persistent_smoke",
-        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
-    )
-    fake_redaction.make_ready(tmp_path, monkeypatch)
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "langfuse"},
-            }
-        )
-    )
-
-    assert main(["doctor", "--json"]) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["redaction"]["ready"] is True
-    assert any("has no evidence environment" in error for error in payload["errors"])
-    assert any("--evidence-environment" in step for step in payload["next_steps"])
 
 
 def test_doctor_reports_missing_redaction_readiness_first(
@@ -4595,8 +4417,6 @@ def test_doctor_reports_missing_redaction_readiness_first(
     settings_path.write_text(
         json.dumps({"schema_version": "kensa.settings.v1", "init": {"evidence_source": "local"}})
     )
-    readiness_path = tmp_path / ".kensa" / "redaction.json"
-    readiness_path.write_text(json.dumps({"schema_version": "wrong"}))
     monkeypatch.setattr(
         cli.redact,
         "missing_redaction_dependencies",
@@ -4615,13 +4435,30 @@ def test_doctor_reports_missing_redaction_readiness_first(
 
     assert main(["doctor"]) == 1
     output = capsys.readouterr().out
-    # Dependency presence is reported first, then readiness, then environment.
+    # Dependency presence is reported before readiness.
     assert output.index("Redaction dependencies missing") < output.index(
         "Redaction readiness: missing"
     )
-    assert output.index("Redaction readiness: missing") < output.index(
-        "Evidence environment: not set"
-    )
+
+
+def test_doctor_handles_unreadable_redaction_settings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_readiness(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise cli.redact.RedactionNotReadyError("invalid readiness")
+
+    monkeypatch.setattr(cli.redact, "assert_redaction_ready", fail_readiness)
+    monkeypatch.setattr(cli.redact, "read_redaction_readiness", fail_readiness)
+
+    report = cli._doctor_redaction_report()
+
+    assert report["ready"] is False
+    assert report["readiness"] is None
+    assert report["readiness_error"] == "invalid readiness"
 
 
 def test_redaction_install_command_and_argv(tmp_path: Path, monkeypatch) -> None:
@@ -4703,131 +4540,25 @@ def test_configure_redaction_readiness_statuses(
     assert "redaction model bootstrap failed" in output
     assert "stay blocked" in output
 
-    degraded = cli.redact.RedactionReadiness(
-        redaction_available=True,
-        language="en",
+    readiness = cli.redact.RedactionReadiness(
         model="en_core_web_sm",
         model_version="3.8.0",
-        model_tier="sm",
-        fallback_used=True,
         checksum_verified=True,
-        created_at="2026-07-10T00:00:00Z",
     )
-    monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: degraded)
-    assert cli._configure_redaction_readiness(steps, "trace_export") == "degraded"
+    monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: readiness)
+    assert cli._configure_redaction_readiness(steps, "trace_export") == "ready"
     output = capsys.readouterr().out
-    assert "redaction model ready: en_core_web_sm-3.8.0 (sm)" in output
-    assert "Degraded readiness" in output
-    assert "Production trace workflows are blocked" in output
+    assert "redaction model ready: en_core_web_sm-3.8.0" in output
 
 
-def test_select_and_record_evidence_environment_paths(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    _write_settings_evidence_environment(tmp_path, "staging")
-    assert cli._select_evidence_environment(None, "local") == "staging"
-
-    (tmp_path / ".kensa" / "settings.json").unlink()
-    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
-    monkeypatch.setattr(
-        cli,
-        "_select_interactive_choice",
-        lambda label, **kwargs: "production",
-    )
-    assert cli._select_evidence_environment(None, "langfuse") == "production"
-
-    cli._record_evidence_environment(None)
-    assert not (tmp_path / ".kensa" / "settings.json").exists()
-    cli._record_evidence_environment("production")
-    settings = _read_settings(tmp_path)
-    assert settings["evidence_environment"] == "production"
-
-    assert cli._redaction_init_failed("failed", evidence_source=None, environment=None)
-    assert not cli._redaction_init_failed("ready", evidence_source=None, environment=None)
-    assert cli._redaction_init_failed("deferred", evidence_source="langfuse", environment=None)
-    assert cli._redaction_init_failed("deferred", evidence_source="local", environment="staging")
-    assert not cli._redaction_init_failed("deferred", evidence_source="local", environment="local")
-    assert cli._redaction_init_failed("ready", evidence_source="langfuse", environment=None)
-    assert cli._redaction_init_failed(
-        "degraded",
-        evidence_source="trace_export",
-        environment="production",
-    )
+def test_redaction_init_failure_statuses() -> None:
+    assert cli._redaction_init_failed("failed")
+    assert cli._redaction_init_failed("deferred")
+    assert not cli._redaction_init_failed("ready")
+    assert not cli._redaction_init_failed("skipped")
 
 
-def test_connected_import_requires_explicit_evidence_environment(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-    redaction_ready,
-) -> None:
-    (tmp_path / ".kensa" / "connections").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".kensa" / "connections" / "langfuse.json").write_text(
-        json.dumps({"provider": "langfuse", "endpoint": "https://cloud.langfuse.com"})
-    )
-
-    assert main(["import", "--from", "langfuse", "--json"]) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    assert "explicit evidence environment" in payload["errors"][0]
-
-
-def test_read_evidence_environment_states(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    assert cli_traces.read_evidence_environment() == "local"
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings_path.parent.mkdir(parents=True)
-    settings_path.write_text("{")
-    with pytest.raises(ValueError, match="Invalid Kensa settings JSON"):
-        cli_traces.read_evidence_environment()
-    settings_path.write_text("[]")
-    with pytest.raises(ValueError, match="must be a JSON object"):
-        cli_traces.read_evidence_environment()
-    settings_path.write_text(json.dumps({"schema_version": "kensa.settings.v1"}))
-    with pytest.raises(ValueError, match="valid evidence_environment"):
-        cli_traces.read_evidence_environment()
-    settings_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "wrong",
-                "evidence_environment": "local",
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="Invalid Kensa settings"):
-        cli_traces.read_evidence_environment()
-    settings_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "evidence_environment": "bogus",
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="Invalid Kensa settings"):
-        cli_traces.read_evidence_environment()
-    settings_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "evidence_environment": "production",
-            }
-        )
-    )
-    assert cli_traces.read_evidence_environment() == "production"
-
-    def fail_read_text(path: Path) -> str:
-        del path
-        raise OSError("unreadable")
-
-    monkeypatch.setattr(Path, "read_text", fail_read_text)
-    with pytest.raises(ValueError, match="Could not read Kensa settings"):
-        cli_traces.read_evidence_environment()
-
-
-def test_trace_commands_fail_closed_on_invalid_settings(
+def test_trace_commands_use_artifact_manifest_without_settings(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -4835,7 +4566,7 @@ def test_trace_commands_fail_closed_on_invalid_settings(
     monkeypatch.chdir(tmp_path)
     source = tmp_path / "traces.jsonl"
     source.write_text(json.dumps(_trace_view_row("tr_secret")) + "\n")
-    _write_safe_import_manifest(source, tier="sm")
+    _write_safe_import_manifest(source)
     settings_path = tmp_path / ".kensa" / "settings.json"
     settings_path.parent.mkdir(parents=True)
     settings_path.write_text("{")
@@ -4849,8 +4580,7 @@ def test_trace_commands_fail_closed_on_invalid_settings(
                 json=True,
             )
         )
-        == 1
+        == 0
     )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"] == {}
-    assert "Invalid Kensa settings JSON" in payload["errors"][0]
+    assert payload["data"]["trace_id"] == "tr_secret"

@@ -87,10 +87,8 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
                     "ruleset_hash": redact.RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
-                        "name": "en_core_web_lg",
+                        "name": "en_core_web_sm",
                         "version": "3.8.0",
-                        "tier": "lg",
-                        "fallback_used": False,
                         "checksum_verified": True,
                     },
                 }

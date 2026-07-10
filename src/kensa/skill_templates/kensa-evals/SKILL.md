@@ -69,9 +69,8 @@ are `langfuse`, `trace_export`, and `local`. If no saved source exists, infer it
 state or ask the user.
 
 All imports run mandatory redaction. If `kensa import` reports that redaction is not ready
-(missing dependencies, missing `.kensa/redaction.json`, or a missing model), run `kensa init`
-to bootstrap readiness — never try to bypass the boundary. Connected imports also need an
-explicit `evidence_environment` in `.kensa/settings.json`, which `kensa init` records.
+(missing dependencies, missing readiness in `.kensa/settings.json`, or a missing model), run
+`kensa init` to bootstrap readiness. Never try to bypass the boundary.
 Imported payloads are redacted with typed instance placeholders (`[PERSON_1]`); this is
 expected. Placeholders are stable only within one trace and intentionally unlinkable across
 traces; never use matching placeholder text to correlate separate traces.

@@ -356,11 +356,6 @@ def test_cli_edge_paths(
     )
     monkeypatch.delenv("PRODUCTION_URL", raising=False)
     assert cli._run_doctor_check().returncode == 0
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings = json.loads(settings_path.read_text())
-    settings["evidence_environment"] = "local"
-    settings_path.write_text(json.dumps(settings))
-
     trace_source = tmp_path / "traces.jsonl"
     trace_source.with_suffix(".manifest.json").write_text(
         json.dumps(
@@ -374,10 +369,8 @@ def test_cli_edge_paths(
                     "ruleset_hash": cli.redact.RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
-                        "name": "en_core_web_lg",
+                        "name": "en_core_web_sm",
                         "version": "3.8.0",
-                        "tier": "lg",
-                        "fallback_used": False,
                         "checksum_verified": True,
                     },
                 }

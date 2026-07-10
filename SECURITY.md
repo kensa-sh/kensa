@@ -35,7 +35,8 @@ imported, stored, listed, sampled, inspected, or used for eval generation:
 
 - `kensa import` refuses to write trace artifacts until redaction readiness exists
   (`kensa init` installs the `kensa[redaction]` dependencies with consent, downloads
-  and checksum-verifies a pinned spaCy model, and writes `.kensa/redaction.json`).
+  and checksum-verifies the pinned `en_core_web_sm` spaCy model, and records readiness
+  in `.kensa/settings.json`).
 - Every imported payload is scanned by Kensa deterministic recognizers,
   detect-secrets, Presidio built-ins, and spaCy NER, and rewritten with typed,
   instance-numbered placeholders (for example `[PERSON_1]`, `[EMAIL_ADDRESS_2]`).
@@ -48,8 +49,6 @@ imported, stored, listed, sampled, inspected, or used for eval generation:
   with missing, older, or unsafe manifests are blocked and must be re-imported.
 - Connected Langfuse imports redact fetched payloads in memory; raw connected
   payloads are never written to temporary or final files.
-- Production evidence additionally requires the pinned `en_core_web_lg` model;
-  the `en_core_web_sm` fallback is degraded readiness for local and staging only.
 
 Known residual risks:
 

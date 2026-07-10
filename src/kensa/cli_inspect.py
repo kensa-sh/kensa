@@ -11,7 +11,7 @@ import yaml
 from pydantic import ValidationError
 
 from kensa.cli_output import display_path, item, notice, print_json_envelope, print_next_steps
-from kensa.cli_traces import read_evidence_environment, resolve_trace_view_source
+from kensa.cli_traces import resolve_trace_view_source
 from kensa.constants import INSPECT_DIR
 from kensa.models import InspectQueue
 from kensa.traces import load_trace_views
@@ -73,10 +73,7 @@ def _trace_reference_warnings(loaded: list[LoadedInspectQueue]) -> list[str]:
     if not referenced:
         return []
     try:
-        traces = load_trace_views(
-            resolve_trace_view_source(None),
-            environment=read_evidence_environment(),
-        )
+        traces = load_trace_views(resolve_trace_view_source(None))
     except ValueError as exc:
         return [f"could not verify trace ids against latest import: {exc}"]
     known = {trace.get("id") for trace in traces}

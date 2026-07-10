@@ -25,16 +25,18 @@ import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from re import Match
 from typing import Any, cast
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
+from pydantic import ValidationError
+
+from kensa.constants import KENSA_SETTINGS_PATH
+from kensa.models import KensaRedactionSettings, KensaSettings
+
 REDACTOR_MANIFEST_VERSION = "kensa.redactor.v2"
-REDACTION_READINESS_SCHEMA_VERSION = "kensa.redaction_readiness.v1"
-REDACTION_READINESS_PATH = Path(".kensa") / "redaction.json"
 REDACTION_EXTRA_MODULES = ("spacy", "presidio_analyzer", "detect_secrets", "phonenumbers")
 REDACTED_PLACEHOLDER = "[REDACTED]"
 _REDACTED_KEY_PREFIX = "REDACTED_KEY"
@@ -57,12 +59,6 @@ class RedactionGateError(RedactionError):
 
 class RedactionBootstrapError(RedactionError):
     """Model download, verification, or extraction failed during kensa init."""
-
-
-class EvidenceEnvironment(StrEnum):
-    LOCAL = "local"
-    STAGING = "staging"
-    PRODUCTION = "production"
 
 
 class DetectorKind(StrEnum):
@@ -153,7 +149,6 @@ FUTURE_ENTITIES = frozenset(
 class SpacyModelSpec:
     name: str
     version: str
-    tier: str
     url: str
     sha256: str
 
@@ -163,26 +158,14 @@ class SpacyModelSpec:
 
 
 DEFAULT_SPACY_MODEL = SpacyModelSpec(
-    name="en_core_web_lg",
-    version="3.8.0",
-    tier="lg",
-    url=(
-        "https://github.com/explosion/spacy-models/releases/download/"
-        "en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
-    ),
-    sha256="293e9547a655b25499198ab15a525b05b9407a75f10255e405e8c3854329ab63",
-)
-FALLBACK_SPACY_MODEL = SpacyModelSpec(
     name="en_core_web_sm",
     version="3.8.0",
-    tier="sm",
     url=(
         "https://github.com/explosion/spacy-models/releases/download/"
         "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
     ),
     sha256="1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
 )
-_PINNED_SPACY_MODELS = (DEFAULT_SPACY_MODEL, FALLBACK_SPACY_MODEL)
 
 # Recall-favoring detection thresholds. Constants by design; not user-configurable.
 _SCORE_SECRET = 1.0
@@ -379,26 +362,15 @@ class RedactionResult:
 
 @dataclass(frozen=True)
 class RedactionReadiness:
-    redaction_available: bool
-    language: str
     model: str
     model_version: str
-    model_tier: str
-    fallback_used: bool
     checksum_verified: bool
-    created_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": REDACTION_READINESS_SCHEMA_VERSION,
-            "redaction_available": self.redaction_available,
-            "language": self.language,
             "model": self.model,
             "model_version": self.model_version,
-            "model_tier": self.model_tier,
-            "fallback_used": self.fallback_used,
             "checksum_verified": self.checksum_verified,
-            "created_at": self.created_at,
         }
 
 
@@ -440,22 +412,9 @@ def models_root() -> Path:
     return Path.home() / ".kensa" / "models"
 
 
-def readiness_path(root: Path | str | None = None) -> Path:
+def settings_path(root: Path | str | None = None) -> Path:
     base = Path(root) if root is not None else Path.cwd()
-    return base / REDACTION_READINESS_PATH
-
-
-def _normalize_environment(
-    environment: EvidenceEnvironment | str | None,
-) -> EvidenceEnvironment:
-    if environment is None:
-        return EvidenceEnvironment.LOCAL
-    try:
-        return EvidenceEnvironment(str(environment))
-    except ValueError as exc:
-        raise RedactionError(
-            f"unknown evidence environment: {environment}. Use local, staging, or production."
-        ) from exc
+    return base / KENSA_SETTINGS_PATH
 
 
 def _package_version(package: str) -> str:
@@ -758,7 +717,7 @@ _RULESET = {
     "secret_key_pattern": _SECRET_KEY.pattern,
     "spacy_entity_mapping": _SPACY_ENTITY_MAPPING,
     "spacy_labels_to_ignore": list(_SPACY_LABELS_TO_IGNORE),
-    "spacy_models": [spec.label for spec in _PINNED_SPACY_MODELS],
+    "spacy_model": DEFAULT_SPACY_MODEL.label,
     "thresholds": {
         "context": _SCORE_CONTEXT,
         "parser": _SCORE_PARSER,
@@ -963,11 +922,9 @@ class Redactor:
     def __init__(
         self,
         *,
-        environment: EvidenceEnvironment | str | None = None,
         root: Path | str | None = None,
     ) -> None:
-        self._environment = _normalize_environment(environment)
-        self._readiness = assert_redaction_ready(environment=self._environment, root=root)
+        self._readiness = assert_redaction_ready(root=root)
         self._engine = _load_engine(self._readiness)
         self._alias_map: dict[tuple[str, str], str] = {}
         self._instance_counts: Counter[str] = Counter()
@@ -979,10 +936,6 @@ class Redactor:
     @property
     def readiness(self) -> RedactionReadiness:
         return self._readiness
-
-    @property
-    def environment(self) -> EvidenceEnvironment:
-        return self._environment
 
     def redact_trace_view(self, trace: dict[str, Any]) -> RedactionResult:
         self._alias_map.clear()
@@ -1047,11 +1000,8 @@ class Redactor:
             "model": {
                 "name": self._readiness.model,
                 "version": self._readiness.model_version,
-                "tier": self._readiness.model_tier,
-                "fallback_used": self._readiness.fallback_used,
                 "checksum_verified": self._readiness.checksum_verified,
             },
-            "evidence_environment": str(self._environment),
         }
 
     def _redact_dict(self, value: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
@@ -1308,10 +1258,7 @@ def redact_trace_view(redactor: Redactor, trace: dict[str, Any]) -> RedactionRes
 # --- manifest safety gates -----------------------------------------------------------
 
 
-def _manifest_problem(
-    manifest: Any,
-    environment: EvidenceEnvironment,
-) -> str | None:
+def _manifest_problem(manifest: Any) -> str | None:
     if not isinstance(manifest, dict) or not manifest:
         return "trace artifact has no redaction manifest"
     if manifest.get("raw_source") is True:
@@ -1338,37 +1285,23 @@ def _manifest_problem(
     model = manifest.get("model")
     if not isinstance(model, dict):
         return "trace artifact redaction manifest has no model metadata"
-    tier = model.get("tier")
-    model_tuple = (model.get("name"), model.get("version"), tier)
-    pinned_tuples = {(spec.name, spec.version, spec.tier) for spec in _PINNED_SPACY_MODELS}
-    if model_tuple not in pinned_tuples:
+    model_tuple = (model.get("name"), model.get("version"))
+    pinned_model = (DEFAULT_SPACY_MODEL.name, DEFAULT_SPACY_MODEL.version)
+    if model_tuple != pinned_model:
         return "trace artifact redaction manifest records corrupt model metadata"
     if model.get("checksum_verified") is not True:
         return "trace artifact redaction manifest records an unverified model"
-    if environment is EvidenceEnvironment.PRODUCTION and tier == FALLBACK_SPACY_MODEL.tier:
-        return (
-            "production trace workflows are blocked on the "
-            f"{FALLBACK_SPACY_MODEL.label} fallback model"
-        )
     return None
 
 
-def safe_manifest(
-    manifest: Any,
-    *,
-    environment: EvidenceEnvironment | str | None,
-) -> bool:
+def safe_manifest(manifest: Any) -> bool:
     """Pure gate over a redaction manifest dict; performs no settings or file I/O."""
 
-    return _manifest_problem(manifest, _normalize_environment(environment)) is None
+    return _manifest_problem(manifest) is None
 
 
-def assert_safe_manifest(
-    manifest: Any,
-    *,
-    environment: EvidenceEnvironment | str | None,
-) -> None:
-    problem = _manifest_problem(manifest, _normalize_environment(environment))
+def assert_safe_manifest(manifest: Any) -> None:
+    problem = _manifest_problem(manifest)
     if problem is not None:
         raise RedactionGateError(
             f"Trace payload exposure blocked: {problem}. "
@@ -1380,44 +1313,38 @@ def assert_safe_manifest(
 
 
 def read_redaction_readiness(root: Path | str | None = None) -> RedactionReadiness | None:
-    """Read `.kensa/redaction.json`. Returns None when missing; raises when invalid."""
+    """Read redaction readiness from `.kensa/settings.json`."""
 
-    path = readiness_path(root)
+    path = settings_path(root)
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise RedactionNotReadyError(
-            f"redaction readiness file is unreadable: {path}. Re-run kensa init."
+            f"Kensa settings are unreadable: {path}. Re-run kensa init."
         ) from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != REDACTION_READINESS_SCHEMA_VERSION
-    ):
+    try:
+        settings = KensaSettings.model_validate(payload)
+    except ValidationError as exc:
         raise RedactionNotReadyError(
-            f"redaction readiness file is invalid: {path}. Re-run kensa init."
-        )
+            f"Kensa settings are invalid: {path}. Re-run kensa init."
+        ) from exc
+    if settings.redaction is None:
+        return None
     return RedactionReadiness(
-        redaction_available=bool(payload.get("redaction_available")),
-        language=str(payload.get("language") or ""),
-        model=str(payload.get("model") or ""),
-        model_version=str(payload.get("model_version") or ""),
-        model_tier=str(payload.get("model_tier") or ""),
-        fallback_used=bool(payload.get("fallback_used")),
-        checksum_verified=bool(payload.get("checksum_verified")),
-        created_at=str(payload.get("created_at") or ""),
+        model=settings.redaction.model,
+        model_version=settings.redaction.model_version,
+        checksum_verified=settings.redaction.checksum_verified,
     )
 
 
 def _pinned_model_spec(readiness: RedactionReadiness) -> SpacyModelSpec:
-    for spec in _PINNED_SPACY_MODELS:
-        if (
-            readiness.model == spec.name
-            and readiness.model_version == spec.version
-            and readiness.model_tier == spec.tier
-        ):
-            return spec
+    if (
+        readiness.model == DEFAULT_SPACY_MODEL.name
+        and readiness.model_version == DEFAULT_SPACY_MODEL.version
+    ):
+        return DEFAULT_SPACY_MODEL
     raise RedactionNotReadyError(
         "redaction readiness names an unpinned spaCy model "
         f"({readiness.model}-{readiness.model_version}). Re-run kensa init."
@@ -1426,12 +1353,10 @@ def _pinned_model_spec(readiness: RedactionReadiness) -> SpacyModelSpec:
 
 def assert_redaction_ready(
     *,
-    environment: EvidenceEnvironment | str | None = None,
     root: Path | str | None = None,
 ) -> RedactionReadiness:
     """Fail-closed readiness check. Never downloads models; that is kensa init's job."""
 
-    normalized = _normalize_environment(environment)
     missing = missing_redaction_dependencies()
     if missing:
         raise RedactionNotReadyError(
@@ -1443,11 +1368,7 @@ def assert_redaction_ready(
     if readiness is None:
         raise RedactionNotReadyError(
             "mandatory trace redaction is not bootstrapped: "
-            f"{readiness_path(root)} is missing. Run kensa init."
-        )
-    if not readiness.redaction_available or readiness.language != LANGUAGE:
-        raise RedactionNotReadyError(
-            "redaction readiness reports redaction unavailable. Re-run kensa init."
+            f"{settings_path(root)} has no redaction readiness. Run kensa init."
         )
     if not readiness.checksum_verified:
         raise RedactionNotReadyError(
@@ -1455,11 +1376,6 @@ def assert_redaction_ready(
         )
     spec = _pinned_model_spec(readiness)
     _validate_model_dir(models_root() / spec.label, spec)
-    if normalized is EvidenceEnvironment.PRODUCTION and spec.tier == FALLBACK_SPACY_MODEL.tier:
-        raise RedactionGateError(
-            f"production trace workflows are blocked on the {spec.label} fallback model. "
-            f"Re-run kensa init to prepare {DEFAULT_SPACY_MODEL.label}."
-        )
     return readiness
 
 
@@ -1586,12 +1502,7 @@ def _prepare_model(spec: SpacyModelSpec) -> Path:
 
 
 def ensure_redaction_ready(root: Path | str | None = None) -> RedactionReadiness:
-    """Bootstrap mandatory redaction during kensa init and write `.kensa/redaction.json`.
-
-    Prepares the pinned default model, falling back to the pinned small model in a
-    degraded readiness state. When neither model can be prepared, no readiness file
-    is written and the error propagates.
-    """
+    """Prepare the pinned model and record readiness in `.kensa/settings.json`."""
 
     missing = missing_redaction_dependencies()
     if missing:
@@ -1600,51 +1511,44 @@ def ensure_redaction_ready(root: Path | str | None = None) -> RedactionReadiness
             + ", ".join(missing)
             + ". Install kensa[redaction] first."
         )
-    fallback_used = False
     spec = DEFAULT_SPACY_MODEL
-    try:
-        _prepare_model(DEFAULT_SPACY_MODEL)
-    except RedactionError as default_error:
-        spec = FALLBACK_SPACY_MODEL
-        fallback_used = True
-        try:
-            _prepare_model(FALLBACK_SPACY_MODEL)
-        except RedactionError as fallback_error:
-            raise RedactionBootstrapError(
-                f"could not prepare any redaction model. {DEFAULT_SPACY_MODEL.label}: "
-                f"{default_error} {FALLBACK_SPACY_MODEL.label}: {fallback_error}"
-            ) from fallback_error
+    _prepare_model(spec)
     readiness = RedactionReadiness(
-        redaction_available=True,
-        language=LANGUAGE,
         model=spec.name,
         model_version=spec.version,
-        model_tier=spec.tier,
-        fallback_used=fallback_used,
         checksum_verified=True,
-        created_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     )
-    path = readiness_path(root)
+    path = settings_path(root)
+    settings = KensaSettings() if not path.exists() else _read_settings_for_write(path)
+    payload = settings.model_dump(mode="python", exclude_none=True)
+    payload["redaction"] = KensaRedactionSettings.model_validate(readiness.to_dict()).model_dump()
+    rendered = KensaSettings.model_validate(payload).model_dump_json(indent=2, exclude_none=True)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(readiness.to_dict(), indent=2, sort_keys=True) + "\n")
+    path.write_text(rendered + "\n")
     return readiness
+
+
+def _read_settings_for_write(path: Path) -> KensaSettings:
+    try:
+        payload = json.loads(path.read_text())
+        return KensaSettings.model_validate(payload)
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+        raise RedactionNotReadyError(
+            f"Kensa settings are invalid: {path}. Fix or remove them before running kensa init."
+        ) from exc
 
 
 __all__ = [
     "DEFAULT_SPACY_MODEL",
-    "FALLBACK_SPACY_MODEL",
     "FUTURE_ENTITIES",
     "LANGUAGE",
     "PSEUDONYMIZATION_SCHEME",
     "REDACTED_PLACEHOLDER",
     "REDACTION_EXTRA_MODULES",
-    "REDACTION_READINESS_PATH",
-    "REDACTION_READINESS_SCHEMA_VERSION",
     "REDACTOR_MANIFEST_VERSION",
     "RULESET_HASH",
     "DetectorKind",
     "EntityType",
-    "EvidenceEnvironment",
     "RedactionBootstrapError",
     "RedactionError",
     "RedactionGateError",
@@ -1660,8 +1564,8 @@ __all__ = [
     "missing_redaction_dependencies",
     "models_root",
     "read_redaction_readiness",
-    "readiness_path",
     "redact_trace_view",
     "redact_value",
     "safe_manifest",
+    "settings_path",
 ]

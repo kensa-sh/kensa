@@ -190,27 +190,26 @@ class FakeRedactionEnv:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        tier: str = "lg",
-        fallback_used: bool | None = None,
         checksum_verified: bool = True,
     ) -> None:
-        spec = redact.DEFAULT_SPACY_MODEL if tier == "lg" else redact.FALLBACK_SPACY_MODEL
+        spec = redact.DEFAULT_SPACY_MODEL
         models_dir = tmp_path / "kensa-models"
         monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
         write_fake_model_dir(models_dir / spec.label, spec)
         readiness = redact.RedactionReadiness(
-            redaction_available=True,
-            language="en",
             model=spec.name,
             model_version=spec.version,
-            model_tier=spec.tier,
-            fallback_used=tier == "sm" if fallback_used is None else fallback_used,
             checksum_verified=checksum_verified,
-            created_at="2026-07-10T00:00:00Z",
         )
-        path = tmp_path / ".kensa" / "redaction.json"
+        path = redact.settings_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(readiness.to_dict(), indent=2, sort_keys=True) + "\n")
+        payload: dict[str, Any] = (
+            json.loads(path.read_text())
+            if path.exists()
+            else {"schema_version": "kensa.settings.v1"}
+        )
+        payload["redaction"] = readiness.to_dict()
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_fake_model_dir(path: Path, spec: redact.SpacyModelSpec) -> None:

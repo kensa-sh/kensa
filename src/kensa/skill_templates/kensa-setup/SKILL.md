@@ -36,13 +36,11 @@ Do:
    source is configured, `kensa init` offers to install the `kensa[redaction]` dependencies
    through the project's package manager (`uv add --group traces 'kensa[redaction]'` with a
    `uv.lock`, otherwise `pip install 'kensa[redaction]'`), downloads and checksum-verifies the
-   pinned spaCy model, writes `.kensa/redaction.json`, and records an explicit
-   `evidence_environment` (`local`, `staging`, or `production`) in `.kensa/settings.json`.
-   For noninteractive setup, pass `--evidence-environment` alongside `--trace-source`.
-   `kensa doctor` reports redaction dependency presence, readiness, model tier, evidence
-   environment, and any unsafe old artifacts. If doctor reports redaction not ready, re-run
-   `kensa init`; trace import and payload exposure stay blocked until readiness exists. Never
-   bypass this by editing `.kensa/redaction.json` by hand.
+   pinned `en_core_web_sm` spaCy model, and records readiness in `.kensa/settings.json`.
+   `kensa doctor` reports redaction dependency presence, model readiness, and any unsafe old
+   artifacts. If doctor reports redaction not ready, re-run `kensa init`; trace import and
+   payload exposure stay blocked until readiness exists. Never bypass this by editing the
+   `redaction` block in `.kensa/settings.json` by hand.
 
 This skill is complete when `kensa doctor` passes; hand back to `kensa-evals`, which continues
 with the evidence stage in the same run. Do not import traces, inspect traces, propose eval

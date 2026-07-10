@@ -104,8 +104,6 @@ For projects that track dependencies with `requirements.txt`, add `kensa`, then 
 
 In interactive mode, `kensa init` asks for the trace source and stores it in `.kensa/settings.json`.
 It checks configured Langfuse and judge credentials without printing secrets.
-For noninteractive connected setup, pass both choices explicitly, for example
-`kensa init --trace-source langfuse --evidence-environment staging`.
 
 ### CLI-only
 
@@ -128,11 +126,11 @@ with `kensa.instrument()` and import the JSONL.
 
 | Command | What it does |
 | --- | --- |
-| `kensa init` | Set up the pytest harness, the `kensa-evals` skill, and mandatory redaction readiness. |
-| `kensa doctor` | Check redaction readiness and that the harness is wired to a safe local agent boundary. |
+| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. |
+| `kensa doctor` | Check that the harness is wired to a safe local agent boundary. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
-| `kensa import --from <provider>` | Import local or connected trace evidence through mandatory redaction. |
-| `kensa traces list/sample/get` | Read redacted imported TraceView evidence (unsafe artifacts are blocked). |
+| `kensa import --from <provider>` | Import local or connected trace evidence. |
+| `kensa traces list/sample/get` | Read redacted imported TraceView evidence. |
 | `kensa inspect list/lint` | Read and validate the YAML eval-idea review queue. |
 | `kensa eval` | Run Kensa evals through pytest. |
 
@@ -232,8 +230,9 @@ Trace redaction is mandatory and fails closed. When a trace source is configured
 `kensa init` offers to install the `kensa[redaction]` dependencies through your
 package manager (`uv add --group traces 'kensa[redaction]'` when a `uv.lock` is
 present, otherwise `pip install 'kensa[redaction]'`), downloads and
-checksum-verifies the pinned `en_core_web_lg-3.8.0` spaCy model (falling back to
-`en_core_web_sm-3.8.0` as degraded readiness), and writes `.kensa/redaction.json`.
+checksum-verifies the pinned `en_core_web_sm-3.8.0` spaCy model, and records its
+readiness in `.kensa/settings.json`. If any readiness or redaction step fails,
+trace import and payload exposure remain blocked.
 
 Every `kensa import` then runs key/path redaction, Kensa deterministic recognizers,
 detect-secrets, Presidio built-ins, and spaCy NER before anything is stored, and

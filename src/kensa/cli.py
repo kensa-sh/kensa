@@ -50,7 +50,6 @@ from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
 from kensa.models import (
     AgentInstruction,
-    EvidenceEnvironmentName,
     EvidenceSource,
     InspectStatus,
     KensaSettings,
@@ -209,12 +208,7 @@ _TRACE_SOURCE_LABELS: dict[str, str] = {
     "langfuse": "Langfuse",
     "local": "No traces? Capture local run",
 }
-_EVIDENCE_ENVIRONMENT_CHOICES: tuple[EvidenceEnvironmentName, ...] = (
-    "local",
-    "staging",
-    "production",
-)
-_RedactionInitStatus = Literal["ready", "degraded", "deferred", "failed", "skipped"]
+_RedactionInitStatus = Literal["ready", "deferred", "failed", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -556,30 +550,17 @@ def import_command(
     default=None,
     help="Persist the selected trace source.",
 )
-@click.option(
-    "--evidence-environment",
-    type=click.Choice(_EVIDENCE_ENVIRONMENT_CHOICES, case_sensitive=False),
-    default=None,
-    help="Persist the evidence environment: local, staging, or production.",
-)
 def init(
     agent_choice: str | None,
     trace_source: str | None,
-    evidence_environment: str | None,
 ) -> None:
     """Set up Kensa."""
-    if evidence_environment is not None and trace_source is None:
-        raise click.UsageError("--evidence-environment requires --trace-source.")
     selected_agent = cast(
         AgentInstructionChoice | None,
         agent_choice.lower() if agent_choice else None,
     )
     selected_source = cast(EvidenceSource | None, trace_source.lower() if trace_source else None)
-    selected_environment = cast(
-        EvidenceEnvironmentName | None,
-        evidence_environment.lower() if evidence_environment else None,
-    )
-    code = _cmd_init(selected_source, selected_agent, selected_environment)
+    code = _cmd_init(selected_source, selected_agent)
     raise click.exceptions.Exit(code)
 
 
@@ -1275,41 +1256,34 @@ def _name_tokens(name: str) -> tuple[str, ...]:
 def _doctor_redaction_report() -> dict[str, Any]:
     missing = redact.missing_redaction_dependencies()
     settings = _read_settings()
-    environment = settings.evidence_environment
     readiness: redact.RedactionReadiness | None = None
     readiness_error: str | None = None
     try:
-        readiness = redact.assert_redaction_ready(environment=environment or "local")
+        readiness = redact.assert_redaction_ready()
     except redact.RedactionError as exc:
         readiness_error = str(exc)
         try:
             readiness = redact.read_redaction_readiness()
         except redact.RedactionError:
             readiness = None
-    unsafe_artifacts = _unsafe_import_artifacts(environment or "local")
+    unsafe_artifacts = _unsafe_import_artifacts()
     return {
         "dependencies": {name: name not in missing for name in redact.REDACTION_EXTRA_MODULES},
         "ready": readiness_error is None and readiness is not None,
         "readiness": readiness.to_dict() if readiness is not None else None,
         "readiness_error": readiness_error,
-        "model_tier": readiness.model_tier if readiness is not None else None,
-        "fallback_used": readiness.fallback_used if readiness is not None else False,
-        "evidence_environment": environment,
         "evidence_source": settings.init.evidence_source,
         "unsafe_artifacts": unsafe_artifacts,
     }
 
 
-def _unsafe_import_artifacts(environment: str) -> list[str]:
+def _unsafe_import_artifacts() -> list[str]:
     if not TRACE_IMPORTS_DIR.exists():
         return []
     return [
         str(cli_output.display_path(artifact))
         for artifact in sorted(TRACE_IMPORTS_DIR.glob("*.jsonl"))
-        if not redact.safe_manifest(
-            import_redaction_manifest(artifact),
-            environment=environment,
-        )
+        if not redact.safe_manifest(import_redaction_manifest(artifact))
     ]
 
 
@@ -1321,13 +1295,6 @@ def _redaction_doctor_findings(
     next_steps: list[str] = []
     missing = [name for name, present in report["dependencies"].items() if not present]
     trace_source_configured = report["evidence_source"] is not None
-    if report["evidence_source"] == "langfuse" and report["evidence_environment"] is None:
-        problems.append(
-            "Langfuse evidence setup has no evidence environment; connected imports are blocked."
-        )
-        next_steps.append(
-            "Run kensa init --trace-source langfuse --evidence-environment <environment>."
-        )
     if missing and trace_source_configured:
         warnings.append(
             "trace redaction dependencies missing: "
@@ -1362,13 +1329,12 @@ def _print_doctor_redaction(report: dict[str, Any]) -> None:
     else:
         cli_output.item("Redaction dependencies: present")
     if report["ready"]:
-        tier = report["model_tier"]
-        degraded = " (degraded sm fallback)" if report["fallback_used"] else ""
-        cli_output.item(f"Redaction readiness: ready, model tier {tier}{degraded}")
+        readiness = report["readiness"]
+        cli_output.item(
+            f"Redaction readiness: ready, model {readiness['model']}-{readiness['model_version']}"
+        )
     else:
         cli_output.item("Redaction readiness: missing", ok=False)
-    environment = report["evidence_environment"]
-    cli_output.item(f"Evidence environment: {environment or 'not set'}", ok=environment is not None)
     for artifact in report["unsafe_artifacts"]:
         cli_output.item(f"Unsafe trace artifact (re-import required): {artifact}", ok=False)
 
@@ -1611,7 +1577,6 @@ def _record_harness_readiness(*, ready: bool, warnings: list[str]) -> bool:
 def _cmd_init(
     evidence_source: EvidenceSource | None = None,
     agent_choice: AgentInstructionChoice | None = None,
-    evidence_environment: EvidenceEnvironmentName | None = None,
 ) -> int:
     steps = _Steps() if _is_interactive() else None
     if steps is None:
@@ -1619,9 +1584,7 @@ def _cmd_init(
     else:
         steps.start("kensa init")
     try:
-        if evidence_environment is None:
-            return _cmd_init_inner(steps, evidence_source, agent_choice)
-        return _cmd_init_inner(steps, evidence_source, agent_choice, evidence_environment)
+        return _cmd_init_inner(steps, evidence_source, agent_choice)
     except KeyboardInterrupt:
         _init_item(steps, "interrupted.", ok=False, err=True)
         if steps is not None:
@@ -1633,7 +1596,6 @@ def _cmd_init_inner(
     steps: _Steps | None,
     explicit_evidence_source: EvidenceSource | None = None,
     explicit_agent_choice: AgentInstructionChoice | None = None,
-    explicit_evidence_environment: EvidenceEnvironmentName | None = None,
 ) -> int:
     settings = _read_settings()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
@@ -1645,19 +1607,6 @@ def _cmd_init_inner(
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
     added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
     redaction_status = _configure_redaction_readiness(steps, evidence_source)
-    environment: EvidenceEnvironmentName | None = None
-    if evidence_source is not None:
-        if explicit_evidence_environment is None:
-            environment = _select_evidence_environment(steps, evidence_source)
-        else:
-            environment = _select_evidence_environment(
-                steps,
-                evidence_source,
-                explicit_environment=explicit_evidence_environment,
-            )
-        _record_evidence_environment(environment)
-        if environment is not None:
-            _init_item(steps, f"evidence environment: {environment}")
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
     for notice in notices:
@@ -1667,8 +1616,6 @@ def _cmd_init_inner(
     _print_setup_handoff(steps=steps, instruction_key=instruction_key)
     failed = connection_status == "failed" or _redaction_init_failed(
         redaction_status,
-        evidence_source=evidence_source,
-        environment=environment,
     )
     if steps is not None:
         steps.end("Setup files ready" if not failed else "[red]Setup incomplete[/red]")
@@ -1677,21 +1624,8 @@ def _cmd_init_inner(
 
 def _redaction_init_failed(
     redaction_status: _RedactionInitStatus,
-    *,
-    evidence_source: EvidenceSource | None,
-    environment: EvidenceEnvironmentName | None,
 ) -> bool:
-    if redaction_status == "failed":
-        return True
-    if evidence_source == "langfuse" and environment is None:
-        return True
-    if environment == "production" and redaction_status == "degraded":
-        return True
-    if redaction_status != "deferred":
-        return False
-    # Local-only scaffolding may complete with import blocked; connected, staging,
-    # or production evidence setups must exit non-zero without readiness.
-    return evidence_source == "langfuse" or environment in {"staging", "production"}
+    return redaction_status in {"deferred", "failed"}
 
 
 def _redaction_install_command() -> str:
@@ -1770,65 +1704,13 @@ def _configure_redaction_readiness(
         return "deferred"
     _init_item(
         steps,
-        f"redaction model ready: {readiness.model}-{readiness.model_version} "
-        f"({readiness.model_tier})",
+        f"redaction model ready: {readiness.model}-{readiness.model_version}",
     )
     _init_item(
         steps,
-        f"readiness recorded: {cli_output.display_path(redact.readiness_path())}",
+        f"readiness recorded: {cli_output.display_path(redact.settings_path())}",
     )
-    if readiness.fallback_used:
-        _init_notice(
-            steps,
-            f"Degraded readiness: {redact.DEFAULT_SPACY_MODEL.label} unavailable; using "
-            f"{redact.FALLBACK_SPACY_MODEL.label}. Production trace workflows are blocked.",
-        )
-        return "degraded"
     return "ready"
-
-
-def _select_evidence_environment(
-    steps: _Steps | None,
-    evidence_source: EvidenceSource,
-    *,
-    explicit_environment: EvidenceEnvironmentName | None = None,
-) -> EvidenceEnvironmentName | None:
-    if explicit_environment is not None:
-        return explicit_environment
-    current = _read_settings().evidence_environment
-    if current is not None:
-        return current
-    if _is_interactive():
-        choice = _select_interactive_choice(
-            "Evidence environment",
-            choices=_EVIDENCE_ENVIRONMENT_CHOICES,
-            default="local",
-            choice_label=lambda value: value,
-            help_text=(
-                "Where does imported trace evidence come from? Connected imports "
-                "require an explicit value; production blocks degraded redaction."
-            ),
-        )
-        return cast(EvidenceEnvironmentName, choice)
-    if evidence_source == "langfuse":
-        # Connected imports never infer staging or production from silence.
-        _init_notice(
-            steps,
-            "No evidence environment recorded; connected imports stay blocked until "
-            "kensa init records one explicitly.",
-        )
-        return None
-    return "local"
-
-
-def _record_evidence_environment(environment: EvidenceEnvironmentName | None) -> None:
-    if environment is None:
-        return
-    settings = _read_settings()
-    payload = settings.model_dump(mode="python", exclude_none=True)
-    payload["evidence_environment"] = environment
-    payload["schema_version"] = KENSA_SETTINGS_SCHEMA_VERSION
-    _write_settings(KensaSettings.model_validate(payload))
 
 
 def _print_init_added_files(paths: list[Path], *, steps: _Steps | None = None) -> None:
@@ -2914,7 +2796,6 @@ def _cmd_import(args: Any) -> int:
     timestamp = _unix_timestamp()
     out = TRACE_IMPORTS_DIR / f"{provider}-{timestamp}.jsonl"
     try:
-        environment = _import_evidence_environment(connected=source_mode == "connected")
         if args.source:
             result = import_trace_source(
                 provider=provider,
@@ -2925,10 +2806,9 @@ def _cmd_import(args: Any) -> int:
                 out=out,
                 limit=args.limit,
                 max_payload_bytes=args.max_payload_bytes,
-                environment=environment,
             )
         else:
-            result = _connected_import(args, out=out, environment=environment)
+            result = _connected_import(args, out=out)
     except (OSError, RuntimeError, ValueError) as exc:
         if json_output:
             cli_output.print_json_envelope(
@@ -2977,30 +2857,10 @@ def _resolve_import_limit(*, provider: str, source: str | None, limit: int | Non
     return _IMPORT_DEFAULT_LIMIT
 
 
-def _import_evidence_environment(*, connected: bool) -> EvidenceEnvironmentName:
-    """Resolve the evidence environment for an import run.
-
-    Local file imports may default to local, but connected imports never infer an
-    environment from silence: an explicit setting is required.
-    """
-
-    environment = _read_settings().evidence_environment
-    if environment is not None:
-        return environment
-    if connected:
-        raise ValueError(
-            "Connected imports require an explicit evidence environment. "
-            "Run kensa init to record evidence_environment "
-            "(local, staging, or production) in .kensa/settings.json."
-        )
-    return "local"
-
-
 def _connected_import(
     args: Any,
     *,
     out: Path,
-    environment: EvidenceEnvironmentName,
 ) -> ImportResult:
     provider = str(args.provider)
     connection = _load_connection(provider)
@@ -3033,7 +2893,6 @@ def _connected_import(
             since=getattr(args, "since", None),
             limit=int(args.limit),
             max_payload_bytes=int(args.max_payload_bytes),
-            environment=environment,
         )
 
 

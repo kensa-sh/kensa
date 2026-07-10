@@ -43,10 +43,8 @@ jobs:
       - run: uv sync --group dev --python 3.11
       - run: uv build
 
-  # Live redaction integration path: real spaCy/Presidio readiness and one redaction
-  # pass with en_core_web_sm-3.8.0 only. en_core_web_lg behavior is covered by mocked
-  # bootstrap/checksum unit tests.
-  redaction-live:
+  # Run redaction with real spaCy/Presidio dependencies and the pinned small model.
+  redaction:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

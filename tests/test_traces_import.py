@@ -71,7 +71,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def _write_safe_sibling_manifest(artifact: Path, *, tier: str = "lg") -> Path:
+def _write_safe_sibling_manifest(artifact: Path) -> Path:
     manifest_path = artifact.with_suffix(".manifest.json")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -87,10 +87,8 @@ def _write_safe_sibling_manifest(artifact: Path, *, tier: str = "lg") -> Path:
                     "ruleset_hash": RULESET_HASH,
                     "pseudonymization": "instance-counter",
                     "model": {
-                        "name": "en_core_web_lg" if tier == "lg" else "en_core_web_sm",
+                        "name": "en_core_web_sm",
                         "version": "3.8.0",
-                        "tier": tier,
-                        "fallback_used": tier == "sm",
                         "checksum_verified": True,
                     },
                 },
@@ -157,7 +155,7 @@ def test_trace_manifest_round_trip(tmp_path: Path) -> None:
     # Exposure gates always treat runtime trial manifests as unsafe.
     from kensa.redact import safe_manifest
 
-    assert safe_manifest(payload["redaction"], environment="local") is False
+    assert safe_manifest(payload["redaction"]) is False
 
 
 def test_import_jsonl_records_write_trace_views_and_manifest(
@@ -229,10 +227,9 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert redaction["secret_keys_redacted"] is True
     assert redaction["changed_value_count"] == 2
     assert redaction["pseudonymization"] == "instance-counter"
-    assert redaction["model"]["tier"] == "lg"
-    assert redaction["evidence_environment"] == "local"
+    assert redaction["model"]["name"] == "en_core_web_sm"
     # The gated load path accepts the freshly written artifact.
-    assert load_trace_views(out, environment="local") == rows
+    assert load_trace_views(out) == rows
 
 
 def test_import_json_records_spans_without_synthetic_semantics(
@@ -477,42 +474,6 @@ def test_import_fails_closed_and_writes_nothing_on_redaction_errors(
     assert not out.with_suffix(".manifest.json").exists()
 
 
-def test_import_blocked_for_production_on_sm_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_redaction: FakeRedactionEnv,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_redaction.make_ready(tmp_path, monkeypatch, tier="sm")
-    source = tmp_path / "traces.jsonl"
-    source.write_text(json.dumps({"id": "tr_1"}) + "\n")
-    out = tmp_path / "imports" / "production.jsonl"
-
-    with pytest.raises(RedactionGateError, match="production trace workflows"):
-        import_trace_source(
-            provider="jsonl",
-            source=str(source),
-            out=out,
-            limit=1,
-            max_payload_bytes=source.stat().st_size,
-            environment="production",
-        )
-    assert not out.exists()
-
-    staging = import_trace_source(
-        provider="jsonl",
-        source=str(source),
-        out=out,
-        limit=1,
-        max_payload_bytes=source.stat().st_size,
-        environment="staging",
-    )
-    assert staging.redaction["model"]["tier"] == "sm"
-    with pytest.raises(RedactionGateError, match="production trace workflows"):
-        load_trace_views(out, environment="production")
-    assert load_trace_views(out, environment="staging")
-
-
 def test_import_trace_records_shares_the_redaction_pipeline(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,
@@ -536,7 +497,6 @@ def test_import_trace_records_shares_the_redaction_pipeline(
         limit=10,
         max_payload_bytes=10_000,
         endpoint="https://cloud.langfuse.com",
-        environment="local",
     )
 
     row = _read_jsonl(out)[0]
@@ -589,7 +549,7 @@ def test_load_trace_views_reports_unreadable_artifacts(
     artifact = tmp_path / "missing-artifact.jsonl"
     _write_safe_sibling_manifest(artifact)
     with pytest.raises(ValueError, match="Could not read trace import artifact"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
 
 def test_load_trace_views_gates_on_the_sibling_manifest(
@@ -600,29 +560,29 @@ def test_load_trace_views_gates_on_the_sibling_manifest(
     artifact.write_text(json.dumps(_minimal_trace_view()) + "\n")
 
     with pytest.raises(RedactionGateError, match="no redaction manifest"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
     manifest_path = artifact.with_suffix(".manifest.json")
     manifest_path.write_text("{")
     with pytest.raises(RedactionGateError, match="no redaction manifest"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
     manifest_path.write_text(json.dumps(["not", "a", "dict"]))
     with pytest.raises(RedactionGateError, match="no redaction manifest"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
     manifest_path.write_text(
         json.dumps({"redaction": {"version": "kensa.redactor.v1", "mode": "strict"}})
     )
     with pytest.raises(RedactionGateError, match=r"kensa\.redactor\.v2"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
     manifest_path.write_text(json.dumps({"redaction": {"raw_source": True}}))
     with pytest.raises(RedactionGateError, match="raw source telemetry"):
-        load_trace_views(artifact, environment="local")
+        load_trace_views(artifact)
 
     _write_safe_sibling_manifest(artifact)
-    assert load_trace_views(artifact, environment="local") == [_minimal_trace_view()]
+    assert load_trace_views(artifact) == [_minimal_trace_view()]
     assert import_redaction_manifest(artifact)["version"] == "kensa.redactor.v2"
 
 

@@ -16,9 +16,7 @@ from conftest import FakeRecognizerResult, FakeRedactionEnv, write_fake_model_di
 from kensa import redact
 from kensa.redact import (
     DEFAULT_SPACY_MODEL,
-    FALLBACK_SPACY_MODEL,
     DetectorKind,
-    EvidenceEnvironment,
     RedactionBootstrapError,
     RedactionError,
     RedactionGateError,
@@ -31,14 +29,14 @@ from kensa.redact import (
     missing_redaction_dependencies,
     models_root,
     read_redaction_readiness,
-    readiness_path,
     redact_trace_view,
     redact_value,
     safe_manifest,
+    settings_path,
 )
 
 
-def _safe_manifest_dict(tier: str = "lg", **overrides: Any) -> dict[str, Any]:
+def _safe_manifest_dict(**overrides: Any) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "version": "kensa.redactor.v2",
         "mandatory": True,
@@ -48,10 +46,8 @@ def _safe_manifest_dict(tier: str = "lg", **overrides: Any) -> dict[str, Any]:
         "ruleset_hash": redact.RULESET_HASH,
         "pseudonymization": "instance-counter",
         "model": {
-            "name": "en_core_web_lg" if tier == "lg" else "en_core_web_sm",
+            "name": "en_core_web_sm",
             "version": "3.8.0",
-            "tier": tier,
-            "fallback_used": tier == "sm",
             "checksum_verified": True,
         },
     }
@@ -59,7 +55,7 @@ def _safe_manifest_dict(tier: str = "lg", **overrides: Any) -> dict[str, Any]:
     return manifest
 
 
-# --- helpers, environments, and readiness plumbing -----------------------------------
+# --- helpers and readiness plumbing --------------------------------------------------
 
 
 def test_module_availability_and_missing_dependencies() -> None:
@@ -67,7 +63,7 @@ def test_module_availability_and_missing_dependencies() -> None:
     assert redact._module_available("kensa_definitely_missing_module") is False
     assert redact._module_available("") is False
     # Reports exactly the extras absent from this environment (all four in
-    # eval-only CI; none in a redaction-live environment).
+    # eval-only CI; none in the redaction integration job).
     expected = tuple(
         name for name in redact.REDACTION_EXTRA_MODULES if not redact._module_available(name)
     )
@@ -82,20 +78,9 @@ def test_models_root_and_readiness_path(
     assert models_root() == tmp_path / "models"
     monkeypatch.delenv("KENSA_MODELS_DIR")
     assert models_root() == Path.home() / ".kensa" / "models"
-    assert readiness_path(tmp_path) == tmp_path / ".kensa" / "redaction.json"
+    assert settings_path(tmp_path) == tmp_path / ".kensa" / "settings.json"
     monkeypatch.chdir(tmp_path)
-    assert readiness_path() == tmp_path / ".kensa" / "redaction.json"
-
-
-def test_normalize_environment() -> None:
-    assert redact._normalize_environment(None) is EvidenceEnvironment.LOCAL
-    assert redact._normalize_environment("staging") is EvidenceEnvironment.STAGING
-    assert (
-        redact._normalize_environment(EvidenceEnvironment.PRODUCTION)
-        is EvidenceEnvironment.PRODUCTION
-    )
-    with pytest.raises(RedactionError, match="unknown evidence environment"):
-        redact._normalize_environment("prod")
+    assert settings_path() == tmp_path / ".kensa" / "settings.json"
 
 
 def test_package_version_lookup() -> None:
@@ -322,7 +307,7 @@ def test_load_engine_rejects_empty_entity_sets(
 def test_load_engine_registers_explicit_recognizers_and_config(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     assert tuple(redaction_ready.registered_recognizers) == redact._PRESIDIO_RECOGNIZER_NAMES
     assert redaction_ready.secret_plugin_names == [
         str(plugin["name"]) for plugin in redact._DETECT_SECRETS_PLUGINS
@@ -335,9 +320,8 @@ def test_load_engine_registers_explicit_recognizers_and_config(
     assert configuration is not None
     ner_config = configuration["ner_model_configuration"]
     assert set(redact._SPACY_LABELS_TO_IGNORE) <= set(ner_config["labels_to_ignore"])
-    assert configuration["models"][0]["model_name"].endswith("en_core_web_lg-3.8.0")
-    assert redactor.readiness.model_tier == "lg"
-    assert redactor.environment is EvidenceEnvironment.LOCAL
+    assert configuration["models"][0]["model_name"].endswith("en_core_web_sm-3.8.0")
+    assert redactor.readiness.model == "en_core_web_sm"
 
 
 # --- run-level redactor --------------------------------------------------------------
@@ -350,13 +334,13 @@ def test_redactor_requires_readiness(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RedactionNotReadyError, match="Run kensa init"):
-        Redactor(environment="local")
+        Redactor()
 
 
 def test_redactor_redacts_values_with_stable_aliases(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     value = {
         "input": "Ask Alice to email alice@example.com",
         "output": "Alice emailed alice@example.com",
@@ -366,7 +350,7 @@ def test_redactor_redacts_values_with_stable_aliases(
     assert redacted["input"] == "Ask [PERSON_1] to email [EMAIL_ADDRESS_1]"
     assert redacted["output"] == "[PERSON_1] emailed [EMAIL_ADDRESS_1]"
     assert redacted["other"] == "Ask Bob"
-    again = Redactor(environment="local")
+    again = Redactor()
     assert redact_value(again, value) == redacted
 
 
@@ -384,7 +368,7 @@ def test_redactor_normalizes_alias_identity_within_each_trace(
         return [FakeRecognizerResult(entity_type, len(prefix), len(text), 0.85)]
 
     monkeypatch.setattr(redaction_ready, "analyze", analyze)
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     result = redactor.redact_trace_view(
         {"input": [f"{prefix}Straße  Group", f"{prefix}\tSTRASSE GROUP \n"]}
@@ -397,7 +381,7 @@ def test_redactor_normalizes_alias_identity_within_each_trace(
 def test_redactor_scopes_alias_identity_to_each_trace(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     first = redactor.redact_trace_view({"input": "Alice"})
     second = redactor.redact_trace_view({"input": "Alice"})
@@ -420,7 +404,7 @@ def test_redactor_keeps_entity_types_separate_for_same_text(
         return [FakeRecognizerResult(entity_type, len(entity_type) + 1, len(text), 0.85)]
 
     monkeypatch.setattr(redaction_ready, "analyze", analyze)
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     result = redactor.redact_trace_view({"input": ["PERSON:Acme", "ORGANIZATION:Acme"]})
 
@@ -431,7 +415,7 @@ def test_redactor_keeps_name_variants_distinct(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.persons = ["Alice Smith", "Alice B. Smith"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     result = redactor.redact_trace_view({"input": ["Alice Smith", "Alice B. Smith"]})
 
@@ -443,7 +427,7 @@ def test_redactor_preserves_exact_alias_identity_for_sensitive_values(
 ) -> None:
     redaction_ready.persons = []
     redaction_ready.secret_markers = ["tok_Live", "tok_live"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     lower_crypto = "0x52908400098527886e0f7030069857d2e4169ee7"
     upper_crypto = lower_crypto.upper().replace("0X", "0x")
 
@@ -477,7 +461,7 @@ def test_redactor_preserves_exact_alias_identity_for_sensitive_values(
 def test_redactor_secret_keys_and_key_rewrites(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     value = {
         "api_key": "super-secret",
         "attributes": {
@@ -502,7 +486,7 @@ def test_redactor_freeform_keys_use_full_detector_suite(
     redaction_ready.persons = ["Alice Smith"]
     redaction_ready.secret_markers = ["AKIAV7EXAMPLEKEY"]
     redaction_ready.phone_numbers = ["+1-202-555-0182"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value(
         {
@@ -527,7 +511,7 @@ def test_redactor_preserves_normalized_key_collisions(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.persons = ["Alice", "alice"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value(
         {"attributes": {"Alice": 1, "[REDACTED_KEY_1]": "literal", "alice": 2}}
@@ -547,7 +531,7 @@ def test_redactor_preserves_generic_redacted_key_collisions(
     redaction_ready.extra_results = [
         FakeRecognizerResult("MYSTERY_LABEL", 0, 4, 0.9, "CustomRecognizer")
     ]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value({"attributes": {"abcd": 1, "wxyz": 2}})
 
@@ -558,7 +542,7 @@ def test_redactor_preserves_literal_placeholder_key_collisions(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.persons = ["Alice"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value({"attributes": {"Alice": "detected", "[PERSON_1]": "literal"}})
 
@@ -572,7 +556,7 @@ def test_redactor_scalar_type_preservation(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.secret_markers = ["1234567890"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     value = {
         "count": 7,
         "ratio": 2.5,
@@ -597,7 +581,7 @@ def test_redactor_timing_allowlist_exempts_date_time_only(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.persons = []
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     value = {
         "started_at_unix_nano": "DOB 01/02/1990",
         "spans": [
@@ -632,7 +616,7 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     redaction_ready.secret_markers = ["sk-live-value"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     trace = {
         "schema_version": "kensa.trace_view.v1",
         "source": {
@@ -673,7 +657,7 @@ def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
 ) -> None:
     redaction_ready.persons = []
     redaction_ready.secret_markers = ["AKIAIOSFODNN7EXAMPLE"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     encoded_jwt = "eyJhbGciOiJIUzI1NiJ9%2EeyJzdWIiOiIxIn0%2Esig-part"
 
     redacted = redactor.redact_value(
@@ -696,7 +680,7 @@ def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
 def test_redactor_locator_redacts_ipv6_hosts(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value(
         {"source": {"source_url": "https://[2001:db8::1]/alice@example.com"}}
@@ -710,7 +694,7 @@ def test_redactor_locator_scans_hostname_labels(
 ) -> None:
     redaction_ready.persons = ["Alice"]
     redaction_ready.secret_markers = ["AKIAV7EXAMPLEKEY"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
 
     redacted = redactor.redact_value(
         {
@@ -734,7 +718,7 @@ def test_redactor_unknown_entity_and_conflicts_render_redacted(
         FakeRecognizerResult("PERSON", 5, 9, 0.85, "SpacyRecognizer"),
         FakeRecognizerResult("LOCATION", 5, 9, 0.85, "SpacyRecognizer"),
     ]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     redacted = redactor.redact_value({"input": "abcd wxyz tail"})
     assert redacted["input"] == "[REDACTED] [REDACTED] tail"
 
@@ -753,7 +737,7 @@ def test_presidio_detector_classification() -> None:
 def test_redactor_fails_closed_on_analyzer_errors(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     redaction_ready.analyzer_error = RuntimeError("model exploded")
     with pytest.raises(RedactionError, match="value redaction failed"):
         redactor.redact_value({"input": "anything at all"})
@@ -769,7 +753,7 @@ def test_redactor_fails_closed_on_analyzer_errors(
 def test_redactor_chunks_long_text(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     text = ("x" * 6_000) + " Alice"
     redacted = redactor.redact_value({"input": text})
     assert redacted["input"].endswith(" [PERSON_1]")
@@ -779,7 +763,7 @@ def test_redactor_chunks_long_text(
 def test_redact_trace_view_counts_and_manifest(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
-    redactor = Redactor(environment="staging")
+    redactor = Redactor()
     trace = {
         "id": "tr_1",
         "input": "Alice says hi to Alice",
@@ -814,13 +798,10 @@ def test_redact_trace_view_counts_and_manifest(
         redact._SPACY_LABELS_TO_IGNORE
     )
     assert manifest["model"] == {
-        "name": "en_core_web_lg",
+        "name": "en_core_web_sm",
         "version": "3.8.0",
-        "tier": "lg",
-        "fallback_used": False,
         "checksum_verified": True,
     }
-    assert manifest["evidence_environment"] == "staging"
     assert manifest["trace_count"] == 1
     # The value-to-alias map itself is never part of the manifest.
     assert "Alice" not in json.dumps(manifest)
@@ -842,7 +823,7 @@ def test_redactor_secret_hits_expand_to_tokens_and_fail_safe(
 ) -> None:
     redaction_ready.persons = []
     redaction_ready.secret_markers = ["ghp_abc"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     redacted = redactor.redact_value({"input": "use ghp_abc123XYZ here"})
     assert redacted["input"] == "use [SECRET_1] here"
     # A hit that cannot be located in the value redacts the whole value.
@@ -881,7 +862,7 @@ def test_redactor_phone_detection_via_engine(
 ) -> None:
     redaction_ready.persons = []
     redaction_ready.phone_numbers = ["(212) 555-0182"]
-    redactor = Redactor(environment="local")
+    redactor = Redactor()
     redacted = redactor.redact_value({"input": "call (212) 555-0182 now"})
     assert redacted["input"] == "call [PHONE_NUMBER_1] now"
 
@@ -890,9 +871,8 @@ def test_redactor_phone_detection_via_engine(
 
 
 def test_safe_manifest_accepts_safe_v2() -> None:
-    assert safe_manifest(_safe_manifest_dict(), environment="local") is True
-    assert safe_manifest(_safe_manifest_dict(), environment="production") is True
-    assert_safe_manifest(_safe_manifest_dict(), environment="staging")
+    assert safe_manifest(_safe_manifest_dict()) is True
+    assert_safe_manifest(_safe_manifest_dict())
 
 
 @pytest.mark.parametrize(
@@ -920,13 +900,12 @@ def test_safe_manifest_accepts_safe_v2() -> None:
             "unsupported pseudonymization scheme",
         ),
         (_safe_manifest_dict(model=None), "no model metadata"),
-        (_safe_manifest_dict(model={"tier": "lg"}), "corrupt model metadata"),
+        (_safe_manifest_dict(model={"name": "en_core_web_sm"}), "corrupt model metadata"),
         (
             _safe_manifest_dict(
                 model={
                     "name": "untrusted-0",
                     "version": "3.8.0",
-                    "tier": "lg",
                     "checksum_verified": True,
                 }
             ),
@@ -935,9 +914,8 @@ def test_safe_manifest_accepts_safe_v2() -> None:
         (
             _safe_manifest_dict(
                 model={
-                    "name": "en_core_web_lg",
-                    "version": "3.8.0",
-                    "tier": "xl",
+                    "name": "en_core_web_sm",
+                    "version": "9.9.9",
                     "checksum_verified": True,
                 }
             ),
@@ -946,9 +924,8 @@ def test_safe_manifest_accepts_safe_v2() -> None:
         (
             _safe_manifest_dict(
                 model={
-                    "name": "en_core_web_lg",
+                    "name": "en_core_web_sm",
                     "version": "3.8.0",
-                    "tier": "lg",
                     "checksum_verified": False,
                 }
             ),
@@ -957,18 +934,9 @@ def test_safe_manifest_accepts_safe_v2() -> None:
     ],
 )
 def test_safe_manifest_rejects_unsafe_conditions(manifest: Any, match: str) -> None:
-    assert safe_manifest(manifest, environment="local") is False
+    assert safe_manifest(manifest) is False
     with pytest.raises(RedactionGateError, match="Re-import traces with kensa import"):
-        assert_safe_manifest(manifest, environment="local")
-
-
-def test_safe_manifest_blocks_production_on_sm_tier() -> None:
-    manifest = _safe_manifest_dict(tier="sm")
-    assert safe_manifest(manifest, environment="local") is True
-    assert safe_manifest(manifest, environment="staging") is True
-    assert safe_manifest(manifest, environment="production") is False
-    with pytest.raises(RedactionGateError, match="production trace workflows are blocked"):
-        assert_safe_manifest(manifest, environment="production")
+        assert_safe_manifest(manifest)
 
 
 # --- readiness -----------------------------------------------------------------------
@@ -976,7 +944,7 @@ def test_safe_manifest_blocks_production_on_sm_tier() -> None:
 
 def test_read_redaction_readiness_states(tmp_path: Path) -> None:
     assert read_redaction_readiness(tmp_path) is None
-    path = readiness_path(tmp_path)
+    path = settings_path(tmp_path)
     path.parent.mkdir(parents=True)
     path.write_text("{")
     with pytest.raises(RedactionNotReadyError, match="unreadable"):
@@ -987,22 +955,19 @@ def test_read_redaction_readiness_states(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": "kensa.redaction_readiness.v1",
-                "redaction_available": True,
-                "language": "en",
-                "model": "en_core_web_lg",
-                "model_version": "3.8.0",
-                "model_tier": "lg",
-                "fallback_used": False,
-                "checksum_verified": True,
-                "created_at": "2026-07-10T00:00:00Z",
+                "schema_version": "kensa.settings.v1",
+                "redaction": {
+                    "model": "en_core_web_sm",
+                    "model_version": "3.8.0",
+                    "checksum_verified": True,
+                },
             }
         )
     )
     readiness = read_redaction_readiness(tmp_path)
     assert readiness is not None
-    assert readiness.model_tier == "lg"
-    assert readiness.to_dict()["schema_version"] == "kensa.redaction_readiness.v1"
+    assert readiness.model == "en_core_web_sm"
+    assert readiness.to_dict()["model_version"] == "3.8.0"
 
 
 def test_assert_redaction_ready_fails_closed(
@@ -1016,7 +981,7 @@ def test_assert_redaction_ready_fails_closed(
         lambda: redact.REDACTION_EXTRA_MODULES,
     )
     with pytest.raises(RedactionNotReadyError, match="dependencies are missing"):
-        assert_redaction_ready(environment="local")
+        assert_redaction_ready()
 
 
 def test_assert_redaction_ready_validates_readiness_content(
@@ -1026,29 +991,23 @@ def test_assert_redaction_ready_validates_readiness_content(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RedactionNotReadyError, match="Run kensa init"):
-        assert_redaction_ready(environment="local")
+        assert_redaction_ready()
 
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    assert assert_redaction_ready(environment="local").model == "en_core_web_lg"
+    assert assert_redaction_ready().model == "en_core_web_sm"
 
-    path = readiness_path(tmp_path)
+    path = settings_path(tmp_path)
     payload = json.loads(path.read_text())
-    payload["redaction_available"] = False
-    path.write_text(json.dumps(payload))
-    with pytest.raises(RedactionNotReadyError, match="redaction unavailable"):
-        assert_redaction_ready(environment="local")
-
-    payload["redaction_available"] = True
-    payload["checksum_verified"] = False
+    payload["redaction"]["checksum_verified"] = False
     path.write_text(json.dumps(payload))
     with pytest.raises(RedactionNotReadyError, match="never checksum-verified"):
-        assert_redaction_ready(environment="local")
+        assert_redaction_ready()
 
-    payload["checksum_verified"] = True
-    payload["model_version"] = "9.9.9"
+    payload["redaction"]["checksum_verified"] = True
+    payload["redaction"]["model_version"] = "9.9.9"
     path.write_text(json.dumps(payload))
     with pytest.raises(RedactionNotReadyError, match="unpinned spaCy model"):
-        assert_redaction_ready(environment="local")
+        assert_redaction_ready()
 
 
 def test_assert_redaction_ready_detects_corrupt_model_dirs(
@@ -1058,22 +1017,10 @@ def test_assert_redaction_ready_detects_corrupt_model_dirs(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    meta = tmp_path / "kensa-models" / "en_core_web_lg-3.8.0" / "meta.json"
+    meta = tmp_path / "kensa-models" / "en_core_web_sm-3.8.0" / "meta.json"
     meta.unlink()
     with pytest.raises(RedactionNotReadyError, match="missing or corrupt"):
-        assert_redaction_ready(environment="local")
-
-
-def test_assert_redaction_ready_blocks_production_on_sm(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_redaction: FakeRedactionEnv,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_redaction.make_ready(tmp_path, monkeypatch, tier="sm")
-    assert assert_redaction_ready(environment="staging").model_tier == "sm"
-    with pytest.raises(RedactionGateError, match="production trace workflows"):
-        assert_redaction_ready(environment="production")
+        assert_redaction_ready()
 
 
 # --- model validation and bootstrap --------------------------------------------------
@@ -1084,8 +1031,14 @@ def test_validate_model_dir_mismatches(tmp_path: Path, monkeypatch: pytest.Monke
     model_dir = tmp_path / DEFAULT_SPACY_MODEL.label
     write_fake_model_dir(model_dir, DEFAULT_SPACY_MODEL)
     redact._validate_model_dir(model_dir, DEFAULT_SPACY_MODEL)
+    other_model = redact.SpacyModelSpec(
+        name="example_model",
+        version="3.8.0",
+        url="https://example.com/model.whl",
+        sha256="0" * 64,
+    )
     with pytest.raises(RedactionNotReadyError, match="does not match"):
-        redact._validate_model_dir(model_dir, FALLBACK_SPACY_MODEL)
+        redact._validate_model_dir(model_dir, other_model)
     monkeypatch.setattr(redact, "_package_version", lambda package: "3.9.1")
     with pytest.raises(RedactionNotReadyError, match="requires spacy"):
         redact._validate_model_dir(model_dir, DEFAULT_SPACY_MODEL)
@@ -1120,9 +1073,8 @@ class _FakeResponse:
 
 def test_download_model_wheel_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     insecure = redact.SpacyModelSpec(
-        name="en_core_web_lg",
+        name="example_model",
         version="3.8.0",
-        tier="lg",
         url="http://insecure.example.com/model.whl",
         sha256="0" * 64,
     )
@@ -1131,9 +1083,8 @@ def test_download_model_wheel_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     payload = b"wheel-bytes"
     good = redact.SpacyModelSpec(
-        name="en_core_web_lg",
+        name="example_model",
         version="3.8.0",
-        tier="lg",
         url="https://example.com/model.whl",
         sha256=hashlib.sha256(payload).hexdigest(),
     )
@@ -1143,9 +1094,8 @@ def test_download_model_wheel_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert destination.read_bytes() == payload
 
     bad = redact.SpacyModelSpec(
-        name="en_core_web_lg",
+        name="example_model",
         version="3.8.0",
-        tier="lg",
         url="https://example.com/model.whl",
         sha256="f" * 64,
     )
@@ -1226,17 +1176,17 @@ def test_prepare_model_uses_cache_and_replaces_corrupt_cache(
 
     monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
     target = redact._prepare_model(DEFAULT_SPACY_MODEL)
-    assert downloads == ["en_core_web_lg-3.8.0"]
+    assert downloads == ["en_core_web_sm-3.8.0"]
     assert (target / "meta.json").exists()
 
     # Valid cache short-circuits the download.
     redact._prepare_model(DEFAULT_SPACY_MODEL)
-    assert downloads == ["en_core_web_lg-3.8.0"]
+    assert downloads == ["en_core_web_sm-3.8.0"]
 
     # Corrupt cache is discarded and re-downloaded.
     (target / "meta.json").write_text("{}")
     redact._prepare_model(DEFAULT_SPACY_MODEL)
-    assert downloads == ["en_core_web_lg-3.8.0", "en_core_web_lg-3.8.0"]
+    assert downloads == ["en_core_web_sm-3.8.0", "en_core_web_sm-3.8.0"]
 
 
 def test_ensure_redaction_ready_requires_dependencies(
@@ -1265,33 +1215,15 @@ def test_ensure_redaction_ready_prepares_default_model(
 
     monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
     readiness = ensure_redaction_ready(tmp_path)
-    assert readiness.model == "en_core_web_lg"
-    assert readiness.model_tier == "lg"
-    assert readiness.fallback_used is False
-    assert readiness.checksum_verified is True
-    payload = json.loads(readiness_path(tmp_path).read_text())
-    assert payload["schema_version"] == "kensa.redaction_readiness.v1"
-    assert payload["redaction_available"] is True
-    assert payload["model_tier"] == "lg"
-
-
-def test_ensure_redaction_ready_falls_back_to_sm_as_degraded(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_redaction: FakeRedactionEnv,
-) -> None:
-    monkeypatch.setenv("KENSA_MODELS_DIR", str(tmp_path / "models"))
-
-    def fake_download(spec: redact.SpacyModelSpec, destination: Path) -> None:
-        if spec.tier == "lg":
-            raise RedactionBootstrapError("lg download failed")
-        destination.write_bytes(_model_wheel_bytes(spec))
-
-    monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
-    readiness = ensure_redaction_ready(tmp_path)
     assert readiness.model == "en_core_web_sm"
-    assert readiness.model_tier == "sm"
-    assert readiness.fallback_used is True
+    assert readiness.checksum_verified is True
+    payload = json.loads(settings_path(tmp_path).read_text())
+    assert payload["schema_version"] == "kensa.settings.v1"
+    assert payload["redaction"] == {
+        "model": "en_core_web_sm",
+        "model_version": "3.8.0",
+        "checksum_verified": True,
+    }
 
 
 def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(
@@ -1305,9 +1237,21 @@ def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(
         raise RedactionBootstrapError(f"{spec.label} unavailable")
 
     monkeypatch.setattr(redact, "_download_model_wheel", fail_download)
-    with pytest.raises(RedactionBootstrapError, match="could not prepare any redaction model"):
+    with pytest.raises(RedactionBootstrapError, match="unavailable"):
         ensure_redaction_ready(tmp_path)
-    assert not readiness_path(tmp_path).exists()
+    assert not settings_path(tmp_path).exists()
+
+
+def test_ensure_redaction_ready_rejects_invalid_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> None:
+    fake_redaction.make_ready(tmp_path, monkeypatch)
+    settings_path(tmp_path).write_text("{")
+
+    with pytest.raises(RedactionNotReadyError, match="Kensa settings are invalid"):
+        ensure_redaction_ready(tmp_path)
 
 
 # --- packaging boundary --------------------------------------------------------------
@@ -1351,9 +1295,9 @@ def test_kensa_imports_and_eval_runs_never_load_the_nlp_stack(tmp_path: Path) ->
         "import kensa.traces\n"
         "from kensa.redact import assert_safe_manifest, safe_manifest\n"
         "from kensa.redact import RedactionGateError\n"
-        "assert safe_manifest({}, environment='local') is False\n"
+        "assert safe_manifest({}) is False\n"
         "try:\n"
-        "    assert_safe_manifest(None, environment='production')\n"
+        "    assert_safe_manifest(None)\n"
         "except RedactionGateError:\n"
         "    pass\n"
         "else:\n"
