@@ -122,9 +122,6 @@ def _import_live_payload(
     *,
     provider: str,
     payload: dict[str, Any],
-    endpoint: str,
-    project: str | None,
-    since: str,
     tmp_path: Path,
 ) -> None:
     _prepare_live_redaction_readiness(tmp_path)
@@ -137,9 +134,6 @@ def _import_live_payload(
             payload=payload,
             source_label=f"{provider}:connected",
             out=out,
-            endpoint=endpoint,
-            project=project,
-            since=since,
             limit=_live_limit(),
             max_payload_bytes=_payload_size(payload),
         )
@@ -225,9 +219,6 @@ def test_live_langfuse_connected_import_writes_non_empty_records(tmp_path: Path)
     _import_live_payload(
         provider="langfuse",
         payload=payload,
-        endpoint=endpoint,
-        project=None,
-        since=since,
         tmp_path=tmp_path,
     )
 
@@ -253,8 +244,5 @@ def test_live_langfuse_observations_only_import_writes_non_empty_records(
     _import_live_payload(
         provider="langfuse",
         payload=payload,
-        endpoint=endpoint,
-        project=None,
-        since=since,
         tmp_path=tmp_path,
     )

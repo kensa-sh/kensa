@@ -21,6 +21,7 @@ from kensa import cli, cli_output, cli_traces
 from kensa.cli import main
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
+from kensa.traces import ImportResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
@@ -1399,17 +1400,21 @@ def test_top_level_import_writes_timestamped_artifact_manifest_and_latest(
     assert json.loads(manifest.read_text())["provider"] == "jsonl"
 
 
-def test_top_level_import_does_not_persist_sensitive_provenance(
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--endpoint", "https://collector.example.com"),
+        ("--since", "7d"),
+    ],
+)
+def test_top_level_file_import_rejects_connected_options(
+    option: str,
+    value: str,
     tmp_path: Path,
-    monkeypatch,
     capsys,
     redaction_ready,
 ) -> None:
-    monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
-    secret = "AKIAIOSFODNN7EXAMPLE"
-    email = "alice.smith@example.com"
-    source = tmp_path / secret / email
-    source.parent.mkdir()
+    source = tmp_path / "traces.jsonl"
     source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
 
     code = main(
@@ -1419,25 +1424,26 @@ def test_top_level_import_does_not_persist_sensitive_provenance(
             "jsonl",
             "--source",
             str(source.relative_to(tmp_path)),
-            "--endpoint",
-            f"https://collector.example.com/{email}",
-            "--project",
-            email,
-            "--since",
-            secret,
+            option,
+            value,
+            "--json",
         ]
     )
-    capsys.readouterr()
 
-    artifact = tmp_path / ".kensa" / "traces" / "imports" / "jsonl-1792820123.jsonl"
-    manifest = artifact.with_suffix(".manifest.json")
-    latest = artifact.parent / "latest.json"
-    persisted = artifact.read_text() + manifest.read_text() + latest.read_text()
-    assert code == 0
-    assert secret not in persisted
-    assert email not in persisted
-    assert {"source", "project", "since", "endpoint"}.isdisjoint(json.loads(manifest.read_text()))
-    assert {"source", "project", "since"}.isdisjoint(json.loads(latest.read_text()))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["errors"] == [
+        f"{option} can only be used with connected imports, not with --source."
+    ]
+    assert not (tmp_path / ".kensa" / "traces" / "imports").exists()
+
+
+def test_import_project_option_is_removed(capsys) -> None:
+    assert main(["import", "--from", "langfuse", "--project", "prod"]) == 2
+
+    captured = capsys.readouterr()
+    assert "No such option" in captured.err
+    assert "--project" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -1856,8 +1862,19 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     monkeypatch.setenv("TEST_LANGFUSE_SECRET", "lf-secret-value")
     _stub_langfuse_auth_check(monkeypatch)
     calls: list[dict[str, Any]] = []
+    events: list[str] = []
+    redactors: list[cli.redact.Redactor] = []
+    create_redactor = cli.redact.Redactor
+    write_import = cli._import_trace_records
+
+    def tracking_redactor() -> cli.redact.Redactor:
+        events.append("redactor")
+        instance = create_redactor()
+        redactors.append(instance)
+        return instance
 
     def fake_fetch(**kwargs: Any) -> dict[str, Any]:
+        events.append("fetch")
         calls.append(kwargs)
         return {
             "data": [
@@ -1872,7 +1889,14 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
             "meta": {"cursor": None},
         }
 
+    def tracking_import(**kwargs: Any) -> ImportResult:
+        events.append("import")
+        assert kwargs["redactor"] is redactors[-1]
+        return write_import(**kwargs)
+
+    monkeypatch.setattr(cli.redact, "Redactor", tracking_redactor)
     monkeypatch.setattr(cli, "fetch_langfuse_connected_export", fake_fetch)
+    monkeypatch.setattr(cli, "_import_trace_records", tracking_import)
 
     assert (
         main(
@@ -1892,11 +1916,12 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     capsys.readouterr()
     calls.clear()
 
-    code = main(["import", "--from", "langfuse", "--project", "prod", "--since", "7d", "--json"])
+    code = main(["import", "--from", "langfuse", "--since", "7d", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     artifact = tmp_path / ".kensa" / "traces" / "imports" / "langfuse-1792820123.jsonl"
     assert code == 0
+    assert events == ["redactor", "fetch", "import"]
     assert calls == [
         {
             "endpoint": "https://langfuse.example.com",
@@ -1919,6 +1944,7 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     assert manifest_payload["redaction"]["version"] == "kensa.redactor.v2"
 
     calls.clear()
+    events.clear()
     code = main(
         [
             "import",
@@ -1931,7 +1957,46 @@ def test_connected_langfuse_import_uses_connection_and_runtime_env(
     )
     json.loads(capsys.readouterr().out)
     assert code == 0
+    assert events == ["redactor", "fetch", "import"]
     assert calls[0]["import_mode"] == "observations_v2"
+
+
+def test_connected_import_checks_redaction_before_fetch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fetched = False
+
+    def fail_redactor() -> None:
+        raise cli.redact.RedactionNotReadyError("redaction not ready")
+
+    def track_fetch(**kwargs: Any) -> dict[str, Any]:
+        nonlocal fetched
+        fetched = True
+        return {}
+
+    monkeypatch.setattr(
+        cli,
+        "_load_connection",
+        lambda provider: {"provider": provider, "endpoint": "https://langfuse.example.com"},
+    )
+    monkeypatch.setattr(cli.redact, "Redactor", fail_redactor)
+    monkeypatch.setattr(cli, "_connected_langfuse_payload", track_fetch)
+
+    with pytest.raises(cli.redact.RedactionNotReadyError, match="redaction not ready"):
+        cli._connected_import(
+            SimpleNamespace(
+                provider="langfuse",
+                endpoint=None,
+                since=None,
+                limit=1,
+                max_payload_bytes=1_000,
+                langfuse_mode="auto",
+            ),
+            out=tmp_path / "langfuse.jsonl",
+        )
+
+    assert fetched is False
 
 
 def test_new_cli_helper_edge_paths(
@@ -1967,7 +2032,6 @@ def test_new_cli_helper_edge_paths(
         provider="jsonl",
         source=None,
         endpoint=None,
-        project=None,
         since=None,
         limit=1000,
         max_payload_bytes=50_000_000,
@@ -1996,7 +2060,6 @@ def test_new_cli_helper_edge_paths(
                 provider="jsonl",
                 source=str(secret_source),
                 endpoint=None,
-                project=None,
                 since=None,
                 limit=1000,
                 max_payload_bytes=50_000_000,
@@ -2021,7 +2084,6 @@ def test_new_cli_helper_edge_paths(
             SimpleNamespace(
                 provider="bad",
                 endpoint=None,
-                project=None,
                 since=None,
                 limit=1,
                 max_payload_bytes=1000,
@@ -2036,7 +2098,6 @@ def test_new_cli_helper_edge_paths(
             SimpleNamespace(
                 provider="langfuse",
                 endpoint=None,
-                project=None,
                 since=None,
                 limit=1,
                 max_payload_bytes=1000,

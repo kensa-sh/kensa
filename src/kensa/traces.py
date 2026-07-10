@@ -378,9 +378,6 @@ def import_trace_source(
     out: Path | str,
     limit: int,
     max_payload_bytes: int,
-    project: str | None = None,
-    since: str | None = None,
-    endpoint: str | None = None,
 ) -> ImportResult:
     """Import a bounded local trace export file through mandatory redaction."""
 
@@ -390,10 +387,7 @@ def import_trace_source(
         max_payload_bytes=max_payload_bytes,
     )
     if source is None:
-        raise ValueError(
-            "v1 trace imports read bounded trace export files; pass --source. "
-            "Live vendor API pulls with --project/--since are deferred."
-        )
+        raise ValueError("file trace imports require --source")
     redactor = Redactor()
     source_path = Path(source)
     bytes_read = _bounded_size(source_path, max_payload_bytes)
@@ -419,23 +413,36 @@ def import_trace_records(
     out: Path | str,
     limit: int,
     max_payload_bytes: int,
-    project: str | None = None,
-    since: str | None = None,
-    endpoint: str | None = None,
 ) -> ImportResult:
-    """Import decoded in-memory trace records through mandatory redaction.
+    """Import decoded in-memory trace records through mandatory redaction."""
 
-    Shared by the file-based and connected import paths. Connected imports use this
-    entry point directly so raw fetched payloads never transit disk; the payload
-    bound is enforced against the serialized in-memory payload.
-    """
+    return _import_trace_records(
+        provider=provider,
+        payload=payload,
+        source_label=source_label,
+        out=out,
+        limit=limit,
+        max_payload_bytes=max_payload_bytes,
+        redactor=None,
+    )
 
+
+def _import_trace_records(
+    *,
+    provider: str,
+    payload: Any,
+    source_label: str,
+    out: Path | str,
+    limit: int,
+    max_payload_bytes: int,
+    redactor: Redactor | None,
+) -> ImportResult:
     normalized_provider = _validated_import_arguments(
         provider=provider,
         limit=limit,
         max_payload_bytes=max_payload_bytes,
     )
-    redactor = Redactor()
+    active_redactor = redactor if redactor is not None else Redactor()
     bytes_read = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
     if bytes_read > max_payload_bytes:
         raise ValueError(f"payload exceeds --max-payload-bytes: {bytes_read} > {max_payload_bytes}")
@@ -443,7 +450,7 @@ def import_trace_records(
         parse_provider=normalized_provider,
         provenance_provider=normalized_provider,
         data=_decode_payload(normalized_provider, payload),
-        redactor=redactor,
+        redactor=active_redactor,
         stored_source=source_label,
         out=out,
         limit=limit,
@@ -501,13 +508,15 @@ def _write_redacted_import(
     results: list[RedactionResult] = [
         redactor.redact_trace_view(trace.to_dict()) for trace in trace_views
     ]
-    rendered = "".join(json.dumps(result.trace, sort_keys=True) + "\n" for result in results)
-    _write_text_atomic(output, rendered)
+    artifact_bytes = "".join(
+        json.dumps(result.trace, sort_keys=True) + "\n" for result in results
+    ).encode("utf-8")
+    _write_bytes_atomic(output, artifact_bytes)
     redaction_manifest = redactor.manifest()
     manifest_path = _write_import_manifest(
         output,
         provider=provenance_provider,
-        artifact_sha256=hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        artifact_sha256=hashlib.sha256(artifact_bytes).hexdigest(),
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         records_written=len(trace_views),
@@ -582,19 +591,18 @@ def _local_capture_manifest(source: Path) -> dict[str, Any] | None:
     return None
 
 
-def _write_text_atomic(output: Path, text: str) -> None:
+def _write_bytes_atomic(output: Path, data: bytes) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
+            "wb",
             dir=output.parent,
             prefix=f".{output.name}.",
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            temp_file.write(text)
+            temp_file.write(data)
         temp_path.replace(output)
     finally:
         if temp_path is not None and temp_path.exists():

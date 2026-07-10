@@ -56,7 +56,7 @@ from kensa.models import (
 )
 from kensa.traces import (
     ImportResult,
-    import_trace_records,
+    _import_trace_records,
     import_trace_source,
     safe_endpoint,
     safe_import_artifact,
@@ -485,9 +485,8 @@ def connect_langfuse(
     ),
 )
 @click.option("--source", default=None, help="Local export file to import.")
-@click.option("--endpoint", default=None, help="One-off endpoint provenance override.")
-@click.option("--project", default=None, help="Provider project name.")
-@click.option("--since", default=None, help="Provider time window, for example 7d.")
+@click.option("--endpoint", default=None, help="One-off connected provider endpoint override.")
+@click.option("--since", default=None, help="Connected provider time window, for example 7d.")
 @click.option(
     "--limit",
     default=None,
@@ -513,7 +512,6 @@ def import_command(
     provider: str,
     source: str | None,
     endpoint: str | None,
-    project: str | None,
     since: str | None,
     limit: int | None,
     max_payload_bytes: int,
@@ -525,7 +523,6 @@ def import_command(
         provider=provider,
         source=source,
         endpoint=endpoint,
-        project=project,
         since=since,
         limit=limit,
         max_payload_bytes=max_payload_bytes,
@@ -2788,6 +2785,20 @@ def _cmd_import(args: Any) -> int:
             "Connected imports are only implemented for Langfuse; pass --source.",
             json_output=json_output,
         )
+    connected_only_options = [
+        option
+        for option, value in (
+            ("--endpoint", getattr(args, "endpoint", None)),
+            ("--since", getattr(args, "since", None)),
+        )
+        if args.source and value is not None
+    ]
+    if connected_only_options:
+        return _import_argument_error(
+            f"{', '.join(connected_only_options)} can only be used with connected imports, "
+            "not with --source.",
+            json_output=json_output,
+        )
     args.limit = _resolve_import_limit(
         provider=provider,
         source=getattr(args, "source", None),
@@ -2800,9 +2811,6 @@ def _cmd_import(args: Any) -> int:
             result = import_trace_source(
                 provider=provider,
                 source=args.source,
-                endpoint=args.endpoint,
-                project=args.project,
-                since=args.since,
                 out=out,
                 limit=args.limit,
                 max_payload_bytes=args.max_payload_bytes,
@@ -2863,10 +2871,10 @@ def _connected_import(
     provider = str(args.provider)
     connection = _load_connection(provider)
     endpoint = str(getattr(args, "endpoint", None) or connection.get("endpoint") or "")
-    project = getattr(args, "project", None) or connection.get("project")
     if not endpoint:
         raise ValueError(f"{provider} connection is missing an endpoint")
     if provider == "langfuse":
+        redactor = redact.Redactor()
         payload = _connected_langfuse_payload(
             connection,
             endpoint=endpoint,
@@ -2881,16 +2889,14 @@ def _connected_import(
         raise ValueError(f"unsupported connected import provider: {provider}")
     with cli_output.wait_status("Writing trace import"):
         # Redact fetched payloads in memory; raw connected payloads never transit disk.
-        return import_trace_records(
+        return _import_trace_records(
             provider=provider,
             payload=payload,
             source_label=f"{provider}:connected",
             out=out,
-            endpoint=endpoint,
-            project=project if isinstance(project, str) else None,
-            since=getattr(args, "since", None),
             limit=int(args.limit),
             max_payload_bytes=int(args.max_payload_bytes),
+            redactor=redactor,
         )
 
 

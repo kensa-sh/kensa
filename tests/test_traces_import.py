@@ -190,7 +190,6 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
         out=out,
         limit=1,
         max_payload_bytes=source.stat().st_size,
-        endpoint="https://user:secret@collector.example.com:4318/v1/api-token/ingest?token=x",
     )
 
     rows = _read_jsonl(out)
@@ -498,7 +497,6 @@ def test_import_trace_records_shares_the_redaction_pipeline(
         out=out,
         limit=10,
         max_payload_bytes=10_000,
-        endpoint="https://cloud.langfuse.com",
     )
 
     row = _read_jsonl(out)[0]
@@ -891,8 +889,6 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(
         out=out,
         limit=10,
         max_payload_bytes=source.stat().st_size,
-        project="support-agent",
-        since="24h",
     )
 
     rows = _read_jsonl(out)
@@ -1174,7 +1170,7 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(
             limit=1,
             max_payload_bytes=100,
         )
-    with pytest.raises(ValueError, match="bounded trace export"):
+    with pytest.raises(ValueError, match="require --source"):
         import_trace_source(
             provider="jsonl",
             source=None,
@@ -1299,6 +1295,31 @@ def test_import_trace_source_validates_bounds_provider_and_mechanical_ids(
     )
 
 
+def test_atomic_trace_write_preserves_exact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "atomic.jsonl"
+    modes: list[str] = []
+    named_temporary_file = traces_module.tempfile.NamedTemporaryFile
+
+    def tracking_named_temporary_file(*args: Any, **kwargs: Any) -> Any:
+        modes.append(str(args[0]))
+        return named_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(
+        traces_module.tempfile,
+        "NamedTemporaryFile",
+        tracking_named_temporary_file,
+    )
+    artifact_bytes = b'{"id":"one"}\n{"id":"two"}\n'
+
+    traces_module._write_bytes_atomic(output, artifact_bytes)
+
+    assert modes == ["wb"]
+    assert output.read_bytes() == artifact_bytes
+
+
 def test_trace_import_internal_edge_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1319,7 +1340,7 @@ def test_trace_import_internal_edge_paths(
 
     monkeypatch.setattr(Path, "replace", fail_replace)
     with pytest.raises(OSError, match="replace failed"):
-        traces_module._write_text_atomic(output, "data")
+        traces_module._write_bytes_atomic(output, b"data")
     assert not list(output.parent.glob(f".{output.name}.*"))
 
     with pytest.raises(ValueError, match="unsupported trace import provider"):
