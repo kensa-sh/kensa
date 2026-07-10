@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import subprocess
@@ -196,6 +197,7 @@ def _write_safe_import_manifest(artifact: Path) -> None:
         json.dumps(
             {
                 "schema_version": "kensa.trace_import_manifest.v1",
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "redaction": {
                     "version": "kensa.redactor.v2",
                     "mandatory": True,
@@ -1395,6 +1397,47 @@ def test_top_level_import_writes_timestamped_artifact_manifest_and_latest(
     assert "tr_1" not in latest.read_text()
     assert json.loads(artifact.read_text())["id"] == "tr_1"
     assert json.loads(manifest.read_text())["provider"] == "jsonl"
+
+
+def test_top_level_import_does_not_persist_sensitive_provenance(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    redaction_ready,
+) -> None:
+    monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820123)
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    email = "alice.smith@example.com"
+    source = tmp_path / secret / email
+    source.parent.mkdir()
+    source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
+
+    code = main(
+        [
+            "import",
+            "--from",
+            "jsonl",
+            "--source",
+            str(source.relative_to(tmp_path)),
+            "--endpoint",
+            f"https://collector.example.com/{email}",
+            "--project",
+            email,
+            "--since",
+            secret,
+        ]
+    )
+    capsys.readouterr()
+
+    artifact = tmp_path / ".kensa" / "traces" / "imports" / "jsonl-1792820123.jsonl"
+    manifest = artifact.with_suffix(".manifest.json")
+    latest = artifact.parent / "latest.json"
+    persisted = artifact.read_text() + manifest.read_text() + latest.read_text()
+    assert code == 0
+    assert secret not in persisted
+    assert email not in persisted
+    assert {"source", "project", "since", "endpoint"}.isdisjoint(json.loads(manifest.read_text()))
+    assert {"source", "project", "since"}.isdisjoint(json.loads(latest.read_text()))
 
 
 @pytest.mark.parametrize(
@@ -4153,7 +4196,6 @@ def test_removed_init_flags_are_rejected(flag: str, tmp_path: Path, monkeypatch)
 
 def test_local_trace_commands_support_jsonl_source(tmp_path: Path, capsys) -> None:
     source = tmp_path / "traces.jsonl"
-    _write_safe_import_manifest(source)
     source.write_text(
         "\n".join(
             [
@@ -4163,6 +4205,7 @@ def test_local_trace_commands_support_jsonl_source(tmp_path: Path, capsys) -> No
         )
         + "\n"
     )
+    _write_safe_import_manifest(source)
 
     assert (
         cli_traces.cmd_traces(
@@ -4194,7 +4237,6 @@ def test_local_trace_commands_support_jsonl_source(tmp_path: Path, capsys) -> No
 
 def test_local_trace_commands_support_json_output(tmp_path: Path, capsys) -> None:
     source = tmp_path / "traces.jsonl"
-    _write_safe_import_manifest(source)
     source.write_text(
         "\n".join(
             [
@@ -4204,6 +4246,7 @@ def test_local_trace_commands_support_json_output(tmp_path: Path, capsys) -> Non
         )
         + "\n"
     )
+    _write_safe_import_manifest(source)
 
     assert (
         cli_traces.cmd_traces(SimpleNamespace(traces_command="list", source=str(source), json=True))
@@ -4273,8 +4316,8 @@ def test_trace_commands_use_latest_pointer_and_reject_old_artifacts(
     monkeypatch.chdir(tmp_path)
     artifact = tmp_path / ".kensa" / "traces" / "imports" / "run" / "traces.jsonl"
     artifact.parent.mkdir(parents=True)
-    _write_safe_import_manifest(artifact)
     artifact.write_text(json.dumps(_trace_view_row("tr_latest")) + "\n")
+    _write_safe_import_manifest(artifact)
     latest = tmp_path / ".kensa" / "traces" / "imports" / "latest.json"
     latest.write_text(
         json.dumps(
@@ -4374,6 +4417,10 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
     safe_artifact = tmp_path / ".kensa" / "traces" / "imports" / "new.jsonl"
     safe_artifact.write_text("{}\n")
     _write_safe_import_manifest(safe_artifact)
+    tampered_artifact = tmp_path / ".kensa" / "traces" / "imports" / "tampered.jsonl"
+    tampered_artifact.write_text("{}\n")
+    _write_safe_import_manifest(tampered_artifact)
+    tampered_artifact.write_text('{"input":"alice@example.com"}\n')
 
     assert main(["doctor", "--json"]) == 0
 
@@ -4391,7 +4438,10 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
         "detect_secrets": True,
         "phonenumbers": True,
     }
-    assert redaction["unsafe_artifacts"] == [".kensa/traces/imports/old.jsonl"]
+    assert redaction["unsafe_artifacts"] == [
+        ".kensa/traces/imports/old.jsonl",
+        ".kensa/traces/imports/tampered.jsonl",
+    ]
     assert any("re-import required" in warning for warning in payload["warnings"])
     assert "Re-import blocked trace artifacts with kensa import." in payload["next_steps"]
 

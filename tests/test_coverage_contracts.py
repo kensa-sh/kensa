@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import runpy
 import subprocess
@@ -404,6 +405,10 @@ def test_cli_edge_paths(
         )
         + "\n"
     )
+    manifest_path = trace_source.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_sha256"] = hashlib.sha256(trace_source.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
     assert (
         cli_traces.cmd_traces(
             argparse.Namespace(traces_command="sample", source=str(trace_source), json=False)
@@ -434,8 +439,9 @@ def test_cli_edge_paths(
     )
     empty_source = tmp_path / "empty.jsonl"
     empty_source.write_text("")
-    manifest_text = trace_source.with_suffix(".manifest.json").read_text()
-    empty_source.with_suffix(".manifest.json").write_text(manifest_text)
+    empty_manifest = dict(manifest)
+    empty_manifest["artifact_sha256"] = hashlib.sha256(empty_source.read_bytes()).hexdigest()
+    empty_source.with_suffix(".manifest.json").write_text(json.dumps(empty_manifest))
     assert (
         cli_traces.cmd_traces(
             argparse.Namespace(traces_command="sample", source=str(empty_source), json=False)

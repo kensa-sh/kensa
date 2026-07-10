@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +142,10 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
         )
         + "\n"
     )
+    manifest_path = source.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
 
     assert (
         cli_traces.cmd_traces(

@@ -56,10 +56,10 @@ from kensa.models import (
 )
 from kensa.traces import (
     ImportResult,
-    import_redaction_manifest,
     import_trace_records,
     import_trace_source,
     safe_endpoint,
+    safe_import_artifact,
 )
 
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -1283,7 +1283,7 @@ def _unsafe_import_artifacts() -> list[str]:
     return [
         str(cli_output.display_path(artifact))
         for artifact in sorted(TRACE_IMPORTS_DIR.glob("*.jsonl"))
-        if not redact.safe_manifest(import_redaction_manifest(artifact))
+        if not safe_import_artifact(artifact)
     ]
 
 
@@ -2825,8 +2825,6 @@ def _cmd_import(args: Any) -> int:
         result,
         timestamp=timestamp,
         source_mode=source_mode,
-        project=args.project,
-        since=args.since,
     )
     if json_output:
         _print_import_json(
@@ -2951,8 +2949,6 @@ def _write_trace_import_latest(
     *,
     timestamp: int,
     source_mode: str,
-    project: str | None,
-    since: str | None,
 ) -> Path:
     latest_path = TRACE_IMPORTS_DIR / "latest.json"
     payload = {
@@ -2965,9 +2961,6 @@ def _write_trace_import_latest(
         else None,
         "timestamp": timestamp,
         "created_at": _utc_now_iso(),
-        "source": result.source,
-        "project": project,
-        "since": since,
         "records_written": result.records_written,
         "span_count": result.span_count,
     }

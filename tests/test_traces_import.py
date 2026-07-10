@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -78,6 +79,9 @@ def _write_safe_sibling_manifest(artifact: Path) -> Path:
         json.dumps(
             {
                 "schema_version": "kensa.trace_import_manifest.v1",
+                "artifact_sha256": hashlib.sha256(
+                    artifact.read_bytes() if artifact.exists() else b""
+                ).hexdigest(),
                 "redaction": {
                     "version": "kensa.redactor.v2",
                     "mandatory": True,
@@ -198,7 +202,6 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert result.warnings == [
         "secret-like fields were redacted",
         "mandatory value redaction changed 2 value(s)",
-        "endpoint recorded in import provenance",
     ]
     assert row["id"] == "tr_1"
     assert row["name"] == "refund"
@@ -209,13 +212,12 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert row["attributes"] == {"api_key": "[SECRET_1]"}
     assert row["raw"]["api_key"] == "[SECRET_1]"
     assert row["source"]["provider"] == "jsonl"
-    assert row["source"]["source_path"] == str(source)
-    assert row["source"]["source_url"] == (
-        "https://collector.example.com:4318/v1/[redacted]/ingest"
-    )
+    assert row["source"]["source_path"] is None
+    assert row["source"]["source_url"] is None
     assert result.manifest_path is not None
     manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["endpoint"] == "https://collector.example.com:4318/v1/[redacted]/ingest"
+    assert manifest["artifact_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+    assert {"source", "project", "since", "endpoint"}.isdisjoint(manifest)
     assert manifest["records_written"] == 1
     assert manifest["trace_count"] == 1
     assert manifest["span_count"] == 0
@@ -582,8 +584,38 @@ def test_load_trace_views_gates_on_the_sibling_manifest(
         load_trace_views(artifact)
 
     _write_safe_sibling_manifest(artifact)
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("artifact_sha256")
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RedactionGateError, match="no valid artifact SHA-256"):
+        load_trace_views(artifact)
+
+    _write_safe_sibling_manifest(artifact)
     assert load_trace_views(artifact) == [_minimal_trace_view()]
     assert import_redaction_manifest(artifact)["version"] == "kensa.redactor.v2"
+
+
+def test_load_trace_views_rejects_artifact_replaced_after_manifest(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "tr_1", "input": "hello"}) + "\n")
+    artifact = tmp_path / "imports" / "traces.jsonl"
+    import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=artifact,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    replacement = _minimal_trace_view()
+    replacement["input"] = "alice@example.com"
+    artifact.write_text(json.dumps(replacement) + "\n")
+
+    with pytest.raises(RedactionGateError, match="does not match its redaction manifest"):
+        load_trace_views(artifact)
 
 
 def test_import_sanitizes_trace_urls_with_safe_endpoint(
@@ -887,8 +919,7 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(
     assert row["spans"][1]["name"] == "summarize"
     assert row["spans"][1]["kind"] == "llm"
     manifest = json.loads(out.with_suffix(".manifest.json").read_text())
-    assert manifest["project"] == "support-agent"
-    assert manifest["since"] == "24h"
+    assert {"source", "project", "since", "endpoint"}.isdisjoint(manifest)
     assert manifest["trace_count"] == 1
     assert manifest["span_count"] == 2
 
@@ -1358,42 +1389,38 @@ def test_trace_import_internal_edge_paths(
 
 def test_load_trace_views_rejects_invalid_trace_view_rows(tmp_path: Path) -> None:
     source = tmp_path / "bad.jsonl"
-    _write_safe_sibling_manifest(source)
-    source.write_text("\n{\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
 
-    source.write_text("[]\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    def assert_invalid(content: str, match: str = "Re-import traces with kensa import") -> None:
+        source.write_text(content)
+        _write_safe_sibling_manifest(source)
+        with pytest.raises(ValueError, match=match):
+            load_trace_views(source)
+
+    assert_invalid("\n{\n")
+    assert_invalid("[]\n")
 
     trace = _minimal_trace_view()
     invalid = dict(trace)
     invalid["extra"] = True
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["source"] = {}
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["spans"] = {}
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["spans"] = [{}]
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
-        load_trace_views(source)
+    assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)
     invalid["id"] = ""
-    source.write_text(json.dumps(invalid) + "\n")
-    with pytest.raises(ValueError, match="missing id"):
+    assert_invalid(json.dumps(invalid) + "\n", "missing id")
+
+    source.write_bytes(b"\xff")
+    _write_safe_sibling_manifest(source)
+    with pytest.raises(ValueError, match="Re-import traces with kensa import"):
         load_trace_views(source)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tempfile
@@ -15,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from kensa.redact import (
+    RedactionGateError,
     RedactionResult,
     Redactor,
     _safe_url_netloc,
@@ -24,6 +26,7 @@ from kensa.redact import (
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
 TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v1"
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _ENDPOINT_PLACEHOLDER = "[redacted]"
 _IMPORT_PROVIDERS = frozenset({"json", "jsonl", "otlp", "langfuse", "local-jsonl"})
 _TRACE_VIEW_KEYS = (
@@ -405,9 +408,6 @@ def import_trace_source(
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         bytes_read=bytes_read,
-        project=project,
-        since=since,
-        endpoint=endpoint,
     )
 
 
@@ -449,9 +449,6 @@ def import_trace_records(
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         bytes_read=bytes_read,
-        project=project,
-        since=since,
-        endpoint=endpoint,
     )
 
 
@@ -482,19 +479,15 @@ def _write_redacted_import(
     limit: int,
     max_payload_bytes: int,
     bytes_read: int,
-    project: str | None,
-    since: str | None,
-    endpoint: str | None,
 ) -> ImportResult:
-    endpoint_value = safe_endpoint(endpoint) if endpoint else None
     imported_at = trace_timestamp()
     import_run_id = f"import-{imported_at.replace(':', '-')}"
     trace_source = TraceSource(
         provider=provenance_provider,
         import_run_id=import_run_id,
         imported_at=imported_at,
-        source_path=_source_path_for_provenance(stored_source),
-        source_url=endpoint_value or _source_url_for_provenance(stored_source),
+        source_path=None,
+        source_url=None,
         trace_url=None,
     )
     trace_views = _import_trace_views(
@@ -514,10 +507,7 @@ def _write_redacted_import(
     manifest_path = _write_import_manifest(
         output,
         provider=provenance_provider,
-        source=stored_source,
-        project=project,
-        since=since,
-        endpoint=endpoint_value,
+        artifact_sha256=hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
         limit=limit,
         max_payload_bytes=max_payload_bytes,
         records_written=len(trace_views),
@@ -525,7 +515,7 @@ def _write_redacted_import(
         bytes_read=bytes_read,
         redaction=redaction_manifest,
     )
-    warnings = _redaction_warnings(redaction_manifest, endpoint=endpoint)
+    warnings = _redaction_warnings(redaction_manifest)
     return ImportResult(
         provider=provenance_provider,
         source=stored_source,
@@ -541,8 +531,6 @@ def _write_redacted_import(
 
 def _redaction_warnings(
     redaction_manifest: dict[str, Any],
-    *,
-    endpoint: str | None,
 ) -> list[str]:
     warnings: list[str] = []
     if redaction_manifest.get("secret_keys_redacted"):
@@ -550,8 +538,6 @@ def _redaction_warnings(
     changed = int(redaction_manifest.get("changed_value_count") or 0)
     if changed:
         warnings.append(f"mandatory value redaction changed {changed} value(s)")
-    if endpoint:
-        warnings.append("endpoint recorded in import provenance")
     return warnings
 
 
@@ -596,16 +582,6 @@ def _local_capture_manifest(source: Path) -> dict[str, Any] | None:
     return None
 
 
-def _source_path_for_provenance(source: str) -> str | None:
-    if "://" in source or source.endswith(":connected"):
-        return None
-    return source
-
-
-def _source_url_for_provenance(source: str) -> str | None:
-    return source if "://" in source else None
-
-
 def _write_text_atomic(output: Path, text: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
@@ -629,10 +605,7 @@ def _write_import_manifest(
     output: Path,
     *,
     provider: str,
-    source: str,
-    project: str | None,
-    since: str | None,
-    endpoint: Any,
+    artifact_sha256: str,
     limit: int,
     max_payload_bytes: int,
     records_written: int,
@@ -644,10 +617,7 @@ def _write_import_manifest(
         "schema_version": "kensa.trace_import_manifest.v1",
         "created_at": trace_timestamp(),
         "provider": provider,
-        "source": source,
-        "project": project,
-        "since": since,
-        "endpoint": endpoint,
+        "artifact_sha256": artifact_sha256,
         "limit": limit,
         "max_payload_bytes": max_payload_bytes,
         "records_written": records_written,
@@ -1425,6 +1395,15 @@ def _otlp_links(value: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _read_import_manifest(artifact: Path) -> dict[str, Any] | None:
+    manifest_path = artifact.with_suffix(".manifest.json")
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def import_redaction_manifest(artifact: Path | str) -> Any:
     """Read the redaction block from an artifact's sibling manifest.
 
@@ -1434,14 +1413,41 @@ def import_redaction_manifest(artifact: Path | str) -> Any:
     gates treat as unsafe.
     """
 
-    manifest_path = Path(artifact).with_suffix(".manifest.json")
+    manifest = _read_import_manifest(Path(artifact))
+    return manifest.get("redaction") if manifest is not None else None
+
+
+def _artifact_gate_error(problem: str) -> RedactionGateError:
+    return RedactionGateError(
+        f"Trace payload exposure blocked: {problem}. "
+        "Re-import traces with kensa import after mandatory redaction is ready."
+    )
+
+
+def _read_verified_artifact(path: Path) -> str:
+    manifest = _read_import_manifest(path)
+    assert_safe_manifest(manifest.get("redaction") if manifest is not None else None)
+    expected_sha256 = manifest.get("artifact_sha256") if manifest is not None else None
+    if not isinstance(expected_sha256, str) or _SHA256_HEX.fullmatch(expected_sha256) is None:
+        raise _artifact_gate_error("trace artifact manifest has no valid artifact SHA-256")
     try:
-        payload = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload.get("redaction")
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Could not read trace import artifact {path}: {exc}") from exc
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise _artifact_gate_error("trace artifact does not match its redaction manifest")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(_reimport_trace_message(path)) from exc
+
+
+def safe_import_artifact(artifact: Path | str) -> bool:
+    try:
+        _read_verified_artifact(Path(artifact))
+    except (RedactionGateError, ValueError):
+        return False
+    return True
 
 
 def load_trace_views(source: Path | str) -> list[dict[str, Any]]:
@@ -1453,13 +1459,9 @@ def load_trace_views(source: Path | str) -> list[dict[str, Any]]:
     """
 
     path = Path(source)
-    assert_safe_manifest(import_redaction_manifest(path))
+    text = _read_verified_artifact(path)
     rows: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        raise ValueError(f"Could not read trace import artifact {path}: {exc}") from exc
-    for index, line in enumerate(lines, start=1):
+    for index, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -1545,6 +1547,7 @@ __all__ = [
     "import_trace_source",
     "load_trace_views",
     "safe_endpoint",
+    "safe_import_artifact",
     "trace_timestamp",
     "trace_view_summary",
     "write_trace_manifest",
