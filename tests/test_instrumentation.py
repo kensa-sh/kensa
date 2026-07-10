@@ -75,6 +75,27 @@ def test_instrument_run_directory_writes_manifest(tmp_path: Path) -> None:
 
 def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> None:
     source = tmp_path / "spans.jsonl"
+    source.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_lg",
+                        "version": "3.8.0",
+                        "tier": "lg",
+                        "fallback_used": False,
+                        "checksum_verified": True,
+                    },
+                }
+            }
+        )
+    )
     source.write_text(
         json.dumps(
             {

@@ -126,11 +126,11 @@ with `kensa.instrument()` and import the JSONL.
 
 | Command | What it does |
 | --- | --- |
-| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. |
-| `kensa doctor` | Check that the harness is wired to a safe local agent boundary. |
+| `kensa init` | Set up the pytest harness, the `kensa-evals` skill, and mandatory redaction readiness. |
+| `kensa doctor` | Check redaction readiness and that the harness is wired to a safe local agent boundary. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
-| `kensa import --from <provider>` | Import local or connected trace evidence. |
-| `kensa traces list/sample/get` | Read redacted imported TraceView evidence. |
+| `kensa import --from <provider>` | Import local or connected trace evidence through mandatory redaction. |
+| `kensa traces list/sample/get` | Read redacted imported TraceView evidence (unsafe artifacts are blocked). |
 | `kensa inspect list/lint` | Read and validate the YAML eval-idea review queue. |
 | `kensa eval` | Run Kensa evals through pytest. |
 
@@ -224,16 +224,23 @@ optional.
 </details>
 
 <details>
-<summary>How do I enable strict value redaction?</summary>
+<summary>How does mandatory trace redaction work?</summary>
 
-Install the extra and download the spaCy model it relies on:
+Trace redaction is mandatory and fails closed. When a trace source is configured,
+`kensa init` offers to install the `kensa[redaction]` dependencies through your
+package manager (`uv add --group traces 'kensa[redaction]'` when a `uv.lock` is
+present, otherwise `pip install 'kensa[redaction]'`), downloads and
+checksum-verifies the pinned `en_core_web_lg-3.8.0` spaCy model (falling back to
+`en_core_web_sm-3.8.0` as degraded readiness), and writes `.kensa/redaction.json`.
 
-```bash
-uv add --dev "kensa[redaction]"
-uv run python -m spacy download en_core_web_sm
-```
-
-Without the model, imports fall back to key-only redaction.
+Every `kensa import` then runs key/path redaction, Kensa deterministic recognizers,
+detect-secrets, Presidio built-ins, and spaCy NER before anything is stored, and
+writes a `kensa.redactor.v2` manifest next to the artifact. Redacted values render
+as typed placeholders with stable per-run instance suffixes (`[PERSON_1]`,
+`[EMAIL_ADDRESS_2]`). `kensa traces list/sample/get`, `kensa inspect`, and eval
+generation refuse to expose payloads from artifacts with missing, older, or unsafe
+manifests; re-import those with `kensa import`. Eval-only installs never pull the
+NLP stack: readiness, not installation, enforces the boundary.
 
 </details>
 

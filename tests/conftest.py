@@ -1,11 +1,249 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from kensa import redact
+
 pytest_plugins = ("pytester",)
+
+
+class FakeRecognizerResult:
+    def __init__(
+        self,
+        entity_type: str,
+        start: int,
+        end: int,
+        score: float,
+        recognizer_name: str | None = "SpacyRecognizer",
+    ) -> None:
+        self.entity_type = entity_type
+        self.start = start
+        self.end = end
+        self.score = score
+        self.recognition_metadata = (
+            {"recognizer_name": recognizer_name} if recognizer_name is not None else None
+        )
+
+
+class FakeRedactionEnv:
+    """Fake spaCy/Presidio/detect-secrets/phonenumbers stack for unit tests."""
+
+    def __init__(self) -> None:
+        self.persons: list[str] = ["Alice"]
+        self.secret_markers: list[str] = ["tok_live"]
+        self.phone_numbers: list[str] = []
+        self.extra_results: list[FakeRecognizerResult] = []
+        self.analyzer_error: Exception | None = None
+        self.secret_scan_error: Exception | None = None
+        self.supported_entities: list[str] = [
+            "CREDIT_CARD",
+            "DATE_TIME",
+            "EMAIL_ADDRESS",
+            "LOCATION",
+            "NRP",
+            "ORGANIZATION",
+            "PERSON",
+            "PHONE_NUMBER",
+            "US_SSN",
+        ]
+        self.analyze_texts: list[str] = []
+        self.registered_recognizers: list[str] = []
+        self.nlp_configuration: dict[str, Any] | None = None
+        self.default_score_threshold: float | None = None
+        self.secret_plugin_names: list[str] = []
+        self.secret_plugin_config: dict[str, Any] | None = None
+        self.unlocatable_secret = False
+
+    def analyze(self, text: str) -> list[FakeRecognizerResult]:
+        if self.analyzer_error is not None:
+            raise self.analyzer_error
+        self.analyze_texts.append(text)
+        results: list[FakeRecognizerResult] = []
+        for person in self.persons:
+            cursor = 0
+            while (index := text.find(person, cursor)) != -1:
+                results.append(FakeRecognizerResult("PERSON", index, index + len(person), 0.85))
+                cursor = index + len(person)
+        results.extend(result for result in self.extra_results if result.end <= len(text))
+        return results
+
+    def analyze_secret_line(self, line: str) -> list[Any]:
+        if self.secret_scan_error is not None:
+            raise self.secret_scan_error
+        if self.unlocatable_secret:
+            return [SimpleNamespace(secret_value=None)]
+        return [
+            SimpleNamespace(secret_value=marker) for marker in self.secret_markers if marker in line
+        ]
+
+    def phone_matches(self, text: str) -> list[Any]:
+        matches: list[Any] = []
+        for number in self.phone_numbers:
+            index = text.find(number)
+            if index != -1:
+                matches.append(SimpleNamespace(start=index, end=index + len(number)))
+        return matches
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        env = self
+
+        class FakeTransientSettings:
+            def __init__(self, config: dict[str, Any]) -> None:
+                env.secret_plugin_config = config
+
+            def __enter__(self) -> None:
+                return None
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        class FakeSecretPlugin:
+            def __init__(self, name: str) -> None:
+                self._name = name
+
+            def analyze_line(self, filename: str, line: str) -> list[Any]:
+                assert filename == "kensa-trace-import"
+                return env.analyze_secret_line(line)
+
+        def from_plugin_classname(name: str) -> FakeSecretPlugin:
+            env.secret_plugin_names.append(name)
+            return FakeSecretPlugin(name)
+
+        class FakeProvider:
+            def __init__(self, nlp_configuration: dict[str, Any]) -> None:
+                env.nlp_configuration = nlp_configuration
+
+            def create_engine(self) -> str:
+                return "nlp-engine"
+
+        class FakeRegistry:
+            def __init__(self, supported_languages: list[str]) -> None:
+                assert supported_languages == ["en"]
+
+            def add_recognizer(self, recognizer: Any) -> None:
+                env.registered_recognizers.append(type(recognizer).__name__)
+
+        class FakeAnalyzer:
+            def __init__(
+                self,
+                nlp_engine: str,
+                registry: Any,
+                supported_languages: list[str],
+                default_score_threshold: float,
+            ) -> None:
+                assert nlp_engine == "nlp-engine"
+                assert supported_languages == ["en"]
+                env.default_score_threshold = default_score_threshold
+
+            def get_supported_entities(self, language: str) -> list[str]:
+                assert language == "en"
+                return env.supported_entities
+
+            def analyze(self, text: str, language: str) -> list[FakeRecognizerResult]:
+                assert language == "en"
+                return env.analyze(text)
+
+        class FakeMatcher:
+            def __init__(self, text: str, region: str) -> None:
+                assert region
+                self._matches = env.phone_matches(text)
+
+            def __iter__(self) -> Any:
+                return iter(self._matches)
+
+        def make_recognizer(name: str) -> type:
+            def _init(self: Any, supported_language: str) -> None:
+                assert supported_language == "en"
+
+            return type(name, (), {"__init__": _init})
+
+        recognizers = {name: make_recognizer(name) for name in redact._PRESIDIO_RECOGNIZER_NAMES}
+        modules: dict[str, Any] = {
+            "presidio_analyzer": SimpleNamespace(
+                RecognizerRegistry=FakeRegistry,
+                AnalyzerEngine=FakeAnalyzer,
+            ),
+            "presidio_analyzer.predefined_recognizers": SimpleNamespace(**recognizers),
+            "presidio_analyzer.nlp_engine": SimpleNamespace(NlpEngineProvider=FakeProvider),
+            "detect_secrets.settings": SimpleNamespace(transient_settings=FakeTransientSettings),
+            "detect_secrets.core.plugins.initialize": SimpleNamespace(
+                from_plugin_classname=from_plugin_classname
+            ),
+            "phonenumbers": SimpleNamespace(PhoneNumberMatcher=FakeMatcher),
+        }
+        monkeypatch.setattr(redact, "_import_module", lambda name: modules[name])
+        monkeypatch.setattr(redact, "_module_available", lambda name: True)
+        monkeypatch.setattr(
+            redact,
+            "_package_version",
+            lambda package: "3.8.7" if package == "spacy" else "test",
+        )
+
+    def make_ready(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        tier: str = "lg",
+        fallback_used: bool | None = None,
+        checksum_verified: bool = True,
+    ) -> None:
+        spec = redact.DEFAULT_SPACY_MODEL if tier == "lg" else redact.FALLBACK_SPACY_MODEL
+        models_dir = tmp_path / "kensa-models"
+        monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
+        write_fake_model_dir(models_dir / spec.label, spec)
+        readiness = redact.RedactionReadiness(
+            redaction_available=True,
+            language="en",
+            model=spec.name,
+            model_version=spec.version,
+            model_tier=spec.tier,
+            fallback_used=tier == "sm" if fallback_used is None else fallback_used,
+            checksum_verified=checksum_verified,
+            created_at="2026-07-10T00:00:00Z",
+        )
+        path = tmp_path / ".kensa" / "redaction.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(readiness.to_dict(), indent=2, sort_keys=True) + "\n")
+
+
+def write_fake_model_dir(path: Path, spec: redact.SpacyModelSpec) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    lang, _separator, name = spec.name.partition("_")
+    (path / "meta.json").write_text(
+        json.dumps(
+            {
+                "lang": lang,
+                "name": name,
+                "version": spec.version,
+                "spacy_version": ">=3.8.0,<3.9.0",
+            }
+        )
+    )
+
+
+@pytest.fixture
+def fake_redaction(monkeypatch: pytest.MonkeyPatch) -> FakeRedactionEnv:
+    env = FakeRedactionEnv()
+    env.install(monkeypatch)
+    return env
+
+
+@pytest.fixture
+def redaction_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> FakeRedactionEnv:
+    monkeypatch.chdir(tmp_path)
+    fake_redaction.make_ready(tmp_path, monkeypatch)
+    return fake_redaction
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

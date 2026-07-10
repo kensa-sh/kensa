@@ -175,7 +175,11 @@ def test_lint_warns_on_trace_ids_missing_from_latest_import(
     monkeypatch.chdir(tmp_path)
     _write_queue(tmp_path, "queue.yaml", [_idea_payload(trace_ids=["tr_known", "tr_missing"])])
     monkeypatch.setattr(cli_inspect, "resolve_trace_view_source", lambda source: tmp_path)
-    monkeypatch.setattr(cli_inspect, "load_trace_views", lambda source: [{"id": "tr_known"}])
+    monkeypatch.setattr(
+        cli_inspect,
+        "load_trace_views",
+        lambda source, **kwargs: [{"id": "tr_known"}],
+    )
 
     assert cli_inspect.cmd_inspect(_lint_args(json_output=True)) == 0
 
@@ -329,7 +333,11 @@ def test_main_wires_inspect_list_and_lint(
     monkeypatch.chdir(tmp_path)
     _write_queue(tmp_path, "queue.yaml", [_idea_payload("approved-idea", status="approved")])
     monkeypatch.setattr(cli_inspect, "resolve_trace_view_source", lambda source: tmp_path)
-    monkeypatch.setattr(cli_inspect, "load_trace_views", lambda source: [{"id": "tr_abc123"}])
+    monkeypatch.setattr(
+        cli_inspect,
+        "load_trace_views",
+        lambda source, **kwargs: [{"id": "tr_abc123"}],
+    )
 
     assert main(["inspect", "lint", "--json"]) == 0
     lint_envelope = json.loads(capsys.readouterr().out)

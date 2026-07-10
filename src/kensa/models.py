@@ -46,6 +46,7 @@ class CliEnvelope(KensaModel):
 
 
 EvidenceSource = Literal["langfuse", "trace_export", "local"]
+EvidenceEnvironmentName = Literal["local", "staging", "production"]
 AgentInstruction = Literal["codex", "claude", "cursor", "other"]
 
 
@@ -70,6 +71,9 @@ class KensaSettings(KensaModel):
     schema_version: Literal["kensa.settings.v1"] = "kensa.settings.v1"
     init: KensaInitSettings = Field(default_factory=KensaInitSettings)
     harness: KensaHarnessSettings = Field(default_factory=KensaHarnessSettings)
+    # Optional so pre-existing settings files parse unchanged; None blocks
+    # connected imports until kensa init records an explicit environment.
+    evidence_environment: EvidenceEnvironmentName | None = None
 
 
 class InspectStatus(StrEnum):

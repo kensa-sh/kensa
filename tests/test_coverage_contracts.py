@@ -358,6 +358,27 @@ def test_cli_edge_paths(
     assert cli._run_doctor_check().returncode == 0
 
     trace_source = tmp_path / "traces.jsonl"
+    trace_source.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_lg",
+                        "version": "3.8.0",
+                        "tier": "lg",
+                        "fallback_used": False,
+                        "checksum_verified": True,
+                    },
+                }
+            }
+        )
+    )
     trace_source.write_text(
         json.dumps(
             {
@@ -415,6 +436,8 @@ def test_cli_edge_paths(
     )
     empty_source = tmp_path / "empty.jsonl"
     empty_source.write_text("")
+    manifest_text = trace_source.with_suffix(".manifest.json").read_text()
+    empty_source.with_suffix(".manifest.json").write_text(manifest_text)
     assert (
         cli_traces.cmd_traces(
             argparse.Namespace(traces_command="sample", source=str(empty_source), json=False)
@@ -451,7 +474,7 @@ def test_cli_edge_paths(
     monkeypatch.setattr(
         cli_traces,
         "load_trace_views",
-        lambda source: (_ for _ in ()).throw(ValueError("bad source")),
+        lambda source, **kwargs: (_ for _ in ()).throw(ValueError("bad source")),
     )
     assert (
         cli_traces.cmd_traces(argparse.Namespace(traces_command="list", source="bad", json=False))

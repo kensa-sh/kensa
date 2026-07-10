@@ -14,15 +14,41 @@ from kensa.cli_output import (
     print_json_envelope,
     print_next_steps,
 )
-from kensa.constants import TRACE_IMPORT_LATEST_SCHEMA_VERSION, TRACE_IMPORTS_DIR
+from kensa.constants import (
+    KENSA_SETTINGS_PATH,
+    TRACE_IMPORT_LATEST_SCHEMA_VERSION,
+    TRACE_IMPORTS_DIR,
+)
 from kensa.traces import load_trace_views, trace_view_summary
+
+_EVIDENCE_ENVIRONMENTS = frozenset({"local", "staging", "production"})
+
+
+def read_evidence_environment() -> str:
+    """Read-time evidence environment for payload-exposure gates.
+
+    Local-only workflows treat a missing setting as local; connected import
+    strictness is enforced at import time, not here.
+    """
+
+    settings_path = Path.cwd() / KENSA_SETTINGS_PATH
+    if not settings_path.exists():
+        return "local"
+    try:
+        payload = json.loads(settings_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "local"
+    environment = payload.get("evidence_environment") if isinstance(payload, dict) else None
+    if isinstance(environment, str) and environment in _EVIDENCE_ENVIRONMENTS:
+        return environment
+    return "local"
 
 
 def cmd_traces(args: Any) -> int:
     json_output = bool(getattr(args, "json", False))
     try:
         source_path = resolve_trace_view_source(getattr(args, "source", None))
-        traces = load_trace_views(source_path)
+        traces = load_trace_views(source_path, environment=read_evidence_environment())
     except ValueError as exc:
         if json_output:
             print_json_envelope(

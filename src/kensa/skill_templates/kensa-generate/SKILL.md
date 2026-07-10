@@ -21,11 +21,15 @@ Ignore queue items marked `status: pending` or `status: rejected`.
 Workflow:
 
 1. Read the approved idea or user-approved case.
-2. Build case inputs from the verbatim payloads of the traces in `trace_ids` whenever the import
-   contains them, exported to `tests/evals/data/*.json`. Invent inputs only when the trace has
-   none. Check the import's redaction manifest before exporting; if values were not redacted and
-   the source is production, scrub the payload or get explicit user sign-off first, because
-   `tests/evals/data/` is committed to git.
+2. Build case inputs from the payloads of the traces in `trace_ids` whenever the import contains
+   them, exported to `tests/evals/data/*.json`. Invent inputs only when the trace has none.
+   Never generate from unsafe trace manifests: `kensa traces get` refuses payloads unless the
+   artifact carries a safe `kensa.redactor.v2` manifest (mandatory value redaction applied,
+   redaction available, verified model). If access is blocked, or the manifest is missing or
+   older, stop and re-import with `kensa import` after mandatory Kensa redaction is ready; do
+   not copy payloads from raw files, runtime `.kensa/traces/runs/` directories, or any other
+   side channel, because `tests/evals/data/` is committed to git. Redacted payloads keep typed
+   instance placeholders such as `[PERSON_1]`; preserve them verbatim in exported fixtures.
 3. Read the `kensa.pytest` and `kensa.case` source or docs for the authoring contract before
    writing; do not guess the API.
 4. Write or edit only focused pytest eval files under `tests/evals/test_*.py`.
