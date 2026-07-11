@@ -2443,6 +2443,7 @@ def test_init_agent_all_flag_scaffolds_all_agent_instructions(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
 
     assert main(["init", "--agent", "all", "--trace-source", "local"]) == 0
 
