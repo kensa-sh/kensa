@@ -2390,8 +2390,9 @@ def test_init_trace_source_flag_installs_redaction_noninteractively(
             [sys.executable, "-m", "pip", "install", "kensa[redaction]"],
             {
                 "check": False,
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
             },
         )
     ]
@@ -4641,7 +4642,7 @@ def test_ensure_redaction_dependencies_install_flows(
     def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
         install_calls.append((argv, kwargs))
         monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ())
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="installer details")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli._ensure_redaction_dependencies(None) is True
@@ -4650,8 +4651,9 @@ def test_ensure_redaction_dependencies_install_flows(
             [sys.executable, "-m", "pip", "install", "kensa[redaction]"],
             {
                 "check": False,
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
             },
         )
     ]
@@ -4661,10 +4663,32 @@ def test_ensure_redaction_dependencies_install_flows(
     monkeypatch.setattr(
         cli.subprocess,
         "run",
-        lambda argv, **kwargs: SimpleNamespace(returncode=1),
+        lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout="resolver failed\n"),
     )
     assert cli._ensure_redaction_dependencies(None) is False
-    assert "install failed; run pip install 'kensa[redaction]'" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "install failed; run pip install 'kensa[redaction]'" in error
+    assert "resolver failed" in error
+
+
+def test_ensure_redaction_dependencies_handles_missing_installer(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "uv.lock").write_text("")
+    monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ("spacy",))
+
+    def missing_installer(argv: list[str], **kwargs: Any) -> None:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(cli.subprocess, "run", missing_installer)
+
+    assert cli._ensure_redaction_dependencies(None) is False
+    error = capsys.readouterr().err
+    assert "install failed; run uv add --dev 'kensa[redaction]'" in error
+    assert "No such file or directory: 'uv'" in error
 
 
 def test_configure_redaction_readiness_statuses(

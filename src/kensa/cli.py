@@ -1642,13 +1642,24 @@ def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
     if not missing:
         return True
     command = _redaction_install_command()
-    with cli_output.wait_status("Installing redaction dependencies"):
-        completed = subprocess.run(
-            _redaction_install_argv(command),
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    try:
+        with cli_output.wait_status("Installing redaction dependencies"):
+            completed = subprocess.run(
+                _redaction_install_argv(command),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+    except FileNotFoundError as exc:
+        _init_item(
+            steps,
+            f"redaction dependency install failed; run {command}",
+            ok=False,
+            err=True,
         )
+        click.echo(str(exc), err=True)
+        return False
     if completed.returncode == 0 and not redact.missing_redaction_dependencies():
         return True
     _init_item(
@@ -1657,6 +1668,8 @@ def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
         ok=False,
         err=True,
     )
+    if output := completed.stdout.strip():
+        click.echo(output, err=True)
     return False
 
 
