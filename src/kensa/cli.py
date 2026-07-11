@@ -1640,25 +1640,23 @@ def _redaction_install_argv(command: str) -> list[str]:
 def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
     missing = redact.missing_redaction_dependencies()
     if not missing:
-        _init_item(steps, "redaction dependencies present")
         return True
     command = _redaction_install_command()
-    if not _is_interactive():
-        _init_notice(
-            steps,
-            "Trace redaction dependencies missing: "
-            + ", ".join(missing)
-            + f". Run {command}, then re-run kensa init.",
+    with cli_output.wait_status("Installing redaction dependencies"):
+        completed = subprocess.run(
+            _redaction_install_argv(command),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        return False
-    if not click.confirm(f"Install trace redaction dependencies ({command})?", default=True):
-        _init_notice(steps, f"Skipped install. Run {command}, then re-run kensa init.")
-        return False
-    completed = subprocess.run(_redaction_install_argv(command), check=False)
     if completed.returncode == 0 and not redact.missing_redaction_dependencies():
-        _init_item(steps, "installed kensa[redaction] dependencies")
         return True
-    _init_item(steps, "redaction dependency install failed", ok=False, err=True)
+    _init_item(
+        steps,
+        f"redaction dependency install failed; run {command}",
+        ok=False,
+        err=True,
+    )
     return False
 
 
@@ -1670,7 +1668,7 @@ def _configure_redaction_readiness(
         return "skipped"
     connected = evidence_source == "langfuse"
     if steps is not None:
-        steps.step("Mandatory trace redaction")
+        steps.step("Configure sensitive data protection")
     if not _ensure_redaction_dependencies(steps):
         if connected:
             _init_item(
@@ -1688,7 +1686,7 @@ def _configure_redaction_readiness(
         return "deferred"
     try:
         with cli_output.wait_status("Preparing redaction model"):
-            readiness = redact.ensure_redaction_ready()
+            redact.ensure_redaction_ready()
     except redact.RedactionError as exc:
         _init_item(steps, f"redaction model bootstrap failed: {exc}", ok=False, err=True)
         if connected:
@@ -1699,14 +1697,7 @@ def _configure_redaction_readiness(
             "kensa init prepares a redaction model.",
         )
         return "deferred"
-    _init_item(
-        steps,
-        f"redaction model ready: {readiness.model}-{readiness.model_version}",
-    )
-    _init_item(
-        steps,
-        f"readiness recorded: {cli_output.display_path(redact.settings_path())}",
-    )
+    _init_item(steps, "traces will be auto redacted during import")
     return "ready"
 
 
