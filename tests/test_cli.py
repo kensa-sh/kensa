@@ -4716,10 +4716,11 @@ def test_configure_redaction_readiness_statuses(
 
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", failing_bootstrap)
     assert cli._configure_redaction_readiness(steps, "langfuse") == "failed"
-    assert cli._configure_redaction_readiness(steps, "local") == "deferred"
+    assert cli._configure_redaction_readiness(steps, "trace_export") == "failed"
+    assert cli._configure_redaction_readiness(steps, "local") == "failed"
     output = capsys.readouterr().out
     assert "redaction model bootstrap failed" in output
-    assert "stay blocked" in output
+    assert "stay blocked" not in output
 
     readiness = cli.redact.RedactionReadiness(
         model="en_core_web_sm",

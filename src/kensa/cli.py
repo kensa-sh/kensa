@@ -1679,7 +1679,6 @@ def _configure_redaction_readiness(
 ) -> _RedactionInitStatus:
     if evidence_source is None:
         return "skipped"
-    connected = evidence_source == "langfuse"
     if not _ensure_redaction_dependencies(steps):
         return "failed"
     try:
@@ -1687,14 +1686,7 @@ def _configure_redaction_readiness(
             redact.ensure_redaction_ready()
     except redact.RedactionError as exc:
         _init_item(steps, f"redaction model bootstrap failed: {exc}", ok=False, err=True)
-        if connected:
-            return "failed"
-        _init_notice(
-            steps,
-            "Trace import, sampling, inspection, and generation stay blocked until "
-            "kensa init prepares a redaction model.",
-        )
-        return "deferred"
+        return "failed"
     return "ready"
 
 
