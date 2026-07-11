@@ -2343,32 +2343,66 @@ def test_init_settings_write_preserves_harness_section(tmp_path: Path, monkeypat
     assert not (tmp_path / ".kensa" / "readiness.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("source", "expected_exit"),
-    [("langfuse", 1), ("trace_export", 0), ("local", 0)],
-)
-def test_init_trace_source_flag_persists_noninteractive_choice(
+@pytest.mark.parametrize("source", ["langfuse", "trace_export", "local"])
+def test_init_trace_source_flag_installs_redaction_noninteractively(
     source: str,
-    expected_exit: int,
     tmp_path: Path,
     monkeypatch,
     capsys,
+    fake_redaction,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    fake_redaction.make_ready(tmp_path, monkeypatch)
+    settings_path = tmp_path / ".kensa" / "settings.json"
+    settings = json.loads(settings_path.read_text())
+    del settings["redaction"]
+    settings_path.write_text(json.dumps(settings))
+    dependencies_missing = True
+
+    def missing_redaction_dependencies() -> tuple[str, ...]:
+        return cli.redact.REDACTION_EXTRA_MODULES if dependencies_missing else ()
+
     monkeypatch.setattr(
         cli.redact,
         "missing_redaction_dependencies",
-        lambda: cli.redact.REDACTION_EXTRA_MODULES,
+        missing_redaction_dependencies,
     )
+    install_calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    assert main(["init", "--trace-source", source]) == expected_exit
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        nonlocal dependencies_missing
+        install_calls.append((argv, kwargs))
+        dependencies_missing = False
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main(["init", "--trace-source", source]) == 0
 
     output = capsys.readouterr().out
-    assert "pip install 'kensa[redaction]'" in output
+    assert "traces will be auto redacted during import" not in output
+    assert "redaction dependencies present" not in output
+    assert "redaction model ready" not in output
+    assert "readiness recorded" not in output
+    assert install_calls == [
+        (
+            [sys.executable, "-m", "pip", "install", "kensa[redaction]"],
+            {
+                "check": False,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+            },
+        )
+    ]
     settings = _read_settings(tmp_path)
     assert settings["init"]["evidence_source"] == source
-    assert "redaction" not in settings
+    assert settings["redaction"] == {
+        "model": "en_core_web_sm",
+        "model_version": "3.8.0",
+        "checksum_verified": True,
+    }
 
 
 @pytest.mark.parametrize("source", ["langfuse", "trace_export", "local"])
@@ -2390,8 +2424,10 @@ def test_init_bootstraps_redaction_readiness_when_deps_present(
     assert main(["init", "--trace-source", source]) == 0
 
     output = capsys.readouterr().out
-    assert "redaction dependencies present" in output
-    assert "redaction model ready: en_core_web_sm-3.8.0" in output
+    assert "traces will be auto redacted during import" not in output
+    assert "redaction dependencies present" not in output
+    assert "redaction model ready" not in output
+    assert "readiness recorded" not in output
     settings = _read_settings(tmp_path)
     assert settings["redaction"] == {
         "model": "en_core_web_sm",
@@ -2407,6 +2443,7 @@ def test_init_agent_all_flag_scaffolds_all_agent_instructions(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
 
     assert main(["init", "--agent", "all", "--trace-source", "local"]) == 0
 
@@ -2892,6 +2929,7 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
         assert f"✓ .claude/skills/{skill_name}/ (1 file)" in output
     assert "◇  Finish setup" in output
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Existing trace export" in output
     assert "Langfuse" in output
     assert "No traces? Capture local run" in output
@@ -2958,6 +2996,7 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     assert "Use ↑/↓, then Enter." in output
     assert "installed Claude Code instructions" in output
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Next steps:" in output
     assert "1. Open Claude Code." in output
     assert (
@@ -4111,6 +4150,7 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
 
     output = capsys.readouterr().out
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Existing trace export" in output
     assert "Langfuse" in output
     assert "No traces? Capture local run" in output
@@ -4578,12 +4618,11 @@ def test_redaction_install_command_and_argv(tmp_path: Path, monkeypatch) -> None
     assert cli._redaction_install_command() == "pip install 'kensa[redaction]'"
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
     (tmp_path / "uv.lock").write_text("")
-    assert cli._redaction_install_command() == "uv add --group traces 'kensa[redaction]'"
-    assert cli._redaction_install_argv("uv add --group traces 'kensa[redaction]'") == [
+    assert cli._redaction_install_command() == "uv add --dev 'kensa[redaction]'"
+    assert cli._redaction_install_argv("uv add --dev 'kensa[redaction]'") == [
         "uv",
         "add",
-        "--group",
-        "traces",
+        "--dev",
         "kensa[redaction]",
     ]
     assert cli._redaction_install_argv("pip install 'kensa[redaction]'") == [
@@ -4595,40 +4634,65 @@ def test_redaction_install_command_and_argv(tmp_path: Path, monkeypatch) -> None
     ]
 
 
-def test_ensure_redaction_dependencies_interactive_flows(
+def test_ensure_redaction_dependencies_install_flows(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ("spacy",))
+    install_calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    monkeypatch.setattr(cli.click, "confirm", lambda *args, **kwargs: False)
-    assert cli._ensure_redaction_dependencies(None) is False
-    assert "Skipped install" in capsys.readouterr().out
-
-    monkeypatch.setattr(cli.click, "confirm", lambda *args, **kwargs: True)
-    install_calls: list[list[str]] = []
-
-    def fake_run(argv: list[str], check: bool) -> SimpleNamespace:
-        install_calls.append(argv)
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        install_calls.append((argv, kwargs))
         monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ())
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="installer details")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli._ensure_redaction_dependencies(None) is True
-    assert install_calls == [[sys.executable, "-m", "pip", "install", "kensa[redaction]"]]
-    assert "installed kensa[redaction] dependencies" in capsys.readouterr().out
+    assert install_calls == [
+        (
+            [sys.executable, "-m", "pip", "install", "kensa[redaction]"],
+            {
+                "check": False,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+            },
+        )
+    ]
+    assert capsys.readouterr().out == ""
 
     monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ("spacy",))
     monkeypatch.setattr(
         cli.subprocess,
         "run",
-        lambda argv, check: SimpleNamespace(returncode=1),
+        lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout="resolver failed\n"),
     )
     assert cli._ensure_redaction_dependencies(None) is False
-    assert "install failed" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "install failed; run pip install 'kensa[redaction]'" in error
+    assert "resolver failed" in error
+
+
+def test_ensure_redaction_dependencies_handles_missing_installer(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "uv.lock").write_text("")
+    monkeypatch.setattr(cli.redact, "missing_redaction_dependencies", lambda: ("spacy",))
+
+    def missing_installer(argv: list[str], **kwargs: Any) -> None:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(cli.subprocess, "run", missing_installer)
+
+    assert cli._ensure_redaction_dependencies(None) is False
+    error = capsys.readouterr().err
+    assert "install failed; run uv add --dev 'kensa[redaction]'" in error
+    assert "No such file or directory: 'uv'" in error
 
 
 def test_configure_redaction_readiness_statuses(
@@ -4640,6 +4704,12 @@ def test_configure_redaction_readiness_statuses(
     assert cli._configure_redaction_readiness(None, None) == "skipped"
 
     steps = cli._Steps()
+    monkeypatch.setattr(cli, "_ensure_redaction_dependencies", lambda steps: False)
+    assert cli._configure_redaction_readiness(steps, "langfuse") == "failed"
+    assert cli._configure_redaction_readiness(steps, "trace_export") == "failed"
+    assert cli._configure_redaction_readiness(steps, "local") == "failed"
+    assert capsys.readouterr().out == ""
+
     monkeypatch.setattr(cli, "_ensure_redaction_dependencies", lambda steps: True)
 
     def failing_bootstrap(root=None):
@@ -4647,10 +4717,11 @@ def test_configure_redaction_readiness_statuses(
 
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", failing_bootstrap)
     assert cli._configure_redaction_readiness(steps, "langfuse") == "failed"
-    assert cli._configure_redaction_readiness(steps, "local") == "deferred"
+    assert cli._configure_redaction_readiness(steps, "trace_export") == "failed"
+    assert cli._configure_redaction_readiness(steps, "local") == "failed"
     output = capsys.readouterr().out
     assert "redaction model bootstrap failed" in output
-    assert "stay blocked" in output
+    assert "stay blocked" not in output
 
     readiness = cli.redact.RedactionReadiness(
         model="en_core_web_sm",
@@ -4660,7 +4731,11 @@ def test_configure_redaction_readiness_statuses(
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: readiness)
     assert cli._configure_redaction_readiness(steps, "trace_export") == "ready"
     output = capsys.readouterr().out
-    assert "redaction model ready: en_core_web_sm-3.8.0" in output
+    assert "Configure sensitive data protection" not in output
+    assert "traces will be auto redacted during import" not in output
+    assert "redaction dependencies present" not in output
+    assert "redaction model ready" not in output
+    assert "readiness recorded" not in output
 
 
 def test_redaction_init_failure_statuses() -> None:
