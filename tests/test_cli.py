@@ -4613,12 +4613,11 @@ def test_redaction_install_command_and_argv(tmp_path: Path, monkeypatch) -> None
     assert cli._redaction_install_command() == "pip install 'kensa[redaction]'"
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
     (tmp_path / "uv.lock").write_text("")
-    assert cli._redaction_install_command() == "uv add --group traces 'kensa[redaction]'"
-    assert cli._redaction_install_argv("uv add --group traces 'kensa[redaction]'") == [
+    assert cli._redaction_install_command() == "uv add --dev 'kensa[redaction]'"
+    assert cli._redaction_install_argv("uv add --dev 'kensa[redaction]'") == [
         "uv",
         "add",
-        "--group",
-        "traces",
+        "--dev",
         "kensa[redaction]",
     ]
     assert cli._redaction_install_argv("pip install 'kensa[redaction]'") == [

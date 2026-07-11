@@ -1627,13 +1627,13 @@ def _redaction_init_failed(
 
 def _redaction_install_command() -> str:
     if (_project_config_root() / "uv.lock").exists():
-        return "uv add --group traces 'kensa[redaction]'"
+        return "uv add --dev 'kensa[redaction]'"
     return "pip install 'kensa[redaction]'"
 
 
 def _redaction_install_argv(command: str) -> list[str]:
     if command.startswith("uv "):
-        return ["uv", "add", "--group", "traces", "kensa[redaction]"]
+        return ["uv", "add", "--dev", "kensa[redaction]"]
     return [sys.executable, "-m", "pip", "install", "kensa[redaction]"]
 
 
