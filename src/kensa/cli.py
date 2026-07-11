@@ -1680,23 +1680,8 @@ def _configure_redaction_readiness(
     if evidence_source is None:
         return "skipped"
     connected = evidence_source == "langfuse"
-    if steps is not None:
-        steps.step("Configure sensitive data protection")
     if not _ensure_redaction_dependencies(steps):
-        if connected:
-            _init_item(
-                steps,
-                "Langfuse evidence setup requires the redaction dependencies.",
-                ok=False,
-                err=True,
-            )
-            return "failed"
-        _init_notice(
-            steps,
-            "Trace import stays blocked until the redaction dependencies are installed "
-            "and kensa init is re-run.",
-        )
-        return "deferred"
+        return "failed"
     try:
         with cli_output.wait_status("Preparing redaction model"):
             redact.ensure_redaction_ready()
@@ -1710,7 +1695,6 @@ def _configure_redaction_readiness(
             "kensa init prepares a redaction model.",
         )
         return "deferred"
-    _init_item(steps, "traces will be auto redacted during import")
     return "ready"
 
 
@@ -2404,7 +2388,7 @@ def _select_trace_source(steps: _Steps | None = None) -> EvidenceSource | None:
             choices=_TRACE_SOURCE_CHOICES,
             default=_TRACE_SOURCE_CHOICES[0],
             choice_label=_trace_source_label,
-            help_text="Kensa will store this source in .kensa/settings.json.",
+            help_text="Note: traces will be auto redacted during import.",
         ),
     )
 

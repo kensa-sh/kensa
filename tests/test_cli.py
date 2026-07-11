@@ -2381,7 +2381,7 @@ def test_init_trace_source_flag_installs_redaction_noninteractively(
     assert main(["init", "--trace-source", source]) == 0
 
     output = capsys.readouterr().out
-    assert "traces will be auto redacted during import" in output
+    assert "traces will be auto redacted during import" not in output
     assert "redaction dependencies present" not in output
     assert "redaction model ready" not in output
     assert "readiness recorded" not in output
@@ -2424,7 +2424,7 @@ def test_init_bootstraps_redaction_readiness_when_deps_present(
     assert main(["init", "--trace-source", source]) == 0
 
     output = capsys.readouterr().out
-    assert "traces will be auto redacted during import" in output
+    assert "traces will be auto redacted during import" not in output
     assert "redaction dependencies present" not in output
     assert "redaction model ready" not in output
     assert "readiness recorded" not in output
@@ -2928,6 +2928,7 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
         assert f"✓ .claude/skills/{skill_name}/ (1 file)" in output
     assert "◇  Finish setup" in output
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Existing trace export" in output
     assert "Langfuse" in output
     assert "No traces? Capture local run" in output
@@ -2994,6 +2995,7 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     assert "Use ↑/↓, then Enter." in output
     assert "installed Claude Code instructions" in output
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Next steps:" in output
     assert "1. Open Claude Code." in output
     assert (
@@ -4147,6 +4149,7 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
 
     output = capsys.readouterr().out
     assert "Where should Kensa get traces from?" in output
+    assert "Note: traces will be auto redacted during import." in output
     assert "Existing trace export" in output
     assert "Langfuse" in output
     assert "No traces? Capture local run" in output
@@ -4702,10 +4705,9 @@ def test_configure_redaction_readiness_statuses(
     steps = cli._Steps()
     monkeypatch.setattr(cli, "_ensure_redaction_dependencies", lambda steps: False)
     assert cli._configure_redaction_readiness(steps, "langfuse") == "failed"
-    assert cli._configure_redaction_readiness(steps, "local") == "deferred"
-    output = capsys.readouterr().out
-    assert "Langfuse evidence setup requires the redaction dependencies" in output
-    assert "Trace import stays blocked" in output
+    assert cli._configure_redaction_readiness(steps, "trace_export") == "failed"
+    assert cli._configure_redaction_readiness(steps, "local") == "failed"
+    assert capsys.readouterr().out == ""
 
     monkeypatch.setattr(cli, "_ensure_redaction_dependencies", lambda steps: True)
 
@@ -4727,8 +4729,8 @@ def test_configure_redaction_readiness_statuses(
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: readiness)
     assert cli._configure_redaction_readiness(steps, "trace_export") == "ready"
     output = capsys.readouterr().out
-    assert "Configure sensitive data protection" in output
-    assert "traces will be auto redacted during import" in output
+    assert "Configure sensitive data protection" not in output
+    assert "traces will be auto redacted during import" not in output
     assert "redaction dependencies present" not in output
     assert "redaction model ready" not in output
     assert "readiness recorded" not in output
