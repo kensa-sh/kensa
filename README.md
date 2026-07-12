@@ -126,7 +126,7 @@ with `kensa.instrument()` and import the JSONL.
 
 | Command | What it does |
 | --- | --- |
-| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. |
+| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. Use `--redaction-model large` for higher-recall spaCy NER. |
 | `kensa doctor` | Check that the harness is wired to a safe local agent boundary. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
 | `kensa import --from <provider>` | Import local or connected trace evidence. |
@@ -226,8 +226,9 @@ optional.
 <details>
 <summary>How does Kensa handle PII in traces?</summary>
 
-Every `kensa import` scans payloads with detect-secrets, Presidio, spaCy NER, and
-Kensa's own recognizers, then rewrites PII and secrets as typed placeholders like
+Every `kensa import` projects provider payloads into a minimal allowlisted TraceView, then scans
+retained input and output with detect-secrets, Presidio, spaCy NER, and Kensa's own recognizers.
+It rewrites PII and secrets as typed placeholders like
 `[PERSON_1]` before anything is stored. Redaction fails closed: if the dependencies
 or the pinned model are missing, trace import and payload exposure stay blocked
 until `kensa init` sets them up.

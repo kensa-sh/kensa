@@ -647,7 +647,7 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     redaction_ready.secret_markers = ["sk-live-value"]
     redactor = Redactor()
     trace = {
-        "schema_version": "kensa.trace_view.v1",
+        "schema_version": "kensa.trace_view.v2",
         "source": {
             "provider": "langfuse",
             "import_run_id": "import-2026-07-10T00-00-00Z",
@@ -661,7 +661,7 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
         "input": "https://collector.example.com/v1",
     }
     redacted = redactor.redact_value(trace)
-    assert redacted["schema_version"] == "kensa.trace_view.v1"
+    assert redacted["schema_version"] == "kensa.trace_view.v2"
     assert redacted["source"]["provider"] == "langfuse"
     assert redacted["source"]["import_run_id"] == "import-2026-07-10T00-00-00Z"
     assert redacted["source"]["imported_at"] == "2026-07-10T00:00:00Z"
@@ -1253,6 +1253,26 @@ def test_ensure_redaction_ready_prepares_default_model(
         "model_version": "3.8.0",
         "checksum_verified": True,
     }
+
+
+def test_ensure_redaction_ready_prepares_large_model_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> None:
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(tmp_path / "models"))
+
+    def fake_download(spec: redact.SpacyModelSpec, destination: Path) -> None:
+        destination.write_bytes(_model_wheel_bytes(spec))
+
+    monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
+    readiness = ensure_redaction_ready(tmp_path, model="large")
+
+    assert readiness.model == "en_core_web_lg"
+    assert readiness.model_version == "3.8.0"
+    assert assert_redaction_ready(root=tmp_path) == readiness
+    payload = json.loads(settings_path(tmp_path).read_text())
+    assert payload["redaction"]["model"] == "en_core_web_lg"
 
 
 def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(

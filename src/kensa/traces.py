@@ -7,7 +7,7 @@ import json
 import re
 import tempfile
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -24,7 +24,7 @@ from kensa.redact import (
 )
 
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
-TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v1"
+TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v2"
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _ENDPOINT_PLACEHOLDER = "[redacted]"
@@ -40,17 +40,12 @@ _TRACE_VIEW_KEYS = (
     "status",
     "input",
     "output",
-    "attributes",
     "spans",
-    "raw",
 )
 _TRACE_SOURCE_KEYS = (
     "provider",
     "import_run_id",
     "imported_at",
-    "source_path",
-    "source_url",
-    "trace_url",
 )
 _SPAN_VIEW_KEYS = (
     "id",
@@ -66,82 +61,51 @@ _SPAN_VIEW_KEYS = (
     "status_message",
     "input",
     "output",
-    "attributes",
-    "events",
-    "raw",
+    "usage",
 )
-_JSON_TRACE_RESERVED_KEYS = frozenset(
-    {
-        "attributes",
-        "end_time_unix_nano",
-        "ended_at_unix_nano",
-        "endTime",
-        "events",
-        "id",
-        "input",
-        "inputs",
-        "name",
-        "observations",
-        "output",
-        "outputs",
-        "spans",
-        "start_time_unix_nano",
-        "started_at_unix_nano",
-        "startTime",
-        "status",
-        "statusCode",
-        "status_code",
-        "status_message",
-        "timestamp",
-        "traceId",
-        "trace_id",
-        "type",
-    }
-)
-_JSON_SPAN_RESERVED_KEYS = frozenset(
-    {
-        "attributes",
-        "end_time_unix_nano",
-        "ended_at_unix_nano",
-        "endTime",
-        "events",
-        "id",
-        "instrumentation_scope",
-        "input",
-        "inputs",
-        "kind",
-        "links",
-        "name",
-        "observationId",
-        "output",
-        "outputs",
-        "parentSpanId",
-        "parent_id",
-        "parent_span_id",
-        "resource",
-        "resource_attributes",
-        "spanId",
-        "span_id",
-        "start_time_unix_nano",
-        "started_at_unix_nano",
-        "startTime",
-        "status",
-        "statusCode",
-        "status_code",
-        "status_message",
-        "traceId",
-        "trace_id",
-        "trace_state",
-        "type",
-        "tool_name",
-        "toolName",
-    }
+_USAGE_VIEW_KEYS = (
+    "model_provider",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_usd",
 )
 _JSON_SPAN_ROW_ONLY_KEYS = frozenset(
     {
         "parentSpanId",
         "parent_id",
         "parent_span_id",
+    }
+)
+_EVIDENCE_ATTRIBUTE_KEYS = frozenset(
+    {
+        "cost_usd",
+        "gen_ai.completion",
+        "gen_ai.prompt",
+        "gen_ai.request.model",
+        "gen_ai.response.model",
+        "gen_ai.system",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.total_tokens",
+        "input",
+        "kensa.case.input",
+        "kensa.cost_usd",
+        "kensa.final_output",
+        "kensa.llm.model",
+        "kensa.llm.provider",
+        "kensa.span.kind",
+        "kensa.tool.name",
+        "llm.model_name",
+        "llm.provider",
+        "model",
+        "model_provider",
+        "openinference.tool.name",
+        "output",
+        "tool.name",
     }
 )
 
@@ -226,28 +190,36 @@ class TraceSource:
     provider: str
     import_run_id: str
     imported_at: str
-    source_path: str | None
-    source_url: str | None
-    trace_url: str | None
-
-    def with_trace_url(self, trace_url: str | None) -> TraceSource:
-        return TraceSource(
-            provider=self.provider,
-            import_run_id=self.import_run_id,
-            imported_at=self.imported_at,
-            source_path=self.source_path,
-            source_url=self.source_url,
-            trace_url=safe_endpoint(str(trace_url)) if trace_url is not None else None,
-        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
             "import_run_id": self.import_run_id,
             "imported_at": self.imported_at,
-            "source_path": self.source_path,
-            "source_url": self.source_url,
-            "trace_url": self.trace_url,
+        }
+
+
+@dataclass(frozen=True)
+class UsageView:
+    model_provider: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cost_usd: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model_provider": self.model_provider,
+            "model": self.model,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cost_usd": self.cost_usd,
         }
 
 
@@ -266,9 +238,7 @@ class SpanView:
     status_message: str | None
     input: Any
     output: Any
-    attributes: dict[str, Any]
-    events: list[dict[str, Any]]
-    raw: Any
+    usage: UsageView
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -285,9 +255,7 @@ class SpanView:
             "status_message": self.status_message,
             "input": self.input,
             "output": self.output,
-            "attributes": self.attributes,
-            "events": self.events,
-            "raw": self.raw,
+            "usage": self.usage.to_dict(),
         }
 
 
@@ -302,10 +270,8 @@ class TraceView:
     status: Literal["ok", "error", "unknown"]
     input: Any
     output: Any
-    attributes: dict[str, Any]
     spans: list[SpanView]
-    raw: Any
-    schema_version: Literal["kensa.trace_view.v1"] = TRACE_VIEW_SCHEMA_VERSION
+    schema_version: Literal["kensa.trace_view.v2"] = TRACE_VIEW_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -319,9 +285,7 @@ class TraceView:
             "status": self.status,
             "input": self.input,
             "output": self.output,
-            "attributes": self.attributes,
             "spans": [span.to_dict() for span in self.spans],
-            "raw": self.raw,
         }
 
 
@@ -493,9 +457,6 @@ def _write_redacted_import(
         provider=provenance_provider,
         import_run_id=import_run_id,
         imported_at=imported_at,
-        source_path=None,
-        source_url=None,
-        trace_url=None,
     )
     trace_views = _import_trace_views(
         provider=parse_provider,
@@ -503,6 +464,7 @@ def _write_redacted_import(
         limit=limit,
         trace_source=trace_source,
     )
+    trace_views = _pseudonymize_trace_ids(trace_views)
     span_count = sum(len(trace.spans) for trace in trace_views)
     output = Path(out)
     results: list[RedactionResult] = [
@@ -755,7 +717,7 @@ def _group_json_span_rows(
     traces: list[TraceView] = []
     for trace_id, rows in grouped.items():
         spans = [_json_span_view(row, trace_id=trace_id) for row in rows]
-        traces.append(_trace_view_from_grouped_spans(trace_id, rows, spans, trace_source))
+        traces.append(_trace_view_from_grouped_spans(trace_id, spans, trace_source))
         if len(traces) >= limit:
             break
     return traces
@@ -776,24 +738,19 @@ def _json_record_trace_view(record: dict[str, Any], *, trace_source: TraceSource
     return TraceView(
         id=trace_id,
         name=_string_or_none(_first_value(record, "name", "traceName", "type")),
-        source=trace_source.with_trace_url(
-            _string_or_none(_first_value(record, "trace_url", "traceUrl", "url"))
-        ),
+        source=trace_source,
         started_at_unix_nano=started_at,
         ended_at_unix_nano=ended_at,
         duration_ms=_duration_ms(started_at, ended_at),
         status=_aggregate_status(explicit_status, spans),
         input=_first_value(record, "input", "inputs"),
         output=_first_value(record, "output", "outputs"),
-        attributes=_attributes_from_mapping(record, _JSON_TRACE_RESERVED_KEYS),
         spans=spans,
-        raw=record,
     )
 
 
 def _trace_view_from_grouped_spans(
     trace_id: str,
-    rows: list[dict[str, Any]],
     spans: list[SpanView],
     trace_source: TraceSource,
 ) -> TraceView:
@@ -809,15 +766,13 @@ def _trace_view_from_grouped_spans(
         status=_aggregate_status("unknown", spans),
         input=None,
         output=None,
-        attributes={},
         spans=spans,
-        raw=rows,
     )
 
 
 def _json_span_view(span: dict[str, Any], *, trace_id: str) -> SpanView:
     span_id = _required_span_id(span, trace_id=trace_id)
-    attrs = _attributes_from_mapping(span, _JSON_SPAN_RESERVED_KEYS)
+    attrs = _evidence_attributes(span)
     tool_name = _string_or_none(
         _first_value(span, "tool_name", "toolName")
         or _first_value(attrs, "kensa.tool.name", "tool.name", "openinference.tool.name")
@@ -842,9 +797,7 @@ def _json_span_view(span: dict[str, Any], *, trace_id: str) -> SpanView:
         status_message=_string_or_none(_first_value(span, "status_message", "status.message")),
         input=_first_value(span, "input", "inputs"),
         output=_first_value(span, "output", "outputs"),
-        attributes=attrs,
-        events=_dict_items(span.get("events", [])),
-        raw=span,
+        usage=_usage_from_mapping(span, attrs=attrs),
     )
 
 
@@ -854,37 +807,17 @@ def _import_otlp_trace_views(
     trace_source: TraceSource,
 ) -> list[TraceView]:
     resource_spans = data.get("resourceSpans", []) if isinstance(data, dict) else []
-    grouped: OrderedDict[str, list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]] = (
-        OrderedDict()
-    )
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for resource_span in _dict_items(resource_spans):
-        resource = _dict_or_empty(resource_span.get("resource"))
-        resource_attrs = _attributes(resource.get("attributes", []))
         for scope_span in _dict_items(resource_span.get("scopeSpans", [])):
-            scope = _dict_or_empty(scope_span.get("scope"))
-            scope_payload = {
-                "name": scope.get("name"),
-                "version": scope.get("version"),
-                "attributes": _attributes(scope.get("attributes", [])),
-            }
             for span in _dict_items(scope_span.get("spans", [])):
                 trace_id = _required_key(span, "traceId", label="OTLP span trace id")
-                grouped.setdefault(trace_id, []).append((span, resource_attrs, scope_payload))
+                grouped.setdefault(trace_id, []).append(span)
     traces: list[TraceView] = []
     for trace_id, span_rows in grouped.items():
-        spans = [
-            _otlp_span_view(span, trace_id, resource_attrs, scope)
-            for span, resource_attrs, scope in span_rows
-        ]
+        spans = [_otlp_span_view(span, trace_id) for span in span_rows]
         started_at = _min_span_start(spans)
         ended_at = _max_span_end(spans)
-        first_resource = span_rows[0][1] if span_rows else {}
-        first_scope = span_rows[0][2] if span_rows else {}
-        attrs: dict[str, Any] = {}
-        if first_resource:
-            attrs["resource_attributes"] = first_resource
-        if first_scope:
-            attrs["instrumentation_scope"] = first_scope
         traces.append(
             TraceView(
                 id=trace_id,
@@ -896,9 +829,7 @@ def _import_otlp_trace_views(
                 status=_aggregate_status("unknown", spans),
                 input=None,
                 output=None,
-                attributes=attrs,
                 spans=spans,
-                raw=[span for span, _resource_attrs, _scope in span_rows],
             )
         )
         if len(traces) >= limit:
@@ -909,17 +840,8 @@ def _import_otlp_trace_views(
 def _otlp_span_view(
     span: dict[str, Any],
     trace_id: str,
-    resource_attrs: dict[str, Any],
-    scope: dict[str, Any],
 ) -> SpanView:
-    attrs = _attributes(span.get("attributes", []))
-    if resource_attrs:
-        attrs["resource_attributes"] = resource_attrs
-    if scope:
-        attrs["instrumentation_scope"] = scope
-    links = _otlp_links(span.get("links", []))
-    if links:
-        attrs["links"] = links
+    attrs = _attributes(span.get("attributes", []), allowed_keys=_EVIDENCE_ATTRIBUTE_KEYS)
     status = _dict_or_empty(span.get("status"))
     started_at = _unix_nano_or_none(span.get("startTimeUnixNano"))
     ended_at = _unix_nano_or_none(span.get("endTimeUnixNano"))
@@ -936,11 +858,9 @@ def _otlp_span_view(
         duration_ms=_duration_ms(started_at, ended_at),
         status=_status_from_value(status.get("code")),
         status_message=_string_or_none(status.get("message")),
-        input=None,
-        output=None,
-        attributes=attrs,
-        events=_otlp_events(span.get("events", [])),
-        raw=span,
+        input=_first_value(attrs, "input", "gen_ai.prompt", "kensa.case.input"),
+        output=_first_value(attrs, "output", "gen_ai.completion", "kensa.final_output"),
+        usage=_usage_from_mapping(span, attrs=attrs),
     )
 
 
@@ -975,9 +895,7 @@ def _import_langfuse_trace_views(
             TraceView(
                 id=trace_id,
                 name=_string_or_none(_first_value(trace, "name", "traceName", "type")),
-                source=trace_source.with_trace_url(
-                    _string_or_none(_first_value(trace, "trace_url", "traceUrl", "url"))
-                ),
+                source=trace_source,
                 started_at_unix_nano=started_at,
                 ended_at_unix_nano=ended_at,
                 duration_ms=_duration_ms(started_at, ended_at),
@@ -987,9 +905,7 @@ def _import_langfuse_trace_views(
                 ),
                 input=_first_value(trace, "input"),
                 output=_first_value(trace, "output"),
-                attributes=_langfuse_attributes(trace),
                 spans=spans,
-                raw=trace,
             )
         )
         if len(views) >= limit:
@@ -1017,19 +933,15 @@ def _langfuse_observation_trace_views(
         views.append(
             TraceView(
                 id=trace_id,
-                name=_string_or_none(_first_value(first, "traceName", "trace_name")) or trace_id,
-                source=trace_source.with_trace_url(
-                    _string_or_none(_first_value(first, "trace_url", "traceUrl", "url"))
-                ),
+                name=_string_or_none(_first_value(first, "traceName", "trace_name")),
+                source=trace_source,
                 started_at_unix_nano=started_at,
                 ended_at_unix_nano=ended_at,
                 duration_ms=_duration_ms(started_at, ended_at),
                 status=_aggregate_status("unknown", spans),
                 input=None,
                 output=None,
-                attributes=_langfuse_observation_trace_attributes(first),
                 spans=spans,
-                raw=observations,
             )
         )
         if len(views) >= limit:
@@ -1044,7 +956,7 @@ def _langfuse_observation_span_view(
     observation_type = str(
         _first_value(observation, "type", "observationType", "observation_type") or "span"
     )
-    name = str(_first_value(observation, "name", "id") or observation_type)
+    name = str(_first_value(observation, "name") or observation_type)
     span_id = _required_span_id(observation, trace_id=trace_id)
     parent_id = _first_value(observation, "parentObservationId", "parent_observation_id")
     tool_name = (
@@ -1070,100 +982,11 @@ def _langfuse_observation_span_view(
         ),
         input=_first_value(observation, "input", "inputs"),
         output=_first_value(observation, "output", "outputs"),
-        attributes=_langfuse_attributes(observation),
-        events=_dict_items(observation.get("events", [])),
-        raw=observation,
+        usage=_usage_from_mapping(
+            observation,
+            attrs=_selected_mapping(observation.get("metadata"), _EVIDENCE_ATTRIBUTE_KEYS),
+        ),
     )
-
-
-_LANGFUSE_RESERVED_KEYS = frozenset(
-    {
-        "endTime",
-        "end_time",
-        "events",
-        "id",
-        "input",
-        "inputs",
-        "metadata",
-        "observations",
-        "observationId",
-        "observation_type",
-        "output",
-        "outputs",
-        "parentObservationId",
-        "parent_observation_id",
-        "sessionId",
-        "startTime",
-        "start_time",
-        "status",
-        "statusMessage",
-        "status_message",
-        "timestamp",
-        "traceId",
-        "traceName",
-        "traceSessionId",
-        "traceUserId",
-        "trace_id",
-        "trace_name",
-        "trace_session_id",
-        "trace_user_id",
-        "trace_url",
-        "traceUrl",
-        "url",
-        "userId",
-    }
-)
-
-
-def _langfuse_attributes(row: dict[str, Any]) -> dict[str, Any]:
-    attrs = _attributes_from_mapping(row, _LANGFUSE_RESERVED_KEYS)
-    for key in (
-        "user_id",
-        "userId",
-        "traceUserId",
-        "trace_user_id",
-        "session_id",
-        "sessionId",
-        "traceSessionId",
-        "trace_session_id",
-        "traceName",
-        "trace_name",
-        "release",
-        "version",
-        "environment",
-        "feedback",
-        "feedback_stats",
-        "scores",
-    ):
-        if key in row and row[key] is not None:
-            attrs[key] = row[key]
-    return attrs
-
-
-def _langfuse_observation_trace_attributes(row: dict[str, Any]) -> dict[str, Any]:
-    attrs: dict[str, Any] = {}
-    for key in (
-        "traceName",
-        "trace_name",
-        "traceUserId",
-        "trace_user_id",
-        "traceSessionId",
-        "trace_session_id",
-        "userId",
-        "user_id",
-        "sessionId",
-        "session_id",
-        "release",
-        "version",
-        "environment",
-        "tags",
-    ):
-        if key in row and row[key] is not None:
-            attrs[key] = row[key]
-    metadata = row.get("metadata")
-    if isinstance(metadata, dict):
-        attrs.update({str(key): value for key, value in metadata.items()})
-    return attrs
 
 
 def _observations_by_trace(value: Any) -> dict[str, list[dict[str, Any]]]:
@@ -1210,19 +1033,139 @@ def _required_key(row: dict[str, Any], key: str, *, label: str) -> str:
     return str(value)
 
 
-def _attributes_from_mapping(
-    row: dict[str, Any],
-    reserved_keys: frozenset[str],
-) -> dict[str, Any]:
-    attrs = _dict_or_empty(row.get("attributes"))
-    metadata = row.get("metadata")
-    if isinstance(metadata, dict):
-        attrs.update({str(key): value for key, value in metadata.items()})
-    for key, value in row.items():
-        if key in reserved_keys or key in {"attributes", "metadata"}:
-            continue
-        attrs[str(key)] = value
+def _evidence_attributes(row: dict[str, Any]) -> dict[str, Any]:
+    attrs = _selected_mapping(row.get("attributes"), _EVIDENCE_ATTRIBUTE_KEYS)
+    attrs.update(_selected_mapping(row.get("metadata"), _EVIDENCE_ATTRIBUTE_KEYS))
+    for key in _EVIDENCE_ATTRIBUTE_KEYS:
+        if key in row and row[key] is not None:
+            attrs[key] = row[key]
     return attrs
+
+
+def _selected_mapping(value: Any, allowed_keys: frozenset[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in allowed_keys if key in value and value[key] is not None}
+
+
+def _usage_from_mapping(row: dict[str, Any], *, attrs: dict[str, Any]) -> UsageView:
+    usage = _first_mapping(row, "usageDetails", "usage_details", "usage")
+    cost = _first_mapping(row, "costDetails", "cost_details")
+    input_tokens = _int_value(
+        _coalesce(
+            _first_value(
+                usage,
+                "input",
+                "input_tokens",
+                "inputTokens",
+                "prompt_tokens",
+                "promptTokens",
+            ),
+            _first_value(row, "inputUsage", "input_usage"),
+            _first_value(attrs, "gen_ai.usage.input_tokens"),
+        )
+    )
+    output_tokens = _int_value(
+        _coalesce(
+            _first_value(
+                usage,
+                "output",
+                "output_tokens",
+                "outputTokens",
+                "completion_tokens",
+                "completionTokens",
+            ),
+            _first_value(row, "outputUsage", "output_usage"),
+            _first_value(attrs, "gen_ai.usage.output_tokens"),
+        )
+    )
+    total_tokens = _int_value(
+        _coalesce(
+            _first_value(usage, "total", "total_tokens", "totalTokens"),
+            _first_value(row, "totalUsage", "total_usage"),
+            _first_value(attrs, "gen_ai.usage.total_tokens"),
+        )
+    )
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    return UsageView(
+        model_provider=_string_or_none(
+            _first_value(row, "modelProvider", "model_provider")
+            or _first_value(
+                attrs,
+                "model_provider",
+                "llm.provider",
+                "kensa.llm.provider",
+                "gen_ai.system",
+            )
+        ),
+        model=_string_or_none(
+            _first_value(row, "providedModelName", "model", "modelName", "model_name")
+            or _first_value(
+                attrs,
+                "model",
+                "gen_ai.response.model",
+                "gen_ai.request.model",
+                "llm.model_name",
+                "kensa.llm.model",
+            )
+        ),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cache_read_input_tokens=_int_value(
+            _first_value(
+                usage,
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "input_cached_tokens",
+                "inputCachedTokens",
+            )
+        ),
+        cache_creation_input_tokens=_int_value(
+            _first_value(
+                usage,
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "input_cache_creation_tokens",
+                "inputCacheCreationTokens",
+            )
+        ),
+        cost_usd=_float_value(
+            _coalesce(
+                _first_value(cost, "total", "total_cost", "totalCost"),
+                _first_value(row, "totalCost", "total_cost", "calculatedTotalCost"),
+                _first_value(attrs, "kensa.cost_usd", "cost_usd"),
+            )
+        ),
+    )
+
+
+def _first_mapping(row: dict[str, Any], *keys: str) -> dict[str, Any]:
+    value = _first_value(row, *keys)
+    return _dict_or_empty(value)
+
+
+def _coalesce(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
+
+
+def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
+    projected: list[TraceView] = []
+    for trace_index, trace in enumerate(traces, start=1):
+        trace_alias = f"trace_{trace_index}"
+        span_aliases = {span.id: f"span_{index}" for index, span in enumerate(trace.spans, start=1)}
+        spans = [
+            replace(
+                span,
+                id=span_aliases[span.id],
+                trace_id=trace_alias,
+                parent_id=span_aliases.get(span.parent_id) if span.parent_id is not None else None,
+            )
+            for span in trace.spans
+        ]
+        projected.append(replace(trace, id=trace_alias, spans=spans))
+    return projected
 
 
 def _started_at_unix_nano(row: dict[str, Any]) -> int | None:
@@ -1357,12 +1300,19 @@ def _status_from_value(value: Any) -> Literal["ok", "error", "unknown"]:
     return "unknown"
 
 
-def _attributes(value: Any) -> dict[str, Any]:
+def _attributes(
+    value: Any,
+    *,
+    allowed_keys: frozenset[str] | None = None,
+) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
     for item in _dict_items(value):
         key = item.get("key")
-        if key is not None:
-            attrs[str(key)] = _otlp_value(item.get("value"))
+        if key is None:
+            continue
+        text_key = str(key)
+        if allowed_keys is None or text_key in allowed_keys:
+            attrs[text_key] = _otlp_value(item.get("value"))
     return attrs
 
 
@@ -1378,29 +1328,6 @@ def _otlp_value(value: Any) -> Any:
     if "kvlistValue" in value:
         return _attributes(value["kvlistValue"].get("values", []))
     return value
-
-
-def _otlp_events(value: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": event.get("name"),
-            "time_unix_nano": _int_or_none(event.get("timeUnixNano")),
-            "attributes": _attributes(event.get("attributes", [])),
-        }
-        for event in _dict_items(value)
-    ]
-
-
-def _otlp_links(value: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "trace_id": link.get("traceId"),
-            "span_id": link.get("spanId"),
-            "trace_state": link.get("traceState"),
-            "attributes": _attributes(link.get("attributes", [])),
-        }
-        for link in _dict_items(value)
-    ]
 
 
 def _read_import_manifest(artifact: Path) -> dict[str, Any] | None:
@@ -1494,7 +1421,6 @@ def trace_view_summary(trace: dict[str, Any]) -> dict[str, Any]:
         "span_count": len(trace["spans"]),
         "source": {
             "provider": source["provider"],
-            "trace_url": source["trace_url"],
         },
     }
 
@@ -1512,6 +1438,9 @@ def _validate_trace_view_row(row: dict[str, Any], *, path: Path, line_number: in
         raise ValueError(_reimport_trace_message(path))
     for span in spans:
         if not isinstance(span, dict) or set(span) != set(_SPAN_VIEW_KEYS):
+            raise ValueError(_reimport_trace_message(path))
+        usage = span.get("usage")
+        if not isinstance(usage, dict) or set(usage) != set(_USAGE_VIEW_KEYS):
             raise ValueError(_reimport_trace_message(path))
     if not isinstance(row.get("id"), str) or not row["id"]:
         raise ValueError(f"TraceView row {line_number} in {path} is missing id")
@@ -1542,6 +1471,21 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    return _int_or_none(value)
+
+
+def _float_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "TRACE_MANIFEST_SCHEMA_VERSION",
     "TRACE_VIEW_SCHEMA_VERSION",
@@ -1550,6 +1494,7 @@ __all__ = [
     "TraceManifest",
     "TraceSource",
     "TraceView",
+    "UsageView",
     "import_redaction_manifest",
     "import_trace_records",
     "import_trace_source",

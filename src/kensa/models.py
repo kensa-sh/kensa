@@ -67,7 +67,7 @@ class KensaHarnessSettings(KensaModel):
 class KensaRedactionSettings(KensaModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model: Literal["en_core_web_sm"]
+    model: Literal["en_core_web_sm", "en_core_web_lg"]
     model_version: str
     checksum_verified: bool
 

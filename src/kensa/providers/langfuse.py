@@ -21,7 +21,7 @@ _SDK_MAX_RETRIES = 3
 _TRACE_PAGE_LIMIT = 100
 _OBSERVATION_PAGE_LIMIT = 1000
 _OBSERVATIONS_V2_DISCOVERY_FIELDS = "core"
-_OBSERVATIONS_V2_FIELDS = "core,basic,time,io,metadata,model,usage,metrics,trace_context"
+_OBSERVATIONS_V2_FIELDS = "core,basic,io,model,usage,trace_context"
 _SINCE_WINDOW = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
 _RESPONSE_HINT_MAX_CHARS = 300
 
