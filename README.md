@@ -226,12 +226,9 @@ optional.
 <details>
 <summary>How does Kensa handle PII in traces?</summary>
 
-Every `kensa import` projects provider payloads into a minimal allowlisted TraceView, then scans
-retained input and output with detect-secrets, Presidio, spaCy NER, and Kensa's own recognizers.
-It rewrites PII and secrets as typed placeholders like
-`[PERSON_1]` before anything is stored. Redaction fails closed: if the dependencies
-or the pinned model are missing, trace import and payload exposure stay blocked
-until `kensa init` sets them up.
+Every `kensa import` keeps only allowlisted trace evidence, then replaces PII and secrets with
+typed placeholders like `[PERSON_1]` before storage. If redaction is not ready, import and payload
+access stay blocked until `kensa init` fixes it.
 
 </details>
 

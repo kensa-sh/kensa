@@ -233,7 +233,7 @@ def _fetch_legacy_trace_export(
     observations: list[dict[str, Any]] = []
     for trace in traces:
         observations.extend(
-            _fetch_observation_rows(
+            _fetch_legacy_observation_rows(
                 client=client,
                 endpoint=endpoint,
                 trace_id=_langfuse_trace_id(trace),
@@ -278,6 +278,37 @@ def _fetch_trace_rows(
             break
         page += 1
     return rows[:limit], meta
+
+
+def _fetch_legacy_observation_rows(
+    *,
+    client: Langfuse,
+    endpoint: str,
+    trace_id: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        current_page = page
+        payload = _langfuse_response_envelope(
+            _call_sdk(
+                lambda current_page=current_page: client.api.legacy.observations_v1.get_many(
+                    page=current_page,
+                    limit=_OBSERVATION_PAGE_LIMIT,
+                    trace_id=trace_id,
+                    request_options=_request_options(),
+                ),
+                label="observations",
+                endpoint=endpoint,
+            ),
+            label="observations",
+        )
+        page_rows = payload["data"]
+        rows.extend(page_rows)
+        if not page_rows or _trace_page_is_last(payload["meta"], page):
+            break
+        page += 1
+    return rows
 
 
 def _fetch_observations_v2_export(
