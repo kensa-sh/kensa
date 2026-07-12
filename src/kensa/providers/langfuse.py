@@ -20,6 +20,7 @@ _CLIENT_TIMEOUT_SECONDS = 30
 _SDK_MAX_RETRIES = 3
 _TRACE_PAGE_LIMIT = 100
 _OBSERVATION_PAGE_LIMIT = 1000
+_LEGACY_TRACE_FIELDS = "core,io"
 _OBSERVATIONS_V2_DISCOVERY_FIELDS = "core"
 _OBSERVATIONS_V2_FIELDS = "core,basic,io,model,usage,trace_context"
 _SINCE_WINDOW = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
@@ -261,6 +262,7 @@ def _fetch_trace_rows(
                 lambda current_page=current_page: client.api.trace.list(
                     page=current_page,
                     limit=page_limit,
+                    fields=_LEGACY_TRACE_FIELDS,
                     from_timestamp=since_filter.parsed,
                     request_options=_request_options(_legacy_since_query(since_filter)),
                 ),

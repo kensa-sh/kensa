@@ -173,6 +173,7 @@ def test_legacy_traces_uses_sdk_pagination_and_returns_existing_shape(
     }
     assert fake.api.trace.calls[0]["page"] == 1
     assert fake.api.trace.calls[0]["limit"] == 2
+    assert fake.api.trace.calls[0]["fields"] == "core,io"
     assert fake.api.trace.calls[0]["from_timestamp"] == datetime(2026, 6, 1, tzinfo=UTC)
     assert fake.api.trace.calls[1]["page"] == 2
     assert fake.api.observations.calls == [

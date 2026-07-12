@@ -289,6 +289,37 @@ def test_import_json_records_spans_without_synthetic_semantics(
     assert span["usage"]["cost_usd"] == 0.002
 
 
+def test_import_rejects_duplicate_span_ids(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "duplicate-spans.json"
+    source.write_text(
+        json.dumps(
+            {
+                "id": "trace-provider-id",
+                "spans": [
+                    {"span_id": "duplicate", "name": "first"},
+                    {"span_id": "duplicate", "name": "second"},
+                ],
+            }
+        )
+    )
+    out = tmp_path / "imports" / "duplicate-spans.jsonl"
+
+    with pytest.raises(ValueError, match="trace contains duplicate span ids"):
+        import_trace_source(
+            provider="json",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
+        )
+
+    assert not out.exists()
+    assert not out.with_suffix(".manifest.json").exists()
+
+
 def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,

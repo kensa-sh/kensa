@@ -1154,6 +1154,7 @@ def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
     projected: list[TraceView] = []
     for trace_index, trace in enumerate(traces, start=1):
         trace_alias = f"trace_{trace_index}"
+        _ensure_unique_span_ids(trace.spans)
         span_aliases = {span.id: f"span_{index}" for index, span in enumerate(trace.spans, start=1)}
         spans = [
             replace(
@@ -1166,6 +1167,12 @@ def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
         ]
         projected.append(replace(trace, id=trace_alias, spans=spans))
     return projected
+
+
+def _ensure_unique_span_ids(spans: list[SpanView]) -> None:
+    span_ids = [span.id for span in spans]
+    if len(span_ids) != len(set(span_ids)):
+        raise ValueError("trace contains duplicate span ids")
 
 
 def _started_at_unix_nano(row: dict[str, Any]) -> int | None:
