@@ -73,6 +73,7 @@ AgentInstructionChoice = Literal[
     "all",
 ]
 LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
+RedactionModelChoice = Literal["small", "large"]
 _AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other")
 _AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES, "all")
 _INTERACTIVE_CHOICE_LABELS = {
@@ -547,9 +548,16 @@ def import_command(
     default=None,
     help="Persist the selected trace source.",
 )
+@click.option(
+    "--redaction-model",
+    type=click.Choice(["small", "large"], case_sensitive=False),
+    default=None,
+    help="Pinned spaCy model used for mandatory redaction.",
+)
 def init(
     agent_choice: str | None,
     trace_source: str | None,
+    redaction_model: str | None,
 ) -> None:
     """Set up Kensa."""
     selected_agent = cast(
@@ -557,7 +565,11 @@ def init(
         agent_choice.lower() if agent_choice else None,
     )
     selected_source = cast(EvidenceSource | None, trace_source.lower() if trace_source else None)
-    code = _cmd_init(selected_source, selected_agent)
+    selected_model = cast(
+        RedactionModelChoice | None,
+        redaction_model.lower() if redaction_model else None,
+    )
+    code = _cmd_init(selected_source, selected_agent, redaction_model=selected_model)
     raise click.exceptions.Exit(code)
 
 
@@ -1574,6 +1586,8 @@ def _record_harness_readiness(*, ready: bool, warnings: list[str]) -> bool:
 def _cmd_init(
     evidence_source: EvidenceSource | None = None,
     agent_choice: AgentInstructionChoice | None = None,
+    *,
+    redaction_model: RedactionModelChoice | None = None,
 ) -> int:
     steps = _Steps() if _is_interactive() else None
     if steps is None:
@@ -1581,7 +1595,12 @@ def _cmd_init(
     else:
         steps.start("kensa init")
     try:
-        return _cmd_init_inner(steps, evidence_source, agent_choice)
+        return _cmd_init_inner(
+            steps,
+            evidence_source,
+            agent_choice,
+            redaction_model=redaction_model,
+        )
     except KeyboardInterrupt:
         _init_item(steps, "interrupted.", ok=False, err=True)
         if steps is not None:
@@ -1593,6 +1612,8 @@ def _cmd_init_inner(
     steps: _Steps | None,
     explicit_evidence_source: EvidenceSource | None = None,
     explicit_agent_choice: AgentInstructionChoice | None = None,
+    *,
+    redaction_model: RedactionModelChoice | None = None,
 ) -> int:
     settings = _read_settings()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
@@ -1603,7 +1624,15 @@ def _cmd_init_inner(
     )
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
     added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
-    redaction_status = _configure_redaction_readiness(steps, evidence_source)
+    redaction_source = evidence_source
+    if redaction_model is not None and redaction_source is None:
+        redaction_source = settings.init.evidence_source
+    redaction_status = _configure_redaction_readiness(
+        steps,
+        redaction_source,
+        model=redaction_model or _configured_redaction_model(settings),
+        required=redaction_model is not None,
+    )
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
     for notice in notices:
@@ -1617,6 +1646,12 @@ def _cmd_init_inner(
     if steps is not None:
         steps.end("Setup files ready" if not failed else "[red]Setup incomplete[/red]")
     return 1 if failed else 0
+
+
+def _configured_redaction_model(settings: KensaSettings) -> RedactionModelChoice:
+    if settings.redaction is not None and settings.redaction.model == "en_core_web_lg":
+        return "large"
+    return "small"
 
 
 def _redaction_init_failed(
@@ -1676,14 +1711,17 @@ def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
 def _configure_redaction_readiness(
     steps: _Steps | None,
     evidence_source: EvidenceSource | None,
+    *,
+    model: RedactionModelChoice = "small",
+    required: bool = False,
 ) -> _RedactionInitStatus:
-    if evidence_source is None:
+    if evidence_source is None and not required:
         return "skipped"
     if not _ensure_redaction_dependencies(steps):
         return "failed"
     try:
         with cli_output.wait_status("Preparing redaction model"):
-            redact.ensure_redaction_ready()
+            redact.ensure_redaction_ready(model=model)
     except redact.RedactionError as exc:
         _init_item(steps, f"redaction model bootstrap failed: {exc}", ok=False, err=True)
         return "failed"

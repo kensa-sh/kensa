@@ -240,16 +240,13 @@ def _write_latest_import_pointer(tmp_path: Path, artifact: Path) -> None:
 
 def _trace_view_row(trace_id: str, *, status: str = "ok", span_count: int = 0) -> dict[str, Any]:
     return {
-        "schema_version": "kensa.trace_view.v1",
+        "schema_version": "kensa.trace_view.v2",
         "id": trace_id,
         "name": trace_id,
         "source": {
             "provider": "jsonl",
             "import_run_id": "import-test",
             "imported_at": "2026-06-24T00:00:00Z",
-            "source_path": "traces.jsonl",
-            "source_url": None,
-            "trace_url": None,
         },
         "started_at_unix_nano": None,
         "ended_at_unix_nano": None,
@@ -257,7 +254,6 @@ def _trace_view_row(trace_id: str, *, status: str = "ok", span_count: int = 0) -
         "status": status,
         "input": None,
         "output": None,
-        "attributes": {},
         "spans": [
             {
                 "id": f"{trace_id}-span-{index}",
@@ -273,13 +269,19 @@ def _trace_view_row(trace_id: str, *, status: str = "ok", span_count: int = 0) -
                 "status_message": None,
                 "input": None,
                 "output": None,
-                "attributes": {},
-                "events": [],
-                "raw": None,
+                "usage": {
+                    "model_provider": None,
+                    "model": None,
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "total_tokens": None,
+                    "cache_read_input_tokens": None,
+                    "cache_creation_input_tokens": None,
+                    "cost_usd": None,
+                },
             }
             for index in range(span_count)
         ],
-        "raw": None,
     }
 
 
@@ -1396,7 +1398,7 @@ def test_top_level_import_writes_timestamped_artifact_manifest_and_latest(
     assert latest_payload["manifest_path"] == str(manifest.relative_to(tmp_path))
     assert latest_payload["timestamp"] == 1792820123
     assert "tr_1" not in latest.read_text()
-    assert json.loads(artifact.read_text())["id"] == "tr_1"
+    assert json.loads(artifact.read_text())["id"].startswith("trace_")
     assert json.loads(manifest.read_text())["provider"] == "jsonl"
 
 
@@ -2052,7 +2054,9 @@ def test_new_cli_helper_edge_paths(
     assert "No such file" in capsys.readouterr().err
 
     secret_source = tmp_path / "secret.jsonl"
-    secret_source.write_text(json.dumps({"id": "tr_secret", "api_key": "secret"}) + "\n")
+    secret_source.write_text(
+        json.dumps({"id": "tr_secret", "api_key": "secret", "input": "Alice"}) + "\n"
+    )
     monkeypatch.setattr(cli, "_unix_timestamp", lambda: 1792820999)
     assert (
         cli._cmd_import(
@@ -2068,7 +2072,11 @@ def test_new_cli_helper_edge_paths(
         )
         == 0
     )
-    assert "secret-like fields were redacted" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "secret-like fields were redacted" not in output
+    assert "mandatory value redaction changed" in output
+    artifact = tmp_path / ".kensa" / "traces" / "imports" / "jsonl-1792820999.jsonl"
+    assert "secret" not in artifact.read_text()
 
     with pytest.raises(ValueError, match="No missing connection"):
         cli._load_connection("missing")
@@ -2443,9 +2451,29 @@ def test_init_agent_all_flag_scaffolds_all_agent_instructions(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    redaction_models: list[str] = []
 
-    assert main(["init", "--agent", "all", "--trace-source", "local"]) == 0
+    def configure_redaction(steps, source, *, model="small", required=False):
+        redaction_models.append(model)
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert (
+        main(
+            [
+                "init",
+                "--agent",
+                "all",
+                "--trace-source",
+                "local",
+                "--redaction-model",
+                "large",
+            ]
+        )
+        == 0
+    )
+    assert redaction_models == ["large"]
 
     output = capsys.readouterr().out
     assert "✓ .agents/skills/kensa-evals/ (1 file)" in output
@@ -2912,7 +2940,9 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
+    )
     keys = iter(["\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -2960,7 +2990,9 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: "/bin/codex")
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
+    )
     keys = iter(["j", "j", "j", "\r", "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -2983,7 +3015,9 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
+    )
     keys = iter(["x", "\r", "\r"])
     console = Console(record=True, highlight=False)
     monkeypatch.setattr(cli_output, "CONSOLE", console)
@@ -3022,7 +3056,9 @@ def test_init_explicit_auto_agent_summary_uses_resolved_agent(
         lambda command: "/bin/codex" if command == "codex" else None,
     )
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
+    )
     keys = iter(["\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -4029,7 +4065,7 @@ def test_init_interactive_interrupt_uses_step_exit(
     monkeypatch.setattr(
         cli,
         "_cmd_init_inner",
-        lambda steps, evidence_source=None, agent_choice=None: (_ for _ in ()).throw(
+        lambda steps, evidence_source=None, agent_choice=None, **kwargs: (_ for _ in ()).throw(
             KeyboardInterrupt
         ),
     )
@@ -4142,7 +4178,9 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
         lambda command: "/bin/codex" if command == "codex" else None,
     )
     monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
-    monkeypatch.setattr(cli, "_configure_redaction_readiness", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
+    )
     keys = iter(["\r", *(["j"] * source_index), "\r"])
     monkeypatch.setattr(cli.click, "getchar", lambda **kwargs: next(keys))
 
@@ -4365,10 +4403,7 @@ def test_local_trace_commands_support_json_output(tmp_path: Path, capsys) -> Non
         "span_count",
         "source",
     }
-    assert payload["data"]["traces"][0]["source"] == {
-        "provider": "jsonl",
-        "trace_url": None,
-    }
+    assert payload["data"]["traces"][0]["source"] == {"provider": "jsonl"}
 
     assert (
         cli_traces.cmd_traces(
@@ -4712,7 +4747,7 @@ def test_configure_redaction_readiness_statuses(
 
     monkeypatch.setattr(cli, "_ensure_redaction_dependencies", lambda steps: True)
 
-    def failing_bootstrap(root=None):
+    def failing_bootstrap(root=None, *, model="small"):
         raise cli.redact.RedactionBootstrapError("no model")
 
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", failing_bootstrap)
@@ -4728,14 +4763,112 @@ def test_configure_redaction_readiness_statuses(
         model_version="3.8.0",
         checksum_verified=True,
     )
-    monkeypatch.setattr(cli.redact, "ensure_redaction_ready", lambda root=None: readiness)
-    assert cli._configure_redaction_readiness(steps, "trace_export") == "ready"
+    selected_models: list[str] = []
+
+    def ready_bootstrap(root=None, *, model="small"):
+        selected_models.append(model)
+        return readiness
+
+    monkeypatch.setattr(cli.redact, "ensure_redaction_ready", ready_bootstrap)
+    assert cli._configure_redaction_readiness(steps, "trace_export", model="large") == "ready"
+    assert cli._configure_redaction_readiness(None, None, model="large", required=True) == "ready"
+    assert selected_models == ["large", "large"]
     output = capsys.readouterr().out
     assert "Configure sensitive data protection" not in output
     assert "traces will be auto redacted during import" not in output
     assert "redaction dependencies present" not in output
     assert "redaction model ready" not in output
     assert "readiness recorded" not in output
+
+
+def test_init_accepts_large_redaction_model_flag(monkeypatch) -> None:
+    calls: list[tuple[Any, Any, str | None]] = []
+
+    def fake_init(evidence_source=None, agent_choice=None, *, redaction_model=None):
+        calls.append((evidence_source, agent_choice, redaction_model))
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_init", fake_init)
+
+    assert cli.main(["init", "--redaction-model", "large"]) == 0
+    assert calls == [(None, None, "large")]
+
+
+def test_init_large_redaction_model_uses_persisted_evidence_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".kensa").mkdir()
+    (tmp_path / ".kensa" / "settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "init": {"evidence_source": "local"},
+            }
+        )
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str, bool]] = []
+
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--redaction-model", "large"]) == 0
+    assert calls == [("local", "large", True)]
+
+
+def test_init_large_redaction_model_requires_setup_without_evidence_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str, bool]] = []
+
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--redaction-model", "large"]) == 0
+    assert calls == [(None, "large", True)]
+
+
+def test_init_trace_source_rerun_preserves_configured_large_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".kensa").mkdir()
+    (tmp_path / ".kensa" / "settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "init": {"evidence_source": "local"},
+                "redaction": {
+                    "model": "en_core_web_lg",
+                    "model_version": "3.8.0",
+                    "checksum_verified": True,
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str, bool]] = []
+
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--trace-source", "local"]) == 0
+    assert calls == [("local", "large", False)]
 
 
 def test_redaction_init_failure_statuses() -> None:

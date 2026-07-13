@@ -99,16 +99,13 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
     source.write_text(
         json.dumps(
             {
-                "schema_version": "kensa.trace_view.v1",
+                "schema_version": "kensa.trace_view.v2",
                 "id": "tr_1",
                 "name": "lookup_customer",
                 "source": {
                     "provider": "local-jsonl",
                     "import_run_id": "import",
                     "imported_at": "2026-06-30T00:00:00Z",
-                    "source_path": "spans.jsonl",
-                    "source_url": None,
-                    "trace_url": None,
                 },
                 "started_at_unix_nano": None,
                 "ended_at_unix_nano": None,
@@ -116,7 +113,6 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
                 "status": "ok",
                 "input": None,
                 "output": None,
-                "attributes": {},
                 "spans": [
                     {
                         "id": "sp_1",
@@ -132,12 +128,18 @@ def test_trace_cli_samples_exported_otel_span_file(tmp_path: Path, capsys) -> No
                         "status_message": None,
                         "input": None,
                         "output": None,
-                        "attributes": {"kensa.tool.name": "lookup_customer"},
-                        "events": [],
-                        "raw": None,
+                        "usage": {
+                            "model_provider": None,
+                            "model": None,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            "total_tokens": None,
+                            "cache_read_input_tokens": None,
+                            "cache_creation_input_tokens": None,
+                            "cost_usd": None,
+                        },
                     }
                 ],
-                "raw": None,
             }
         )
         + "\n"

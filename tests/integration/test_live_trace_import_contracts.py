@@ -25,17 +25,12 @@ TRACE_VIEW_KEYS = {
     "status",
     "input",
     "output",
-    "attributes",
     "spans",
-    "raw",
 }
 TRACE_SOURCE_KEYS = {
     "provider",
     "import_run_id",
     "imported_at",
-    "source_path",
-    "source_url",
-    "trace_url",
 }
 SPAN_VIEW_KEYS = {
     "id",
@@ -51,9 +46,17 @@ SPAN_VIEW_KEYS = {
     "status_message",
     "input",
     "output",
-    "attributes",
-    "events",
-    "raw",
+    "usage",
+}
+USAGE_VIEW_KEYS = {
+    "model_provider",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_usd",
 }
 
 
@@ -89,6 +92,7 @@ def _assert_trace_view_shape(trace: dict[str, Any]) -> None:
     assert set(trace["source"]) == TRACE_SOURCE_KEYS
     for span in trace["spans"]:
         assert set(span) == SPAN_VIEW_KEYS
+        assert set(span["usage"]) == USAGE_VIEW_KEYS
 
 
 def _assert_non_empty_data(payload: dict[str, Any], *, provider: str) -> None:

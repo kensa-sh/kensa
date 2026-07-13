@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from re import Match
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from pydantic import ValidationError
@@ -166,6 +166,19 @@ DEFAULT_SPACY_MODEL = SpacyModelSpec(
     ),
     sha256="1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
 )
+LARGE_SPACY_MODEL = SpacyModelSpec(
+    name="en_core_web_lg",
+    version="3.8.0",
+    url=(
+        "https://github.com/explosion/spacy-models/releases/download/"
+        "en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+    ),
+    sha256="293e9547a655b25499198ab15a525b05b9407a75f10255e405e8c3854329ab63",
+)
+_SPACY_MODELS = {
+    "small": DEFAULT_SPACY_MODEL,
+    "large": LARGE_SPACY_MODEL,
+}
 
 # Recall-favoring detection thresholds. Constants by design; not user-configurable.
 _SCORE_SECRET = 1.0
@@ -194,7 +207,13 @@ _TIMING_PATH_ALLOWLIST = frozenset(
         ("ended_at_unix_nano",),
         ("spans", "[]", "duration_ms"),
         ("spans", "[]", "ended_at_unix_nano"),
+        ("spans", "[]", "usage", "cache_creation_input_tokens"),
+        ("spans", "[]", "usage", "cache_read_input_tokens"),
+        ("spans", "[]", "usage", "cost_usd"),
+        ("spans", "[]", "usage", "input_tokens"),
+        ("spans", "[]", "usage", "output_tokens"),
         ("spans", "[]", "started_at_unix_nano"),
+        ("spans", "[]", "usage", "total_tokens"),
         ("started_at_unix_nano",),
     }
 )
@@ -202,10 +221,14 @@ _TIMING_PATH_ALLOWLIST = frozenset(
 # URLs retain useful structure but have every path segment redacted.
 _PROVENANCE_PATHS = frozenset(
     {
+        ("id",),
         ("schema_version",),
         ("source", "import_run_id"),
         ("source", "imported_at"),
         ("source", "provider"),
+        ("spans", "[]", "id"),
+        ("spans", "[]", "parent_id"),
+        ("spans", "[]", "trace_id"),
     }
 )
 _PROVENANCE_LOCATOR_PATHS = frozenset(
@@ -218,6 +241,7 @@ _PROVENANCE_LOCATOR_PATHS = frozenset(
 # Dict keys may only be rewritten inside free-form payload containers, never where the
 # key is part of the TraceView/SpanView schema.
 _FREEFORM_CONTAINERS = frozenset({"attributes", "raw", "input", "output", "events", "metadata"})
+_TYPED_USAGE_PATH = ("spans", "[]", "usage")
 
 _PRESIDIO_RECOGNIZER_NAMES = (
     "AuAbnRecognizer",
@@ -717,7 +741,7 @@ _RULESET = {
     "secret_key_pattern": _SECRET_KEY.pattern,
     "spacy_entity_mapping": _SPACY_ENTITY_MAPPING,
     "spacy_labels_to_ignore": list(_SPACY_LABELS_TO_IGNORE),
-    "spacy_model": DEFAULT_SPACY_MODEL.label,
+    "spacy_models": [spec.label for spec in _SPACY_MODELS.values()],
     "thresholds": {
         "context": _SCORE_CONTEXT,
         "parser": _SCORE_PARSER,
@@ -1016,7 +1040,7 @@ class Redactor:
                 rendered=rendered_key,
                 existing=redacted,
             )
-            if _SECRET_KEY.search(text_key):
+            if path != _TYPED_USAGE_PATH and _SECRET_KEY.search(text_key):
                 self._secret_keys_redacted = True
                 self._span_count += 1
                 self._changed_value_count += 1
@@ -1289,8 +1313,8 @@ def _manifest_problem(manifest: Any) -> str | None:
     if not isinstance(model, dict):
         return "trace artifact redaction manifest has no model metadata"
     model_tuple = (model.get("name"), model.get("version"))
-    pinned_model = (DEFAULT_SPACY_MODEL.name, DEFAULT_SPACY_MODEL.version)
-    if model_tuple != pinned_model:
+    pinned_models = {(spec.name, spec.version) for spec in _SPACY_MODELS.values()}
+    if model_tuple not in pinned_models:
         return "trace artifact redaction manifest records corrupt model metadata"
     if model.get("checksum_verified") is not True:
         return "trace artifact redaction manifest records an unverified model"
@@ -1343,11 +1367,9 @@ def read_redaction_readiness(root: Path | str | None = None) -> RedactionReadine
 
 
 def _pinned_model_spec(readiness: RedactionReadiness) -> SpacyModelSpec:
-    if (
-        readiness.model == DEFAULT_SPACY_MODEL.name
-        and readiness.model_version == DEFAULT_SPACY_MODEL.version
-    ):
-        return DEFAULT_SPACY_MODEL
+    for spec in _SPACY_MODELS.values():
+        if readiness.model == spec.name and readiness.model_version == spec.version:
+            return spec
     raise RedactionNotReadyError(
         "redaction readiness names an unpinned spaCy model "
         f"({readiness.model}-{readiness.model_version}). Re-run kensa init."
@@ -1504,7 +1526,11 @@ def _prepare_model(spec: SpacyModelSpec) -> Path:
             wheel_path.unlink(missing_ok=True)
 
 
-def ensure_redaction_ready(root: Path | str | None = None) -> RedactionReadiness:
+def ensure_redaction_ready(
+    root: Path | str | None = None,
+    *,
+    model: Literal["small", "large"] = "small",
+) -> RedactionReadiness:
     """Prepare the pinned model and record readiness in `.kensa/settings.json`."""
 
     missing = missing_redaction_dependencies()
@@ -1514,7 +1540,7 @@ def ensure_redaction_ready(root: Path | str | None = None) -> RedactionReadiness
             + ", ".join(missing)
             + ". Install kensa[redaction] first."
         )
-    spec = DEFAULT_SPACY_MODEL
+    spec = _SPACY_MODELS[model]
     _prepare_model(spec)
     readiness = RedactionReadiness(
         model=spec.name,
@@ -1545,6 +1571,7 @@ __all__ = [
     "DEFAULT_SPACY_MODEL",
     "FUTURE_ENTITIES",
     "LANGUAGE",
+    "LARGE_SPACY_MODEL",
     "PSEUDONYMIZATION_SCHEME",
     "REDACTED_PLACEHOLDER",
     "REDACTION_EXTRA_MODULES",

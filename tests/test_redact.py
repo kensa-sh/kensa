@@ -647,7 +647,7 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     redaction_ready.secret_markers = ["sk-live-value"]
     redactor = Redactor()
     trace = {
-        "schema_version": "kensa.trace_view.v1",
+        "schema_version": "kensa.trace_view.v2",
         "source": {
             "provider": "langfuse",
             "import_run_id": "import-2026-07-10T00-00-00Z",
@@ -661,7 +661,7 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
         "input": "https://collector.example.com/v1",
     }
     redacted = redactor.redact_value(trace)
-    assert redacted["schema_version"] == "kensa.trace_view.v1"
+    assert redacted["schema_version"] == "kensa.trace_view.v2"
     assert redacted["source"]["provider"] == "langfuse"
     assert redacted["source"]["import_run_id"] == "import-2026-07-10T00-00-00Z"
     assert redacted["source"]["imported_at"] == "2026-07-10T00:00:00Z"
@@ -679,6 +679,39 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     assert invalid_port["source"]["source_url"] == (
         "https://collector.example.com/[EMAIL_ADDRESS_1]"
     )
+
+
+def test_redactor_preserves_generated_pseudonym_ids(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    aliases = {
+        "trace": "trace_1234567890abcdef12345678",
+        "span": "span_1234567890abcdef12345678",
+        "parent": "span_abcdef1234567890abcdef12",
+    }
+    redaction_ready.secret_markers = list(aliases.values())
+
+    redacted = Redactor().redact_value(
+        {
+            "id": aliases["trace"],
+            "spans": [
+                {
+                    "id": aliases["span"],
+                    "trace_id": aliases["trace"],
+                    "parent_id": aliases["parent"],
+                }
+            ],
+            "input": aliases["trace"],
+        }
+    )
+
+    assert redacted["id"] == aliases["trace"]
+    assert redacted["spans"][0] == {
+        "id": aliases["span"],
+        "trace_id": aliases["trace"],
+        "parent_id": aliases["parent"],
+    }
+    assert redacted["input"] == "[SECRET_1]"
 
 
 def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
@@ -902,6 +935,13 @@ def test_redactor_phone_detection_via_engine(
 def test_safe_manifest_accepts_safe_v2() -> None:
     assert safe_manifest(_safe_manifest_dict()) is True
     assert_safe_manifest(_safe_manifest_dict())
+    large_model = {
+        "name": redact.LARGE_SPACY_MODEL.name,
+        "version": redact.LARGE_SPACY_MODEL.version,
+        "checksum_verified": True,
+    }
+    assert safe_manifest(_safe_manifest_dict(model=large_model)) is True
+    assert_safe_manifest(_safe_manifest_dict(model=large_model))
 
 
 @pytest.mark.parametrize(
@@ -1253,6 +1293,26 @@ def test_ensure_redaction_ready_prepares_default_model(
         "model_version": "3.8.0",
         "checksum_verified": True,
     }
+
+
+def test_ensure_redaction_ready_prepares_large_model_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> None:
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(tmp_path / "models"))
+
+    def fake_download(spec: redact.SpacyModelSpec, destination: Path) -> None:
+        destination.write_bytes(_model_wheel_bytes(spec))
+
+    monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
+    readiness = ensure_redaction_ready(tmp_path, model="large")
+
+    assert readiness.model == "en_core_web_lg"
+    assert readiness.model_version == "3.8.0"
+    assert assert_redaction_ready(root=tmp_path) == readiness
+    payload = json.loads(settings_path(tmp_path).read_text())
+    assert payload["redaction"]["model"] == "en_core_web_lg"
 
 
 def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(

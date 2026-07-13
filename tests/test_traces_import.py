@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import stat
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from conftest import FakeRedactionEnv
+from conftest import FakeRedactionEnv, write_fake_model_dir
 
 from kensa import redact
 from kensa import traces as traces_module
@@ -36,17 +38,12 @@ TRACE_VIEW_KEYS = {
     "status",
     "input",
     "output",
-    "attributes",
     "spans",
-    "raw",
 }
 TRACE_SOURCE_KEYS = {
     "provider",
     "import_run_id",
     "imported_at",
-    "source_path",
-    "source_url",
-    "trace_url",
 }
 SPAN_VIEW_KEYS = {
     "id",
@@ -62,14 +59,29 @@ SPAN_VIEW_KEYS = {
     "status_message",
     "input",
     "output",
-    "attributes",
-    "events",
-    "raw",
+    "usage",
 }
+USAGE_VIEW_KEYS = {
+    "model_provider",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_usd",
+}
+_PSEUDONYM = re.compile(r"^(trace|span)_[0-9a-f]{24}$")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _assert_pseudonym(value: Any, namespace: str) -> None:
+    assert isinstance(value, str)
+    assert _PSEUDONYM.fullmatch(value)
+    assert value.startswith(f"{namespace}_")
 
 
 def _write_safe_sibling_manifest(artifact: Path) -> Path:
@@ -108,20 +120,18 @@ def _assert_trace_view_shape(trace: dict[str, Any]) -> None:
     assert set(trace["source"]) == TRACE_SOURCE_KEYS
     for span in trace["spans"]:
         assert set(span) == SPAN_VIEW_KEYS
+        assert set(span["usage"]) == USAGE_VIEW_KEYS
 
 
 def _minimal_trace_view(trace_id: str = "tr_1") -> dict[str, Any]:
     return {
-        "schema_version": "kensa.trace_view.v1",
+        "schema_version": "kensa.trace_view.v2",
         "id": trace_id,
         "name": None,
         "source": {
             "provider": "jsonl",
             "import_run_id": "import",
             "imported_at": "2026-06-30T00:00:00Z",
-            "source_path": "traces.jsonl",
-            "source_url": None,
-            "trace_url": None,
         },
         "started_at_unix_nano": None,
         "ended_at_unix_nano": None,
@@ -129,9 +139,7 @@ def _minimal_trace_view(trace_id: str = "tr_1") -> dict[str, Any]:
         "status": "unknown",
         "input": None,
         "output": None,
-        "attributes": {},
         "spans": [],
-        "raw": None,
     }
 
 
@@ -198,21 +206,16 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert result.records_written == 1
     assert result.span_count == 0
     assert result.manifest_path == out.with_suffix(".manifest.json")
-    assert result.warnings == [
-        "secret-like fields were redacted",
-        "mandatory value redaction changed 2 value(s)",
-    ]
-    assert row["id"] == "tr_1"
+    assert result.warnings == []
+    _assert_pseudonym(row["id"], "trace")
     assert row["name"] == "refund"
     assert row["duration_ms"] == 2.5
     assert row["status"] == "unknown"
     assert row["input"] == "hello"
     assert row["output"] is None
-    assert row["attributes"] == {"api_key": "[SECRET_1]"}
-    assert row["raw"]["api_key"] == "[SECRET_1]"
+    assert "attributes" not in row
+    assert "raw" not in row
     assert row["source"]["provider"] == "jsonl"
-    assert row["source"]["source_path"] is None
-    assert row["source"]["source_url"] is None
     assert result.manifest_path is not None
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["artifact_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
@@ -225,8 +228,8 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert redaction["mandatory"] is True
     assert redaction["value_redaction_applied"] is True
     assert redaction["redaction_available"] is True
-    assert redaction["secret_keys_redacted"] is True
-    assert redaction["changed_value_count"] == 2
+    assert redaction["secret_keys_redacted"] is False
+    assert redaction["changed_value_count"] == 0
     assert redaction["pseudonymization"] == "instance-counter"
     assert redaction["model"]["name"] == "en_core_web_sm"
     # The gated load path accepts the freshly written artifact.
@@ -251,7 +254,12 @@ def test_import_json_records_spans_without_synthetic_semantics(
                                 "span_id": "span_1",
                                 "name": "lookup",
                                 "status": "ERROR",
-                                "attributes": {"tool.name": "lookup_customer"},
+                                "attributes": {
+                                    "tool.name": "lookup_customer",
+                                    "kensa.llm.provider": "openai",
+                                    "kensa.llm.model": "gpt-5-mini",
+                                    "kensa.cost_usd": 0.002,
+                                },
                             }
                         ],
                     }
@@ -274,18 +282,51 @@ def test_import_json_records_spans_without_synthetic_semantics(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 1
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["status"] == "error"
     assert row["input"] == "shared input"
     assert row["output"] == "shared output"
-    assert span["id"] == "span_1"
-    assert span["trace_id"] == "trace_1"
+    _assert_pseudonym(span["id"], "span")
+    assert span["trace_id"] == row["id"]
     assert span["kind"] == "tool"
     assert span["tool_name"] == "lookup_customer"
     assert span["input"] is None
     assert span["output"] is None
-    assert "kensa.case.input" not in span["attributes"]
-    assert "kensa.final_output" not in span["attributes"]
+    assert "attributes" not in span
+    assert span["usage"]["model_provider"] == "openai"
+    assert span["usage"]["model"] == "gpt-5-mini"
+    assert span["usage"]["cost_usd"] == 0.002
+
+
+def test_import_rejects_duplicate_span_ids(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "duplicate-spans.json"
+    source.write_text(
+        json.dumps(
+            {
+                "id": "trace-provider-id",
+                "spans": [
+                    {"span_id": "duplicate", "name": "first"},
+                    {"span_id": "duplicate", "name": "second"},
+                ],
+            }
+        )
+    )
+    out = tmp_path / "imports" / "duplicate-spans.jsonl"
+
+    with pytest.raises(ValueError, match="trace contains duplicate span ids"):
+        import_trace_source(
+            provider="json",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
+        )
+
+    assert not out.exists()
+    assert not out.with_suffix(".manifest.json").exists()
 
 
 def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(
@@ -337,12 +378,88 @@ def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(
     assert result.provider == "local-jsonl"
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "tr_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["source"]["provider"] == "local-jsonl"
     assert row["input"] is None
     assert row["output"] is None
-    assert [span["id"] for span in row["spans"]] == ["span_1", "span_2"]
+    span_ids = [span["id"] for span in row["spans"]]
+    assert len(set(span_ids)) == 2
+    for span_id in span_ids:
+        _assert_pseudonym(span_id, "span")
     assert row["duration_ms"] == 0.001
+
+
+def test_pseudonyms_stay_stable_when_import_order_changes(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "traces.json"
+    first_out = tmp_path / "imports" / "first.jsonl"
+    second_out = tmp_path / "imports" / "second.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {
+                        "id": "a",
+                        "name": "a",
+                        "spans": [
+                            {"span_id": "a-1", "name": "a-1"},
+                            {"span_id": "a-2", "parent_id": "a-1", "name": "a-2"},
+                        ],
+                    },
+                    {"id": "b", "name": "b"},
+                ]
+            }
+        )
+    )
+
+    import_trace_source(
+        provider="json",
+        source=str(source),
+        out=first_out,
+        limit=10,
+        max_payload_bytes=source.stat().st_size,
+    )
+    first_rows = _read_jsonl(first_out)
+    first_ids = {row["name"]: row["id"] for row in first_rows}
+    first_span_ids = {span["name"]: span["id"] for span in first_rows[0]["spans"]}
+
+    source.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {"id": "new", "name": "new"},
+                    {"id": "b", "name": "b"},
+                    {
+                        "id": "a",
+                        "name": "a",
+                        "spans": [
+                            {"span_id": "a-2", "parent_id": "a-1", "name": "a-2"},
+                            {"span_id": "a-1", "name": "a-1"},
+                        ],
+                    },
+                ]
+            }
+        )
+    )
+    import_trace_source(
+        provider="json",
+        source=str(source),
+        out=second_out,
+        limit=10,
+        max_payload_bytes=source.stat().st_size,
+    )
+    second_rows = _read_jsonl(second_out)
+    second_ids = {row["name"]: row["id"] for row in second_rows}
+    second_a = next(row for row in second_rows if row["name"] == "a")
+    second_spans = {span["name"]: span for span in second_a["spans"]}
+
+    assert second_ids["a"] == first_ids["a"]
+    assert second_ids["b"] == first_ids["b"]
+    assert second_ids["new"] not in first_ids.values()
+    assert {name: span["id"] for name, span in second_spans.items()} == first_span_ids
+    assert second_spans["a-2"]["parent_id"] == second_spans["a-1"]["id"]
 
 
 def test_import_requires_redaction_readiness_before_reading_payloads(
@@ -368,6 +485,51 @@ def test_import_requires_redaction_readiness_before_reading_payloads(
             max_payload_bytes=source.stat().st_size,
         )
     assert not out.exists()
+
+
+def test_import_rejects_corrupt_pseudonym_key(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    key_path.write_bytes(b"short")
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "trace"}) + "\n")
+    out = tmp_path / "imports" / "traces.jsonl"
+
+    with pytest.raises(ValueError, match="pseudonym key is invalid"):
+        import_trace_source(
+            provider="jsonl",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
+        )
+
+    assert not out.exists()
+
+
+def test_pseudonym_key_publish_keeps_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    candidate = b"candidate" * 4
+    winner = b"winner!!" * 4
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    monkeypatch.setattr(traces_module.secrets, "token_bytes", lambda size: candidate)
+
+    def publish_winner(source: Path, target: Path) -> None:
+        assert source.read_bytes() == candidate
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+        target.write_bytes(winner)
+        raise FileExistsError
+
+    monkeypatch.setattr(traces_module.os, "link", publish_winner)
+
+    assert traces_module._pseudonym_key() == winner
+    assert key_path.read_bytes() == winner
+    assert not list(key_path.parent.glob(".pseudonym.key.*"))
 
 
 def test_import_redacts_values_with_stable_instance_aliases(
@@ -409,12 +571,12 @@ def test_import_redacts_values_with_stable_instance_aliases(
     assert row["input"] == "Ask [PERSON_1] at [EMAIL_ADDRESS_1]"
     assert row["output"] == "[PERSON_1] replied"
     assert span["status_message"] == "[PERSON_1] failed after emailing [EMAIL_ADDRESS_1]"
-    assert span["attributes"]["detail"] == "[PERSON_1] again"
-    assert span["events"][0]["attributes"]["exception.message"] == "[PERSON_1] exploded"
-    assert span["raw"]["status_message"] == ("[PERSON_1] failed after emailing [EMAIL_ADDRESS_1]")
+    assert "attributes" not in span
+    assert "events" not in span
+    assert "raw" not in span
     assert result.redaction["entity_instance_counts"]["PERSON"] == 1
     assert result.redaction["entity_instance_counts"]["EMAIL_ADDRESS"] == 1
-    assert "mandatory value redaction changed" in result.warnings[0]
+    assert any("mandatory value redaction changed" in warning for warning in result.warnings)
     # Alias determinism: re-importing identical input yields identical aliases.
     rerun_out = tmp_path / "imports" / "aliases-rerun.jsonl"
     import_trace_source(
@@ -430,6 +592,42 @@ def test_import_redacts_values_with_stable_instance_aliases(
     persisted = out.read_text() + result.manifest_path.read_text()
     assert "Alice" not in persisted
     assert "alice@example.com" not in persisted
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert key_path.read_bytes().hex() not in persisted
+
+
+def test_large_model_import_artifact_passes_exposure_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    spec = redact.LARGE_SPACY_MODEL
+    models_dir = tmp_path / "large-models"
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
+    write_fake_model_dir(models_dir / spec.label, spec)
+    settings_path = redact.settings_path(tmp_path)
+    settings = json.loads(settings_path.read_text())
+    settings["redaction"] = {
+        "model": spec.name,
+        "model_version": spec.version,
+        "checksum_verified": True,
+    }
+    settings_path.write_text(json.dumps(settings))
+    source = tmp_path / "large-model.jsonl"
+    source.write_text(json.dumps({"id": "trace", "input": "Alice"}) + "\n")
+    out = tmp_path / "imports" / "large-model.jsonl"
+
+    result = import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    assert result.redaction["model"]["name"] == "en_core_web_lg"
+    assert load_trace_views(out) == _read_jsonl(out)
 
 
 def test_import_detect_secrets_hits_redact_whole_values(
@@ -450,8 +648,8 @@ def test_import_detect_secrets_hits_redact_whole_values(
 
     row = _read_jsonl(out)[0]
     assert row["input"] == "[SECRET_1]"
-    assert row["raw"]["input"] == "[SECRET_1]"
-    assert result.redaction["redacted_span_count"] >= 2
+    assert "raw" not in row
+    assert result.redaction["redacted_span_count"] >= 1
 
 
 def test_import_fails_closed_and_writes_nothing_on_redaction_errors(
@@ -505,7 +703,7 @@ def test_import_trace_records_shares_the_redaction_pipeline(
     assert result.bytes_read == len(json.dumps(payload, sort_keys=True).encode())
     assert row["input"] == "[PERSON_1] needs help"
     assert row["spans"][0]["input"] == {"query": "[PERSON_1]"}
-    assert row["source"]["source_path"] is None
+    assert set(row["source"]) == TRACE_SOURCE_KEYS
     assert result.redaction["version"] == "kensa.redactor.v2"
 
 
@@ -539,7 +737,7 @@ def test_import_trace_records_accepts_json_record_payloads(
         max_payload_bytes=10_000,
     )
     row = _read_jsonl(result.out_path)[0]
-    assert row["id"] == "tr_mem"
+    _assert_pseudonym(row["id"], "trace")
     assert row["input"] == "[PERSON_1]"
 
 
@@ -616,7 +814,7 @@ def test_load_trace_views_rejects_artifact_replaced_after_manifest(
         load_trace_views(artifact)
 
 
-def test_import_sanitizes_trace_urls_with_safe_endpoint(
+def test_import_drops_trace_urls(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,
 ) -> None:
@@ -641,7 +839,7 @@ def test_import_sanitizes_trace_urls_with_safe_endpoint(
     )
 
     row = _read_jsonl(out)[0]
-    assert row["source"]["trace_url"] == "https://trace.example.com/v1/[redacted]/tr_1"
+    assert "trace_url" not in row["source"]
 
 
 @pytest.mark.parametrize("provider", ["json", "jsonl"])
@@ -669,7 +867,7 @@ def test_import_json_trace_records_accept_trace_id_without_id(
     imported = _read_jsonl(out)[0]
     assert result.records_written == 1
     assert result.span_count == 0
-    assert imported["id"] == "tr_1"
+    _assert_pseudonym(imported["id"], "trace")
     assert imported["input"] == "hello"
     assert imported["spans"] == []
 
@@ -784,22 +982,14 @@ def test_import_otlp_records_groups_spans_into_trace_view(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 1
-    assert row["id"] == "abc"
+    _assert_pseudonym(row["id"], "trace")
     assert row["status"] == "error"
     assert row["started_at_unix_nano"] is None
-    assert row["attributes"]["resource_attributes"] == {"service.name": "agent"}
-    assert row["attributes"]["instrumentation_scope"]["name"] == "scope"
-    assert row["attributes"]["instrumentation_scope"]["attributes"] == {
-        "array": ["a"],
-        "kv": {"nested": "1"},
-    }
-    assert span["id"] == "def"
+    assert "attributes" not in row
+    _assert_pseudonym(span["id"], "span")
     assert span["status"] == "error"
-    assert span["events"][0]["attributes"]["exception.message"] == "boom"
-    assert span["attributes"]["links"][0]["trace_id"] == "linked"
-    assert span["attributes"]["authorization"] == "[SECRET_1]"
-    assert span["attributes"]["raw"] == "plain"
-    assert span["attributes"]["unknown"] == {"other": "value"}
+    assert "events" not in span
+    assert "attributes" not in span
 
     source.write_text(
         json.dumps(
@@ -828,7 +1018,114 @@ def test_import_otlp_records_groups_spans_into_trace_view(
     assert out.read_text() == ""
 
 
-def test_import_langfuse_records_preserve_trace_and_observation_fields(
+def test_import_otlp_current_genai_attributes_retain_evidence_and_usage(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    input_messages = {
+        "arrayValue": {
+            "values": [
+                {
+                    "kvlistValue": {
+                        "values": [
+                            {"key": "role", "value": {"stringValue": "user"}},
+                            {
+                                "key": "content",
+                                "value": {"stringValue": "Hello Alice"},
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    source = tmp_path / "otlp-genai.json"
+    source.write_text(
+        json.dumps(
+            {
+                "resourceSpans": [
+                    {
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "trace-1",
+                                        "spanId": "span-1",
+                                        "name": "chat",
+                                        "attributes": [
+                                            {
+                                                "key": "gen_ai.input.messages",
+                                                "value": input_messages,
+                                            },
+                                            {
+                                                "key": "gen_ai.output.messages",
+                                                "value": {
+                                                    "stringValue": (
+                                                        '[{"role":"assistant",'
+                                                        '"content":"Hi Alice"}]'
+                                                    )
+                                                },
+                                            },
+                                            {
+                                                "key": "gen_ai.provider.name",
+                                                "value": {"stringValue": "openai"},
+                                            },
+                                            {
+                                                "key": "gen_ai.response.model",
+                                                "value": {"stringValue": "gpt-5-mini"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.input_tokens",
+                                                "value": {"intValue": "10"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.output_tokens",
+                                                "value": {"intValue": "5"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.cache_read.input_tokens",
+                                                "value": {"intValue": "4"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.cache_creation.input_tokens",
+                                                "value": {"intValue": "2"},
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
+    out = tmp_path / "otlp-genai.jsonl"
+
+    import_trace_source(
+        provider="otlp",
+        source=str(source),
+        out=out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    span = _read_jsonl(out)[0]["spans"][0]
+    assert span["input"] == [{"role": "user", "content": "Hello [PERSON_1]"}]
+    assert span["output"] == '[{"role":"assistant","content":"Hi [PERSON_1]"}]'
+    assert span["usage"] == {
+        "model_provider": "openai",
+        "model": "gpt-5-mini",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "cache_read_input_tokens": 4,
+        "cache_creation_input_tokens": 2,
+        "cost_usd": None,
+    }
+
+
+def test_import_langfuse_records_project_allowlisted_evidence(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,
 ) -> None:
@@ -876,6 +1173,14 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(
                         "traceId": "trace_1",
                         "name": "summarize",
                         "type": "GENERATION",
+                        "providedModelName": "gpt-5-mini",
+                        "usageDetails": {
+                            "input": 12,
+                            "output": 4,
+                            "total": 16,
+                            "cacheReadInputTokens": 3,
+                        },
+                        "costDetails": {"total": 0.004},
                     }
                 ],
             }
@@ -896,17 +1201,10 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["input"] == {"input": "Refund me"}
     assert row["output"] == {"output": "Refunded"}
-    assert row["attributes"]["tenant"] == "support"
-    assert row["attributes"]["user_id"] == "user_1"
-    assert row["attributes"]["session_id"] == "session_1"
-    assert row["attributes"]["release"] == "2026.05.21"
-    assert row["attributes"]["version"] == "1.2.3"
-    assert row["attributes"]["environment"] == "staging"
-    assert row["attributes"]["feedback"] == {"thumbs": "down"}
-    assert row["attributes"]["scores"][0]["value"] == 0.1
+    assert "attributes" not in row
     assert row["spans"][0]["kind"] == "tool"
     assert row["spans"][0]["status"] == "error"
     assert row["spans"][0]["tool_name"] == "issue_refund"
@@ -914,6 +1212,19 @@ def test_import_langfuse_records_preserve_trace_and_observation_fields(
     assert row["spans"][0]["output"] == {"ok": True}
     assert row["spans"][1]["name"] == "summarize"
     assert row["spans"][1]["kind"] == "llm"
+    assert row["spans"][1]["usage"] == {
+        "model_provider": None,
+        "model": "gpt-5-mini",
+        "input_tokens": 12,
+        "output_tokens": 4,
+        "total_tokens": 16,
+        "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": None,
+        "cost_usd": 0.004,
+    }
+    persisted = out.read_text()
+    for discarded in ("user_1", "session_1", "support", "unsafe refund"):
+        assert discarded not in persisted
     manifest = json.loads(out.with_suffix(".manifest.json").read_text())
     assert {"source", "project", "since", "endpoint"}.isdisjoint(manifest)
     assert manifest["trace_count"] == 1
@@ -998,22 +1309,15 @@ def test_import_langfuse_records_accepts_official_data_envelope(
     row = rows[0]
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["name"] == "refund-agent"
     assert row["input"] is None
     assert row["output"] is None
-    assert row["attributes"]["traceUserId"] == "user_1"
-    assert row["attributes"]["traceSessionId"] == "session_1"
-    assert row["attributes"]["userId"] == "trace-user-camel"
-    assert row["attributes"]["sessionId"] == "trace-session-camel"
-    assert row["attributes"]["release"] == "2026.07.08"
-    assert row["attributes"]["environment"] == "production"
-    assert row["attributes"]["tags"] == ["refunds"]
-    assert row["attributes"]["tenant"] == "support"
-    assert row["spans"][0]["id"] == "obs_1"
+    assert "attributes" not in row
+    _assert_pseudonym(row["spans"][0]["id"], "span")
     assert row["spans"][0]["input"] == {"message": "Refund me"}
     assert row["spans"][0]["output"] == {"message": "Done"}
-    assert row["spans"][1]["parent_id"] == "obs_1"
+    assert row["spans"][1]["parent_id"] == row["spans"][0]["id"]
     assert row["spans"][1]["kind"] == "tool"
     assert row["spans"][1]["status"] == "error"
 
@@ -1072,31 +1376,33 @@ def test_import_langfuse_observation_rows_group_by_trace_id(
     rows = _read_jsonl(out)
     assert result.records_written == 2
     assert result.span_count == 3
-    assert [row["id"] for row in rows] == ["trace_1", "trace_2"]
+    trace_ids = [row["id"] for row in rows]
+    assert len(set(trace_ids)) == 2
+    for trace_id in trace_ids:
+        _assert_pseudonym(trace_id, "trace")
     assert rows[0]["name"] == "first"
-    assert rows[0]["attributes"]["trace_name"] == "first"
-    assert rows[0]["attributes"]["session_id"] == "session_1"
+    assert "attributes" not in rows[0]
     assert rows[0]["duration_ms"] == 1000.0
-    assert [span["id"] for span in rows[0]["spans"]] == ["obs_1", "obs_3"]
+    first_span_ids = [span["id"] for span in rows[0]["spans"]]
+    assert len(set(first_span_ids)) == 2
+    for span_id in first_span_ids:
+        _assert_pseudonym(span_id, "span")
     assert rows[0]["spans"][0]["kind"] == "span"
-    assert "end_time" not in rows[0]["spans"][0]["attributes"]
-    assert rows[0]["spans"][1]["parent_id"] == "obs_1"
-    assert [span["id"] for span in rows[1]["spans"]] == ["obs_2"]
+    assert "attributes" not in rows[0]["spans"][0]
+    assert rows[0]["spans"][1]["parent_id"] == rows[0]["spans"][0]["id"]
+    _assert_pseudonym(rows[1]["spans"][0]["id"], "span")
 
 
 def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path) -> None:
     source = tmp_path / "trace-views.jsonl"
     trace = {
-        "schema_version": "kensa.trace_view.v1",
+        "schema_version": "kensa.trace_view.v2",
         "id": "tr_1",
         "name": None,
         "source": {
             "provider": "jsonl",
             "import_run_id": "import",
             "imported_at": "2026-06-30T00:00:00Z",
-            "source_path": "traces.jsonl",
-            "source_url": None,
-            "trace_url": "https://trace.example/tr_1",
         },
         "started_at_unix_nano": None,
         "ended_at_unix_nano": None,
@@ -1104,9 +1410,7 @@ def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path
         "status": "ok",
         "input": None,
         "output": None,
-        "attributes": {},
         "spans": [],
-        "raw": None,
     }
     source.write_text(json.dumps(trace) + "\n")
 
@@ -1121,7 +1425,7 @@ def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path
         "started_at_unix_nano": None,
         "duration_ms": 0.0,
         "span_count": 0,
-        "source": {"provider": "jsonl", "trace_url": "https://trace.example/tr_1"},
+        "source": {"provider": "jsonl"},
     }
 
     old_artifact = tmp_path / "old.jsonl"
@@ -1352,9 +1656,6 @@ def test_trace_import_internal_edge_paths(
                 provider="jsonl",
                 import_run_id="import",
                 imported_at="2026-06-30T00:00:00Z",
-                source_path=str(source),
-                source_url=None,
-                trace_url=None,
             ),
         )
 
@@ -1382,6 +1683,27 @@ def test_trace_import_internal_edge_paths(
     assert traces_module._status_from_value("STATUS_CODE_ERROR") == "error"
     assert traces_module._status_from_value(" ") == "unknown"
     assert traces_module._status_from_value("maybe") == "unknown"
+    assert traces_module._redaction_warnings({"secret_keys_redacted": True}) == [
+        "secret-like fields were redacted"
+    ]
+    assert traces_module._evidence_attributes({"model": "gpt-5"}) == {"model": "gpt-5"}
+    zero_usage = traces_module._usage_from_mapping(
+        {"usage": {"input": 0, "output": 0}},
+        attrs={},
+    )
+    assert zero_usage.input_tokens == 0
+    assert zero_usage.output_tokens == 0
+    assert zero_usage.total_tokens == 0
+    assert traces_module._int_value(True) is None
+    assert traces_module._float_value(False) is None
+    assert traces_module._attributes([{"value": {"stringValue": "missing"}}]) == {}
+    assert traces_module._otlp_value("plain") == "plain"
+    assert traces_module._otlp_value({"stringValue": "plain"}) == "plain"
+    assert traces_module._otlp_value({"arrayValue": {"values": [{"intValue": "1"}]}}) == ["1"]
+    assert traces_module._otlp_value(
+        {"kvlistValue": {"values": [{"key": "nested", "value": {"boolValue": True}}]}}
+    ) == {"nested": True}
+    assert traces_module._otlp_value({"unknown": "value"}) == {"unknown": "value"}
     ok_span = traces_module.SpanView(
         id="span",
         trace_id="trace",
@@ -1396,16 +1718,13 @@ def test_trace_import_internal_edge_paths(
         status_message=None,
         input=None,
         output=None,
-        attributes={},
-        events=[],
-        raw=None,
+        usage=traces_module.UsageView(),
     )
     assert traces_module._aggregate_status("unknown", [ok_span]) == "ok"
     with pytest.raises(ValueError, match="trace record must be a JSON object"):
         traces_module._validate_json_trace_record(cast(dict[str, Any], []))
     with pytest.raises(ValueError, match="span row must be a JSON object"):
         traces_module._validate_json_span_row(cast(dict[str, Any], []))
-    assert traces_module._otlp_events([{"timeUnixNano": "bad"}])[0]["time_unix_nano"] is None
 
 
 def test_load_trace_views_rejects_invalid_trace_view_rows(tmp_path: Path) -> None:
@@ -1435,6 +1754,28 @@ def test_load_trace_views_rejects_invalid_trace_view_rows(tmp_path: Path) -> Non
 
     invalid = dict(trace)
     invalid["spans"] = [{}]
+    assert_invalid(json.dumps(invalid) + "\n")
+
+    invalid = dict(trace)
+    invalid["spans"] = [
+        traces_module.SpanView(
+            id="span_1",
+            trace_id="trace_1",
+            parent_id=None,
+            name="span",
+            kind="span",
+            tool_name=None,
+            started_at_unix_nano=None,
+            ended_at_unix_nano=None,
+            duration_ms=0.0,
+            status="unknown",
+            status_message=None,
+            input=None,
+            output=None,
+            usage=traces_module.UsageView(),
+        ).to_dict()
+    ]
+    invalid["spans"][0]["usage"] = {}
     assert_invalid(json.dumps(invalid) + "\n")
 
     invalid = dict(trace)

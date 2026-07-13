@@ -44,6 +44,11 @@ class _FakeObservationsClient:
         return _pop_response(self.responses)
 
 
+class _FakeLegacyApi:
+    def __init__(self, observation_responses: list[Any]) -> None:
+        self.observations_v1 = _FakeObservationsClient(observation_responses)
+
+
 class _FakeApi:
     def __init__(
         self,
@@ -55,6 +60,7 @@ class _FakeApi:
         self.projects = _FakeProjectsClient(project_responses or [])
         self.trace = _FakeTraceClient(trace_responses or [])
         self.observations = _FakeObservationsClient(observation_responses or [])
+        self.legacy = _FakeLegacyApi(list(observation_responses or []))
 
 
 class _FakeLangfuse:
@@ -139,15 +145,15 @@ def test_legacy_traces_uses_sdk_pagination_and_returns_existing_shape(
         observation_responses=[
             {
                 "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
-                "meta": {"cursor": "next"},
+                "meta": {"page": 1, "totalPages": 2},
             },
             {
                 "data": [{"id": "obs_2", "traceId": "tr_1", "type": "GENERATION"}],
-                "meta": {"cursor": None},
+                "meta": {"page": 2, "totalPages": 2},
             },
             {
                 "data": [{"id": "obs_3", "traceId": "tr_2", "type": "SPAN"}],
-                "meta": {"cursor": None},
+                "meta": {"page": 1, "totalPages": 1},
             },
         ],
     )
@@ -173,28 +179,26 @@ def test_legacy_traces_uses_sdk_pagination_and_returns_existing_shape(
     }
     assert fake.api.trace.calls[0]["page"] == 1
     assert fake.api.trace.calls[0]["limit"] == 2
+    assert fake.api.trace.calls[0]["fields"] == "core,io"
     assert fake.api.trace.calls[0]["from_timestamp"] == datetime(2026, 6, 1, tzinfo=UTC)
     assert fake.api.trace.calls[1]["page"] == 2
-    assert fake.api.observations.calls == [
+    assert fake.api.legacy.observations_v1.calls == [
         {
+            "page": 1,
             "trace_id": "tr_1",
-            "fields": None,
             "limit": 1000,
-            "cursor": None,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
         {
+            "page": 2,
             "trace_id": "tr_1",
-            "fields": None,
             "limit": 1000,
-            "cursor": "next",
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
         {
+            "page": 1,
             "trace_id": "tr_2",
-            "fields": None,
             "limit": 1000,
-            "cursor": None,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
     ]
@@ -492,12 +496,11 @@ def test_auto_falls_back_only_on_trace_list_404(monkeypatch: pytest.MonkeyPatch)
             limit=1,
         )
     assert exc_info.value.label == "observations"
-    assert observation_failure.api.observations.calls == [
+    assert observation_failure.api.legacy.observations_v1.calls == [
         {
+            "page": 1,
             "trace_id": "tr_1",
-            "fields": None,
             "limit": 1000,
-            "cursor": None,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         }
     ]

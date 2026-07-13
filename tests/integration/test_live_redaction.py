@@ -83,10 +83,9 @@ def test_live_sm_readiness_and_redaction_pass(
     assert "078-05-1120" not in text
     assert "(212) 555-0182" not in text
     assert "[EMAIL_ADDRESS_" in text
-    attribute_keys = set(row["attributes"])
-    assert any(key.startswith("[PERSON_") for key in attribute_keys)
-    assert any(key.startswith("[SECRET_") for key in attribute_keys)
-    assert any(key.startswith("[PHONE_NUMBER_") for key in attribute_keys)
+    assert "attributes" not in row
+    assert "raw" not in row
+    assert "trace_url" not in row["source"]
     rendered = out.read_text()
     assert "sk-live-super-secret-value" not in rendered
     assert "AKIAIOSFODNN7EXAMPLE" not in rendered

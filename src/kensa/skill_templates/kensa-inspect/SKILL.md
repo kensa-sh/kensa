@@ -19,8 +19,8 @@ Trace access:
    <file>` or ask for an explicit `--source`.
 3. Use `kensa traces` commands for payload access. If access is blocked, return to `kensa-evals`
    for re-import; never open artifacts or `.kensa/traces/runs/` directly.
-4. Treat `TraceView.raw` as redacted evidence and avoid provider-specific schema.
-   Placeholder identities are trace-local.
+4. Use only the normalized TraceView fields. Provider payloads, generic attributes, and metadata
+   are not evidence. Placeholder identities are trace-local.
 
 Before writing, read existing queue ids with `kensa inspect list --json`. Never re-propose an
 existing id, regardless of its status; items are never deleted, and later stages change only
@@ -33,8 +33,8 @@ Write a YAML queue at `.kensa/inspect/<timestamp>.yaml` with this shape:
 schema_version: kensa.inspect.v1
 items:
   - id: tool-loop-on-empty-results
-    trace_ids: [tr_abc123, tr_def456]
-    source: langfuse https://cloud.langfuse.com/trace/tr_abc123
+    trace_ids: [trace_12ab34cd, trace_56ef78ab]
+    source: langfuse
     status: pending
     failure_pattern: agent loops the search tool 6x when results come back empty
     expected_outcome: agent stops retrying after 2 empty results and tells the user
@@ -48,7 +48,7 @@ Field rules:
 
 1. `id`: unique kebab-case slug, at most 64 characters.
 2. `trace_ids`: one or more `TraceView.id` values backing the idea.
-3. `source`: `TraceSource.provider` plus `trace_url` or `source_path`.
+3. `source`: `TraceSource.provider`.
 4. `status`: always `pending` for new items.
 5. `failure_pattern`: one concrete observed behavior or risk, with the trace evidence.
 6. `expected_outcome`: what correct behavior looks like.

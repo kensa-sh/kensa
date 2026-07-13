@@ -381,16 +381,13 @@ def test_cli_edge_paths(
     trace_source.write_text(
         json.dumps(
             {
-                "schema_version": "kensa.trace_view.v1",
+                "schema_version": "kensa.trace_view.v2",
                 "id": "tr",
                 "name": None,
                 "source": {
                     "provider": "jsonl",
                     "import_run_id": "import",
                     "imported_at": "2026-06-30T00:00:00Z",
-                    "source_path": "traces.jsonl",
-                    "source_url": None,
-                    "trace_url": None,
                 },
                 "started_at_unix_nano": None,
                 "ended_at_unix_nano": None,
@@ -398,9 +395,7 @@ def test_cli_edge_paths(
                 "status": "unknown",
                 "input": None,
                 "output": None,
-                "attributes": {},
                 "spans": [],
-                "raw": None,
             }
         )
         + "\n"
