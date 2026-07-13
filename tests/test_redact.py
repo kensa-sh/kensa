@@ -681,6 +681,39 @@ def test_redactor_exempts_only_generated_provenance_and_redacts_locator_paths(
     )
 
 
+def test_redactor_preserves_generated_pseudonym_ids(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    aliases = {
+        "trace": "trace_1234567890abcdef12345678",
+        "span": "span_1234567890abcdef12345678",
+        "parent": "span_abcdef1234567890abcdef12",
+    }
+    redaction_ready.secret_markers = list(aliases.values())
+
+    redacted = Redactor().redact_value(
+        {
+            "id": aliases["trace"],
+            "spans": [
+                {
+                    "id": aliases["span"],
+                    "trace_id": aliases["trace"],
+                    "parent_id": aliases["parent"],
+                }
+            ],
+            "input": aliases["trace"],
+        }
+    )
+
+    assert redacted["id"] == aliases["trace"]
+    assert redacted["spans"][0] == {
+        "id": aliases["span"],
+        "trace_id": aliases["trace"],
+        "parent_id": aliases["parent"],
+    }
+    assert redacted["input"] == "[SECRET_1]"
+
+
 def test_redactor_decodes_url_segments_for_scanning_and_preserves_safe_encoding(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
@@ -902,6 +935,13 @@ def test_redactor_phone_detection_via_engine(
 def test_safe_manifest_accepts_safe_v2() -> None:
     assert safe_manifest(_safe_manifest_dict()) is True
     assert_safe_manifest(_safe_manifest_dict())
+    large_model = {
+        "name": redact.LARGE_SPACY_MODEL.name,
+        "version": redact.LARGE_SPACY_MODEL.version,
+        "checksum_verified": True,
+    }
+    assert safe_manifest(_safe_manifest_dict(model=large_model)) is True
+    assert_safe_manifest(_safe_manifest_dict(model=large_model))
 
 
 @pytest.mark.parametrize(

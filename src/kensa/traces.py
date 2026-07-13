@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import re
+import secrets
 import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
@@ -15,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from kensa.constants import KENSA_DIR
 from kensa.redact import (
     RedactionGateError,
     RedactionResult,
@@ -29,6 +33,8 @@ _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|cred
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _ENDPOINT_PLACEHOLDER = "[redacted]"
 _IMPORT_PROVIDERS = frozenset({"json", "jsonl", "otlp", "langfuse", "local-jsonl"})
+_PSEUDONYM_KEY_PATH = KENSA_DIR / "pseudonym.key"
+_PSEUDONYM_KEY_BYTES = 32
 _TRACE_VIEW_KEYS = (
     "schema_version",
     "id",
@@ -1151,11 +1157,12 @@ def _coalesce(*values: Any) -> Any:
 
 
 def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
+    key = _pseudonym_key()
     projected: list[TraceView] = []
-    for trace_index, trace in enumerate(traces, start=1):
-        trace_alias = f"trace_{trace_index}"
+    for trace in traces:
+        trace_alias = _pseudonym(key, "trace", trace.id)
         _ensure_unique_span_ids(trace.spans)
-        span_aliases = {span.id: f"span_{index}" for index, span in enumerate(trace.spans, start=1)}
+        span_aliases = {span.id: _pseudonym(key, "span", trace.id, span.id) for span in trace.spans}
         spans = [
             replace(
                 span,
@@ -1167,6 +1174,29 @@ def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
         ]
         projected.append(replace(trace, id=trace_alias, spans=spans))
     return projected
+
+
+def _pseudonym_key() -> bytes:
+    path = Path.cwd() / _PSEUDONYM_KEY_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(descriptor, "wb") as key_file:
+            key_file.write(secrets.token_bytes(_PSEUDONYM_KEY_BYTES))
+    path.chmod(0o600)
+    key = path.read_bytes()
+    if len(key) != _PSEUDONYM_KEY_BYTES:
+        raise ValueError(f"Kensa pseudonym key is invalid: {path}. Delete it and re-import traces.")
+    return key
+
+
+def _pseudonym(key: bytes, namespace: str, *values: str) -> str:
+    message = "\0".join((namespace, *values)).encode()
+    digest = hmac.new(key, message, hashlib.sha256).hexdigest()[:24]
+    return f"{namespace}_{digest}"
 
 
 def _ensure_unique_span_ids(spans: list[SpanView]) -> None:

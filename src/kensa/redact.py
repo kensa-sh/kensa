@@ -221,10 +221,14 @@ _TIMING_PATH_ALLOWLIST = frozenset(
 # URLs retain useful structure but have every path segment redacted.
 _PROVENANCE_PATHS = frozenset(
     {
+        ("id",),
         ("schema_version",),
         ("source", "import_run_id"),
         ("source", "imported_at"),
         ("source", "provider"),
+        ("spans", "[]", "id"),
+        ("spans", "[]", "parent_id"),
+        ("spans", "[]", "trace_id"),
     }
 )
 _PROVENANCE_LOCATOR_PATHS = frozenset(
@@ -1309,8 +1313,8 @@ def _manifest_problem(manifest: Any) -> str | None:
     if not isinstance(model, dict):
         return "trace artifact redaction manifest has no model metadata"
     model_tuple = (model.get("name"), model.get("version"))
-    pinned_model = (DEFAULT_SPACY_MODEL.name, DEFAULT_SPACY_MODEL.version)
-    if model_tuple != pinned_model:
+    pinned_models = {(spec.name, spec.version) for spec in _SPACY_MODELS.values()}
+    if model_tuple not in pinned_models:
         return "trace artifact redaction manifest records corrupt model metadata"
     if model.get("checksum_verified") is not True:
         return "trace artifact redaction manifest records an unverified model"

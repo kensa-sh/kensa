@@ -33,7 +33,7 @@ Write a YAML queue at `.kensa/inspect/<timestamp>.yaml` with this shape:
 schema_version: kensa.inspect.v1
 items:
   - id: tool-loop-on-empty-results
-    trace_ids: [trace_1, trace_2]
+    trace_ids: [trace_12ab34cd, trace_56ef78ab]
     source: langfuse
     status: pending
     failure_pattern: agent loops the search tool 6x when results come back empty

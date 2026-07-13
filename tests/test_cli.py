@@ -1398,7 +1398,7 @@ def test_top_level_import_writes_timestamped_artifact_manifest_and_latest(
     assert latest_payload["manifest_path"] == str(manifest.relative_to(tmp_path))
     assert latest_payload["timestamp"] == 1792820123
     assert "tr_1" not in latest.read_text()
-    assert json.loads(artifact.read_text())["id"] == "trace_1"
+    assert json.loads(artifact.read_text())["id"].startswith("trace_")
     assert json.loads(manifest.read_text())["provider"] == "jsonl"
 
 

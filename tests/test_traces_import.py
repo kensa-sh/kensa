@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import stat
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from conftest import FakeRedactionEnv
+from conftest import FakeRedactionEnv, write_fake_model_dir
 
 from kensa import redact
 from kensa import traces as traces_module
@@ -69,10 +71,17 @@ USAGE_VIEW_KEYS = {
     "cache_creation_input_tokens",
     "cost_usd",
 }
+_PSEUDONYM = re.compile(r"^(trace|span)_[0-9a-f]{24}$")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _assert_pseudonym(value: Any, namespace: str) -> None:
+    assert isinstance(value, str)
+    assert _PSEUDONYM.fullmatch(value)
+    assert value.startswith(f"{namespace}_")
 
 
 def _write_safe_sibling_manifest(artifact: Path) -> Path:
@@ -198,7 +207,7 @@ def test_import_jsonl_records_write_trace_views_and_manifest(
     assert result.span_count == 0
     assert result.manifest_path == out.with_suffix(".manifest.json")
     assert result.warnings == []
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["name"] == "refund"
     assert row["duration_ms"] == 2.5
     assert row["status"] == "unknown"
@@ -273,12 +282,12 @@ def test_import_json_records_spans_without_synthetic_semantics(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 1
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["status"] == "error"
     assert row["input"] == "shared input"
     assert row["output"] == "shared output"
-    assert span["id"] == "span_1"
-    assert span["trace_id"] == "trace_1"
+    _assert_pseudonym(span["id"], "span")
+    assert span["trace_id"] == row["id"]
     assert span["kind"] == "tool"
     assert span["tool_name"] == "lookup_customer"
     assert span["input"] is None
@@ -369,12 +378,88 @@ def test_import_jsonl_span_rows_group_by_trace_and_local_manifest(
     assert result.provider == "local-jsonl"
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["source"]["provider"] == "local-jsonl"
     assert row["input"] is None
     assert row["output"] is None
-    assert [span["id"] for span in row["spans"]] == ["span_1", "span_2"]
+    span_ids = [span["id"] for span in row["spans"]]
+    assert len(set(span_ids)) == 2
+    for span_id in span_ids:
+        _assert_pseudonym(span_id, "span")
     assert row["duration_ms"] == 0.001
+
+
+def test_pseudonyms_stay_stable_when_import_order_changes(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    source = tmp_path / "traces.json"
+    first_out = tmp_path / "imports" / "first.jsonl"
+    second_out = tmp_path / "imports" / "second.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {
+                        "id": "a",
+                        "name": "a",
+                        "spans": [
+                            {"span_id": "a-1", "name": "a-1"},
+                            {"span_id": "a-2", "parent_id": "a-1", "name": "a-2"},
+                        ],
+                    },
+                    {"id": "b", "name": "b"},
+                ]
+            }
+        )
+    )
+
+    import_trace_source(
+        provider="json",
+        source=str(source),
+        out=first_out,
+        limit=10,
+        max_payload_bytes=source.stat().st_size,
+    )
+    first_rows = _read_jsonl(first_out)
+    first_ids = {row["name"]: row["id"] for row in first_rows}
+    first_span_ids = {span["name"]: span["id"] for span in first_rows[0]["spans"]}
+
+    source.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {"id": "new", "name": "new"},
+                    {"id": "b", "name": "b"},
+                    {
+                        "id": "a",
+                        "name": "a",
+                        "spans": [
+                            {"span_id": "a-2", "parent_id": "a-1", "name": "a-2"},
+                            {"span_id": "a-1", "name": "a-1"},
+                        ],
+                    },
+                ]
+            }
+        )
+    )
+    import_trace_source(
+        provider="json",
+        source=str(source),
+        out=second_out,
+        limit=10,
+        max_payload_bytes=source.stat().st_size,
+    )
+    second_rows = _read_jsonl(second_out)
+    second_ids = {row["name"]: row["id"] for row in second_rows}
+    second_a = next(row for row in second_rows if row["name"] == "a")
+    second_spans = {span["name"]: span for span in second_a["spans"]}
+
+    assert second_ids["a"] == first_ids["a"]
+    assert second_ids["b"] == first_ids["b"]
+    assert second_ids["new"] not in first_ids.values()
+    assert {name: span["id"] for name, span in second_spans.items()} == first_span_ids
+    assert second_spans["a-2"]["parent_id"] == second_spans["a-1"]["id"]
 
 
 def test_import_requires_redaction_readiness_before_reading_payloads(
@@ -399,6 +484,28 @@ def test_import_requires_redaction_readiness_before_reading_payloads(
             limit=1,
             max_payload_bytes=source.stat().st_size,
         )
+    assert not out.exists()
+
+
+def test_import_rejects_corrupt_pseudonym_key(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    key_path.write_bytes(b"short")
+    source = tmp_path / "traces.jsonl"
+    source.write_text(json.dumps({"id": "trace"}) + "\n")
+    out = tmp_path / "imports" / "traces.jsonl"
+
+    with pytest.raises(ValueError, match="pseudonym key is invalid"):
+        import_trace_source(
+            provider="jsonl",
+            source=str(source),
+            out=out,
+            limit=1,
+            max_payload_bytes=source.stat().st_size,
+        )
+
     assert not out.exists()
 
 
@@ -462,6 +569,42 @@ def test_import_redacts_values_with_stable_instance_aliases(
     persisted = out.read_text() + result.manifest_path.read_text()
     assert "Alice" not in persisted
     assert "alice@example.com" not in persisted
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert key_path.read_bytes().hex() not in persisted
+
+
+def test_large_model_import_artifact_passes_exposure_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    spec = redact.LARGE_SPACY_MODEL
+    models_dir = tmp_path / "large-models"
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
+    write_fake_model_dir(models_dir / spec.label, spec)
+    settings_path = redact.settings_path(tmp_path)
+    settings = json.loads(settings_path.read_text())
+    settings["redaction"] = {
+        "model": spec.name,
+        "model_version": spec.version,
+        "checksum_verified": True,
+    }
+    settings_path.write_text(json.dumps(settings))
+    source = tmp_path / "large-model.jsonl"
+    source.write_text(json.dumps({"id": "trace", "input": "Alice"}) + "\n")
+    out = tmp_path / "imports" / "large-model.jsonl"
+
+    result = import_trace_source(
+        provider="jsonl",
+        source=str(source),
+        out=out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    assert result.redaction["model"]["name"] == "en_core_web_lg"
+    assert load_trace_views(out) == _read_jsonl(out)
 
 
 def test_import_detect_secrets_hits_redact_whole_values(
@@ -571,7 +714,7 @@ def test_import_trace_records_accepts_json_record_payloads(
         max_payload_bytes=10_000,
     )
     row = _read_jsonl(result.out_path)[0]
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["input"] == "[PERSON_1]"
 
 
@@ -701,7 +844,7 @@ def test_import_json_trace_records_accept_trace_id_without_id(
     imported = _read_jsonl(out)[0]
     assert result.records_written == 1
     assert result.span_count == 0
-    assert imported["id"] == "trace_1"
+    _assert_pseudonym(imported["id"], "trace")
     assert imported["input"] == "hello"
     assert imported["spans"] == []
 
@@ -816,11 +959,11 @@ def test_import_otlp_records_groups_spans_into_trace_view(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 1
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["status"] == "error"
     assert row["started_at_unix_nano"] is None
     assert "attributes" not in row
-    assert span["id"] == "span_1"
+    _assert_pseudonym(span["id"], "span")
     assert span["status"] == "error"
     assert "events" not in span
     assert "attributes" not in span
@@ -928,7 +1071,7 @@ def test_import_langfuse_records_project_allowlisted_evidence(
     _assert_trace_view_shape(row)
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["input"] == {"input": "Refund me"}
     assert row["output"] == {"output": "Refunded"}
     assert "attributes" not in row
@@ -1036,15 +1179,15 @@ def test_import_langfuse_records_accepts_official_data_envelope(
     row = rows[0]
     assert result.records_written == 1
     assert result.span_count == 2
-    assert row["id"] == "trace_1"
+    _assert_pseudonym(row["id"], "trace")
     assert row["name"] == "refund-agent"
     assert row["input"] is None
     assert row["output"] is None
     assert "attributes" not in row
-    assert row["spans"][0]["id"] == "span_1"
+    _assert_pseudonym(row["spans"][0]["id"], "span")
     assert row["spans"][0]["input"] == {"message": "Refund me"}
     assert row["spans"][0]["output"] == {"message": "Done"}
-    assert row["spans"][1]["parent_id"] == "span_1"
+    assert row["spans"][1]["parent_id"] == row["spans"][0]["id"]
     assert row["spans"][1]["kind"] == "tool"
     assert row["spans"][1]["status"] == "error"
 
@@ -1103,15 +1246,21 @@ def test_import_langfuse_observation_rows_group_by_trace_id(
     rows = _read_jsonl(out)
     assert result.records_written == 2
     assert result.span_count == 3
-    assert [row["id"] for row in rows] == ["trace_1", "trace_2"]
+    trace_ids = [row["id"] for row in rows]
+    assert len(set(trace_ids)) == 2
+    for trace_id in trace_ids:
+        _assert_pseudonym(trace_id, "trace")
     assert rows[0]["name"] == "first"
     assert "attributes" not in rows[0]
     assert rows[0]["duration_ms"] == 1000.0
-    assert [span["id"] for span in rows[0]["spans"]] == ["span_1", "span_2"]
+    first_span_ids = [span["id"] for span in rows[0]["spans"]]
+    assert len(set(first_span_ids)) == 2
+    for span_id in first_span_ids:
+        _assert_pseudonym(span_id, "span")
     assert rows[0]["spans"][0]["kind"] == "span"
     assert "attributes" not in rows[0]["spans"][0]
-    assert rows[0]["spans"][1]["parent_id"] == "span_1"
-    assert [span["id"] for span in rows[1]["spans"]] == ["span_1"]
+    assert rows[0]["spans"][1]["parent_id"] == rows[0]["spans"][0]["id"]
+    _assert_pseudonym(rows[1]["spans"][0]["id"], "span")
 
 
 def test_load_trace_views_validates_trace_view_rows_and_summaries(tmp_path: Path) -> None:
