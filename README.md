@@ -126,7 +126,7 @@ with `kensa.instrument()` and import the JSONL.
 
 | Command | What it does |
 | --- | --- |
-| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. Use `--redaction-model large` for higher-recall spaCy NER. |
+| `kensa init` | Set up the pytest harness and the `kensa-evals` skill. Use `--redaction-model large` for higher-recall model. |
 | `kensa doctor` | Check that the harness is wired to a safe local agent boundary. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
 | `kensa import --from <provider>` | Import local or connected trace evidence. |
