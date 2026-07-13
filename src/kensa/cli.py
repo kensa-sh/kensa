@@ -1631,6 +1631,7 @@ def _cmd_init_inner(
         steps,
         redaction_source,
         model=redaction_model or _configured_redaction_model(settings),
+        required=redaction_model is not None,
     )
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
@@ -1712,8 +1713,9 @@ def _configure_redaction_readiness(
     evidence_source: EvidenceSource | None,
     *,
     model: RedactionModelChoice = "small",
+    required: bool = False,
 ) -> _RedactionInitStatus:
-    if evidence_source is None:
+    if evidence_source is None and not required:
         return "skipped"
     if not _ensure_redaction_dependencies(steps):
         return "failed"

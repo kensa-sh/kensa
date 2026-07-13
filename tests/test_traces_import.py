@@ -509,6 +509,29 @@ def test_import_rejects_corrupt_pseudonym_key(
     assert not out.exists()
 
 
+def test_pseudonym_key_publish_keeps_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    candidate = b"candidate" * 4
+    winner = b"winner!!" * 4
+    key_path = tmp_path / ".kensa" / "pseudonym.key"
+    monkeypatch.setattr(traces_module.secrets, "token_bytes", lambda size: candidate)
+
+    def publish_winner(source: Path, target: Path) -> None:
+        assert source.read_bytes() == candidate
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+        target.write_bytes(winner)
+        raise FileExistsError
+
+    monkeypatch.setattr(traces_module.os, "link", publish_winner)
+
+    assert traces_module._pseudonym_key() == winner
+    assert key_path.read_bytes() == winner
+    assert not list(key_path.parent.glob(".pseudonym.key.*"))
+
+
 def test_import_redacts_values_with_stable_instance_aliases(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,

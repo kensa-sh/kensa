@@ -1203,13 +1203,24 @@ def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
 def _pseudonym_key() -> bytes:
     path = Path.cwd() / _PSEUDONYM_KEY_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        pass
-    else:
-        with os.fdopen(descriptor, "wb") as key_file:
-            key_file.write(secrets.token_bytes(_PSEUDONYM_KEY_BYTES))
+    if not path.exists():
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                delete=False,
+            ) as key_file:
+                temporary_path = Path(key_file.name)
+                key_file.write(secrets.token_bytes(_PSEUDONYM_KEY_BYTES))
+            temporary_path.chmod(0o600)
+            os.link(temporary_path, path)
+        except FileExistsError:
+            pass
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
     path.chmod(0o600)
     key = path.read_bytes()
     if len(key) != _PSEUDONYM_KEY_BYTES:

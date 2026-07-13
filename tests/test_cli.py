@@ -2453,7 +2453,7 @@ def test_init_agent_all_flag_scaffolds_all_agent_instructions(
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     redaction_models: list[str] = []
 
-    def configure_redaction(steps, source, *, model="small"):
+    def configure_redaction(steps, source, *, model="small", required=False):
         redaction_models.append(model)
         return "ready"
 
@@ -4771,7 +4771,8 @@ def test_configure_redaction_readiness_statuses(
 
     monkeypatch.setattr(cli.redact, "ensure_redaction_ready", ready_bootstrap)
     assert cli._configure_redaction_readiness(steps, "trace_export", model="large") == "ready"
-    assert selected_models == ["large"]
+    assert cli._configure_redaction_readiness(None, None, model="large", required=True) == "ready"
+    assert selected_models == ["large", "large"]
     output = capsys.readouterr().out
     assert "Configure sensitive data protection" not in output
     assert "traces will be auto redacted during import" not in output
@@ -4808,16 +4809,34 @@ def test_init_large_redaction_model_uses_persisted_evidence_source(
         )
     )
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    calls: list[tuple[Any, str]] = []
+    calls: list[tuple[Any, str, bool]] = []
 
-    def configure_redaction(steps, source, *, model="small"):
-        calls.append((source, model))
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
         return "ready"
 
     monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
 
     assert cli.main(["init", "--redaction-model", "large"]) == 0
-    assert calls == [("local", "large")]
+    assert calls == [("local", "large", True)]
+
+
+def test_init_large_redaction_model_requires_setup_without_evidence_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str, bool]] = []
+
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--redaction-model", "large"]) == 0
+    assert calls == [(None, "large", True)]
 
 
 def test_init_trace_source_rerun_preserves_configured_large_model(
@@ -4840,16 +4859,16 @@ def test_init_trace_source_rerun_preserves_configured_large_model(
         )
     )
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    calls: list[tuple[Any, str]] = []
+    calls: list[tuple[Any, str, bool]] = []
 
-    def configure_redaction(steps, source, *, model="small"):
-        calls.append((source, model))
+    def configure_redaction(steps, source, *, model="small", required=False):
+        calls.append((source, model, required))
         return "ready"
 
     monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
 
     assert cli.main(["init", "--trace-source", "local"]) == 0
-    assert calls == [("local", "large")]
+    assert calls == [("local", "large", False)]
 
 
 def test_redaction_init_failure_statuses() -> None:
