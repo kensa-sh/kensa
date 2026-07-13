@@ -551,14 +551,13 @@ def import_command(
 @click.option(
     "--redaction-model",
     type=click.Choice(["small", "large"], case_sensitive=False),
-    default="small",
-    show_default=True,
+    default=None,
     help="Pinned spaCy model used for mandatory redaction.",
 )
 def init(
     agent_choice: str | None,
     trace_source: str | None,
-    redaction_model: str,
+    redaction_model: str | None,
 ) -> None:
     """Set up Kensa."""
     selected_agent = cast(
@@ -566,7 +565,10 @@ def init(
         agent_choice.lower() if agent_choice else None,
     )
     selected_source = cast(EvidenceSource | None, trace_source.lower() if trace_source else None)
-    selected_model = cast(RedactionModelChoice, redaction_model.lower())
+    selected_model = cast(
+        RedactionModelChoice | None,
+        redaction_model.lower() if redaction_model else None,
+    )
     code = _cmd_init(selected_source, selected_agent, redaction_model=selected_model)
     raise click.exceptions.Exit(code)
 
@@ -1585,7 +1587,7 @@ def _cmd_init(
     evidence_source: EvidenceSource | None = None,
     agent_choice: AgentInstructionChoice | None = None,
     *,
-    redaction_model: RedactionModelChoice = "small",
+    redaction_model: RedactionModelChoice | None = None,
 ) -> int:
     steps = _Steps() if _is_interactive() else None
     if steps is None:
@@ -1611,7 +1613,7 @@ def _cmd_init_inner(
     explicit_evidence_source: EvidenceSource | None = None,
     explicit_agent_choice: AgentInstructionChoice | None = None,
     *,
-    redaction_model: RedactionModelChoice = "small",
+    redaction_model: RedactionModelChoice | None = None,
 ) -> int:
     settings = _read_settings()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
@@ -1622,10 +1624,13 @@ def _cmd_init_inner(
     )
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
     added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
+    redaction_source = evidence_source
+    if redaction_model is not None and redaction_source is None:
+        redaction_source = settings.init.evidence_source
     redaction_status = _configure_redaction_readiness(
         steps,
-        evidence_source,
-        model=redaction_model,
+        redaction_source,
+        model=redaction_model or _configured_redaction_model(settings),
     )
     connection_status = _configure_trace_source_connection(steps, evidence_source)
     _print_init_added_files(added_files, steps=steps)
@@ -1640,6 +1645,12 @@ def _cmd_init_inner(
     if steps is not None:
         steps.end("Setup files ready" if not failed else "[red]Setup incomplete[/red]")
     return 1 if failed else 0
+
+
+def _configured_redaction_model(settings: KensaSettings) -> RedactionModelChoice:
+    if settings.redaction is not None and settings.redaction.model == "en_core_web_lg":
+        return "large"
+    return "small"
 
 
 def _redaction_init_failed(

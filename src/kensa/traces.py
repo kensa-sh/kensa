@@ -90,10 +90,15 @@ _EVIDENCE_ATTRIBUTE_KEYS = frozenset(
     {
         "cost_usd",
         "gen_ai.completion",
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
         "gen_ai.prompt",
+        "gen_ai.provider.name",
         "gen_ai.request.model",
         "gen_ai.response.model",
         "gen_ai.system",
+        "gen_ai.usage.cache_creation.input_tokens",
+        "gen_ai.usage.cache_read.input_tokens",
         "gen_ai.usage.input_tokens",
         "gen_ai.usage.output_tokens",
         "gen_ai.usage.total_tokens",
@@ -864,8 +869,20 @@ def _otlp_span_view(
         duration_ms=_duration_ms(started_at, ended_at),
         status=_status_from_value(status.get("code")),
         status_message=_string_or_none(status.get("message")),
-        input=_first_value(attrs, "input", "gen_ai.prompt", "kensa.case.input"),
-        output=_first_value(attrs, "output", "gen_ai.completion", "kensa.final_output"),
+        input=_first_value(
+            attrs,
+            "input",
+            "gen_ai.input.messages",
+            "gen_ai.prompt",
+            "kensa.case.input",
+        ),
+        output=_first_value(
+            attrs,
+            "output",
+            "gen_ai.output.messages",
+            "gen_ai.completion",
+            "kensa.final_output",
+        ),
         usage=_usage_from_mapping(span, attrs=attrs),
     )
 
@@ -1102,6 +1119,7 @@ def _usage_from_mapping(row: dict[str, Any], *, attrs: dict[str, Any]) -> UsageV
                 "model_provider",
                 "llm.provider",
                 "kensa.llm.provider",
+                "gen_ai.provider.name",
                 "gen_ai.system",
             )
         ),
@@ -1120,21 +1138,27 @@ def _usage_from_mapping(row: dict[str, Any], *, attrs: dict[str, Any]) -> UsageV
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cache_read_input_tokens=_int_value(
-            _first_value(
-                usage,
-                "cache_read_input_tokens",
-                "cacheReadInputTokens",
-                "input_cached_tokens",
-                "inputCachedTokens",
+            _coalesce(
+                _first_value(
+                    usage,
+                    "cache_read_input_tokens",
+                    "cacheReadInputTokens",
+                    "input_cached_tokens",
+                    "inputCachedTokens",
+                ),
+                _first_value(attrs, "gen_ai.usage.cache_read.input_tokens"),
             )
         ),
         cache_creation_input_tokens=_int_value(
-            _first_value(
-                usage,
-                "cache_creation_input_tokens",
-                "cacheCreationInputTokens",
-                "input_cache_creation_tokens",
-                "inputCacheCreationTokens",
+            _coalesce(
+                _first_value(
+                    usage,
+                    "cache_creation_input_tokens",
+                    "cacheCreationInputTokens",
+                    "input_cache_creation_tokens",
+                    "inputCacheCreationTokens",
+                ),
+                _first_value(attrs, "gen_ai.usage.cache_creation.input_tokens"),
             )
         ),
         cost_usd=_float_value(

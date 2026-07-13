@@ -4781,9 +4781,9 @@ def test_configure_redaction_readiness_statuses(
 
 
 def test_init_accepts_large_redaction_model_flag(monkeypatch) -> None:
-    calls: list[tuple[Any, Any, str]] = []
+    calls: list[tuple[Any, Any, str | None]] = []
 
-    def fake_init(evidence_source=None, agent_choice=None, *, redaction_model="small"):
+    def fake_init(evidence_source=None, agent_choice=None, *, redaction_model=None):
         calls.append((evidence_source, agent_choice, redaction_model))
         return 0
 
@@ -4791,6 +4791,65 @@ def test_init_accepts_large_redaction_model_flag(monkeypatch) -> None:
 
     assert cli.main(["init", "--redaction-model", "large"]) == 0
     assert calls == [(None, None, "large")]
+
+
+def test_init_large_redaction_model_uses_persisted_evidence_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".kensa").mkdir()
+    (tmp_path / ".kensa" / "settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "init": {"evidence_source": "local"},
+            }
+        )
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str]] = []
+
+    def configure_redaction(steps, source, *, model="small"):
+        calls.append((source, model))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--redaction-model", "large"]) == 0
+    assert calls == [("local", "large")]
+
+
+def test_init_trace_source_rerun_preserves_configured_large_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".kensa").mkdir()
+    (tmp_path / ".kensa" / "settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.settings.v1",
+                "init": {"evidence_source": "local"},
+                "redaction": {
+                    "model": "en_core_web_lg",
+                    "model_version": "3.8.0",
+                    "checksum_verified": True,
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    calls: list[tuple[Any, str]] = []
+
+    def configure_redaction(steps, source, *, model="small"):
+        calls.append((source, model))
+        return "ready"
+
+    monkeypatch.setattr(cli, "_configure_redaction_readiness", configure_redaction)
+
+    assert cli.main(["init", "--trace-source", "local"]) == 0
+    assert calls == [("local", "large")]
 
 
 def test_redaction_init_failure_statuses() -> None:

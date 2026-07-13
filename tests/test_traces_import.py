@@ -995,6 +995,113 @@ def test_import_otlp_records_groups_spans_into_trace_view(
     assert out.read_text() == ""
 
 
+def test_import_otlp_current_genai_attributes_retain_evidence_and_usage(
+    tmp_path: Path,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    input_messages = {
+        "arrayValue": {
+            "values": [
+                {
+                    "kvlistValue": {
+                        "values": [
+                            {"key": "role", "value": {"stringValue": "user"}},
+                            {
+                                "key": "content",
+                                "value": {"stringValue": "Hello Alice"},
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    source = tmp_path / "otlp-genai.json"
+    source.write_text(
+        json.dumps(
+            {
+                "resourceSpans": [
+                    {
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "trace-1",
+                                        "spanId": "span-1",
+                                        "name": "chat",
+                                        "attributes": [
+                                            {
+                                                "key": "gen_ai.input.messages",
+                                                "value": input_messages,
+                                            },
+                                            {
+                                                "key": "gen_ai.output.messages",
+                                                "value": {
+                                                    "stringValue": (
+                                                        '[{"role":"assistant",'
+                                                        '"content":"Hi Alice"}]'
+                                                    )
+                                                },
+                                            },
+                                            {
+                                                "key": "gen_ai.provider.name",
+                                                "value": {"stringValue": "openai"},
+                                            },
+                                            {
+                                                "key": "gen_ai.response.model",
+                                                "value": {"stringValue": "gpt-5-mini"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.input_tokens",
+                                                "value": {"intValue": "10"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.output_tokens",
+                                                "value": {"intValue": "5"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.cache_read.input_tokens",
+                                                "value": {"intValue": "4"},
+                                            },
+                                            {
+                                                "key": "gen_ai.usage.cache_creation.input_tokens",
+                                                "value": {"intValue": "2"},
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
+    out = tmp_path / "otlp-genai.jsonl"
+
+    import_trace_source(
+        provider="otlp",
+        source=str(source),
+        out=out,
+        limit=1,
+        max_payload_bytes=source.stat().st_size,
+    )
+
+    span = _read_jsonl(out)[0]["spans"][0]
+    assert span["input"] == [{"role": "user", "content": "Hello [PERSON_1]"}]
+    assert span["output"] == '[{"role":"assistant","content":"Hi [PERSON_1]"}]'
+    assert span["usage"] == {
+        "model_provider": "openai",
+        "model": "gpt-5-mini",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "cache_read_input_tokens": 4,
+        "cache_creation_input_tokens": 2,
+        "cost_usd": None,
+    }
+
+
 def test_import_langfuse_records_project_allowlisted_evidence(
     tmp_path: Path,
     redaction_ready: FakeRedactionEnv,
