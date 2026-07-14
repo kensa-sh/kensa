@@ -29,7 +29,7 @@ import pytest
 from kensa.pytest import judge, kensa_case
 
 
-@pytest.mark.kensa(trials=3)
+@pytest.mark.kensa(trials=3, timeout_s=180)
 @pytest.mark.parametrize(
     "case",
     [

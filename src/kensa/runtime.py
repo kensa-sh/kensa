@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -32,10 +33,23 @@ _PROVIDER_READY = False
 class KensaTrial:
     trial_index: int
     configured_trials: int
+    timeout_s: float | None = None
 
     @property
     def id(self) -> str:
         return f"trial{self.trial_index}"
+
+
+@dataclass(frozen=True)
+class ActiveOperation:
+    name: str
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "attributes": self.attributes,
+        }
 
 
 @dataclass
@@ -182,6 +196,7 @@ class TrialMetadata:
     duration_ms: float = 0.0
     trace: dict[str, Any] = field(default_factory=dict)
     judges: list[dict[str, Any]] = field(default_factory=list)
+    active_operation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +213,7 @@ class TrialMetadata:
             "duration_ms": self.duration_ms,
             "trace": self.trace,
             "judges": self.judges,
+            "active_operation": self.active_operation,
         }
 
 
@@ -212,12 +228,15 @@ class KensaTrialRuntime:
         group_id: str,
         case_id: str,
         no_judge: bool,
+        judge_timeout_s: float = 30.0,
+        operation_callback: Callable[[ActiveOperation | None], None] | None = None,
     ) -> None:
         self.trial = trial
         self.nodeid = nodeid
         self.group_id = group_id
         self.case_id = case_id
         self.no_judge = no_judge
+        self.judge_timeout_s = judge_timeout_s
         self.trace = KensaTrace()
         self.output_recorded = False
         self.output: Any = None
@@ -225,6 +244,25 @@ class KensaTrialRuntime:
         self.judges: list[Any] = []
         self._run_started = False
         self._trace_id: str | None = None
+        self._active_operations: dict[object, ActiveOperation] = {}
+        self._operation_callback = operation_callback
+
+    @contextmanager
+    def operation(self, name: str, attributes: dict[str, Any]) -> Iterator[None]:
+        token = object()
+        operation = ActiveOperation(name=name, attributes=_jsonable_mapping(attributes))
+        self._active_operations[token] = operation
+        self._publish_active_operation(operation)
+        try:
+            yield
+        finally:
+            self._active_operations.pop(token)
+            active = next(reversed(self._active_operations.values()), None)
+            self._publish_active_operation(active)
+
+    def _publish_active_operation(self, operation: ActiveOperation | None) -> None:
+        if self._operation_callback is not None:
+            self._operation_callback(operation)
 
     def run_case(self, case: KensaCase, kensa_run: Callable[[KensaCase], Any]) -> Any:
         if self._run_started:
@@ -409,6 +447,7 @@ def current_runtime() -> KensaTrialRuntime | None:
 
 
 __all__ = [
+    "ActiveOperation",
     "KensaSpan",
     "KensaTrace",
     "KensaTrial",

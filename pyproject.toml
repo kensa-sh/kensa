@@ -86,7 +86,7 @@ testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
 markers = [
   "anthropic: live Anthropic provider integration tests",
-  "kensa(trials=N): mark a pytest Kensa eval",
+  "kensa(trials=N, timeout_s=SECONDS): mark a pytest Kensa eval",
   "live: opt-in tests that call external services",
   "openai: live OpenAI provider integration tests",
 ]

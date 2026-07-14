@@ -178,6 +178,24 @@ def test_agent(case):
     assert result.ret == 0
 
 
+def test_explicit_timeout_requires_kensa_eval(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+
+
+@pytest.mark.kensa(timeout_s=1)
+def test_agent():
+    pass
+"""
+    )
+
+    result = pytester.runpytest("-q")
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(["*timeout_s=...*requires kensa eval for hard containment*"])
+
+
 def test_kensa_marker_without_type_runs_successfully(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(
         test_eval="""

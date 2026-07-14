@@ -14,6 +14,7 @@ from kensa.case import (
     KensaUserMessage,
     kensa_case,
 )
+from kensa.errors import KensaTimeoutError
 from kensa.judge import JudgeResult, judge
 from kensa.runtime import KensaTrace
 
@@ -25,6 +26,7 @@ __all__ = [
     "KensaFunctionCall",
     "KensaMessage",
     "KensaSystemMessage",
+    "KensaTimeoutError",
     "KensaToolCall",
     "KensaToolMessage",
     "KensaTrace",

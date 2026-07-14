@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from kensa._serialization import jsonable
+from kensa.runtime import current_runtime
 from kensa.traces import write_trace_manifest
 
 
@@ -215,19 +216,40 @@ def _span_links(span: ReadableSpan) -> list[dict[str, Any]]:
 
 @contextmanager
 def record_span(name: str, **attributes: Any) -> Iterator[None]:
+    attrs = _flatten_attributes(attributes)
+    with _record_span(name, span_attributes=attrs, operation_attributes=attrs):
+        yield
+
+
+@contextmanager
+def _record_span(
+    name: str,
+    *,
+    span_attributes: dict[str, Any],
+    operation_attributes: dict[str, Any],
+) -> Iterator[None]:
     tracer = trace.get_tracer("kensa.app")
-    with tracer.start_as_current_span(name, attributes=attributes):
+    runtime = current_runtime()
+    operation = (
+        runtime.operation(name, operation_attributes) if runtime is not None else nullcontext()
+    )
+    with operation, tracer.start_as_current_span(name, attributes=span_attributes):
         yield
 
 
 @contextmanager
 def record_tool_call(name: str, **attributes: Any) -> Iterator[None]:
+    operation_attributes = _flatten_attributes(attributes)
     attrs = {
         "kensa.span.kind": "tool",
         "kensa.tool.name": name,
     }
-    attrs.update(attributes)
-    with record_span(name, **attrs):
+    attrs.update(operation_attributes)
+    with _record_span(
+        name,
+        span_attributes=attrs,
+        operation_attributes=operation_attributes,
+    ):
         yield
 
 
@@ -239,16 +261,33 @@ def record_llm_call(
     model: str | None = None,
     **attributes: Any,
 ) -> Iterator[None]:
+    operation_attributes = _flatten_attributes(attributes)
     attrs = {"kensa.span.kind": "llm"}
     if provider is not None:
         attrs["kensa.llm.provider"] = provider
         attrs["gen_ai.system"] = provider
+        operation_attributes["provider"] = provider
     if model is not None:
         attrs["kensa.llm.model"] = model
         attrs["gen_ai.request.model"] = model
-    attrs.update(attributes)
-    with record_span(name, **attrs):
+        operation_attributes["model"] = model
+    attrs.update(_flatten_attributes(attributes))
+    with _record_span(
+        name,
+        span_attributes=attrs,
+        operation_attributes=operation_attributes,
+    ):
         yield
+
+
+def _flatten_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    values = dict(attributes)
+    nested = values.pop("attributes", None)
+    if isinstance(nested, dict):
+        return {**nested, **values}
+    if nested is not None:
+        values["attributes"] = nested
+    return values
 
 
 __all__ = [

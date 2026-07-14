@@ -74,7 +74,7 @@ def kensa_run():
 | `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
 | `kensa_run` | you (`conftest.py`) | Callable that runs a case through your agent |
 | `kensa_trace` | Kensa | The trace collected for the current trial |
-| `@pytest.mark.kensa(trials=N)` | Kensa | Run each case `N` times (default `1`) |
+| `@pytest.mark.kensa(trials=N, timeout_s=SECONDS)` | Kensa | Run each case `N` times with an optional hard timeout under `kensa eval` |
 
 ## Async agents
 
@@ -141,7 +141,15 @@ Use `kensa eval` when you want CI-friendly artifacts written automatically:
 kensa eval                                  # runs tests/evals/ via pytest
 kensa eval --markdown-report eval.md        # Markdown summary for a PR comment
 kensa eval --json-report eval.json          # machine-readable artifact
+kensa eval --judge-timeout 30               # advisory deadline for judge calls
+kensa eval --trial-timeout 180              # default timeout for each trial
 kensa eval -- -k refund -q                  # pass args through to pytest after --
 ```
 
-`kensa eval` enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).
+`kensa eval` bounds the full setup, call, and teardown of each trial to 300 seconds by default. A marker `timeout_s` overrides `--trial-timeout`. On timeout, Kensa stops the suite immediately and preserves completed results, including the active operation published by `record_span`, `record_tool_call`, `record_llm_call`, or the built-in judge. Hard timeouts require macOS or Linux; explicit `timeout_s` values are rejected under direct `pytest` because there is no parent watchdog.
+
+Judge calls have a separate 30-second advisory deadline. Built-in judge timeouts return an error-valued `JudgeResult` instead of ending the trial. Custom judge providers receive `timeout_s` and must honor it.
+
+`kensa eval` rejects distributed pytest execution because the watchdog owns one active trial. Remove pytest-xdist worker options such as `-n` or `--numprocesses`, including options configured through pytest settings. Direct pytest remains unchanged.
+
+`kensa eval` also enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).

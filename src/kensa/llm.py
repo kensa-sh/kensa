@@ -8,6 +8,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from kensa.errors import KensaTimeoutError
 from kensa.models import LLMConfig, LLMModel, LLMProvider
 
 DEFAULT_LLM_MODEL = LLMModel.GPT_5_4_MINI.value
@@ -53,6 +54,7 @@ def complete(
     temperature: float | None = 0.0,
     response_format: StructuredResponseFormat | None = None,
     metadata: dict[str, Any] | None = None,
+    timeout_s: float | None = None,
 ) -> LLMResult:
     """Run a single chat-style LLM completion through Any LLM."""
 
@@ -67,6 +69,8 @@ def complete(
         kwargs["temperature"] = temperature
     if response_format is not None:
         kwargs["response_format"] = response_format
+    if timeout_s is not None:
+        kwargs["client_args"] = {"timeout": timeout_s, "max_retries": 0}
 
     response = _completion(**kwargs)
     message = _chat_message(response)
@@ -128,7 +132,28 @@ def _completion(**kwargs: Any) -> Any:
         raise LLMProviderError(
             "Any LLM is not installed. Install Kensa with its runtime dependencies."
         ) from exc
-    return completion(**kwargs)
+    try:
+        return completion(**kwargs)
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise KensaTimeoutError(str(exc) or "LLM completion timed out") from exc
+        raise
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    current: Exception | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        exception_type = type(current)
+        provider = exception_type.__module__.partition(".")[0]
+        if isinstance(current, TimeoutError) or (
+            exception_type.__name__ == "APITimeoutError" and provider in {"anthropic", "openai"}
+        ):
+            return True
+        original = getattr(current, "original_exception", None)
+        current = original if isinstance(original, Exception) else None
+    return False
 
 
 def _model_value(model: LLMModelInput) -> LLMModel | None:

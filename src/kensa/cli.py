@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from kensa import cli_inspect, cli_output, cli_traces, redact
+from kensa.artifacts import write_run_artifacts
 from kensa.constants import (
     CLI_EPILOG,
     CLI_LOGO,
@@ -60,6 +61,16 @@ from kensa.traces import (
     import_trace_source,
     safe_endpoint,
     safe_import_artifact,
+)
+from kensa.watchdog import (
+    DEFAULT_JUDGE_TIMEOUT_S,
+    DEFAULT_TRIAL_TIMEOUT_S,
+    DISTRIBUTED_PYTEST_UNSUPPORTED,
+    WatchdogControl,
+    run_eval_process,
+    supported_watchdog_platform,
+    validate_timeout_s,
+    write_control,
 )
 
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -372,6 +383,18 @@ def main(argv: list[str] | None = None) -> int:
     return int(result or 0)
 
 
+def _validate_timeout_option(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: float,
+) -> float:
+    del ctx, param
+    try:
+        return validate_timeout_s(value)
+    except ValueError as exc:
+        raise click.BadParameter("must be a positive finite number") from exc
+
+
 @cli.command(
     name="eval",
     epilog=CLI_EPILOG,
@@ -380,6 +403,22 @@ def main(argv: list[str] | None = None) -> int:
 @click.option("--json-report", default=None, help="Write the Kensa JSON artifact to this path.")
 @click.option("--markdown-report", default=None, help="Write a Markdown summary to this path.")
 @click.option("--no-judge", is_flag=True, help="Disable judge calls.")
+@click.option(
+    "--judge-timeout",
+    default=DEFAULT_JUDGE_TIMEOUT_S,
+    show_default=True,
+    type=float,
+    callback=_validate_timeout_option,
+    help="Maximum seconds for each judge call.",
+)
+@click.option(
+    "--trial-timeout",
+    default=DEFAULT_TRIAL_TIMEOUT_S,
+    show_default=True,
+    type=float,
+    callback=_validate_timeout_option,
+    help="Maximum seconds for each eval trial.",
+)
 @click.argument("tokens", nargs=-1, type=click.UNPROCESSED)
 def eval_command(
     tokens: tuple[str, ...],
@@ -387,6 +426,8 @@ def eval_command(
     json_report: str | None,
     markdown_report: str | None,
     no_judge: bool,
+    judge_timeout: float,
+    trial_timeout: float,
 ) -> None:
     """Run your evals."""
     paths, pytest_args = _split_eval_tokens(tokens)
@@ -396,6 +437,8 @@ def eval_command(
         json_report=json_report,
         markdown_report=markdown_report,
         no_judge=no_judge,
+        judge_timeout=judge_timeout,
+        trial_timeout=trial_timeout,
     )
     raise click.exceptions.Exit(_cmd_eval(args, pytest_args))
 
@@ -693,9 +736,78 @@ class _Steps:
         self._console.print()
 
 
+def _print_eval_heartbeat(message: str) -> None:
+    click.echo(message, err=True)
+
+
+def _pytest_args_enable_xdist(pytest_args: list[str]) -> bool:
+    for index, argument in enumerate(pytest_args):
+        if argument in {"-d", "--tx"} or argument.startswith("--tx="):
+            return True
+        if argument in {"-n", "--numprocesses", "--dist"}:
+            value = pytest_args[index + 1] if index + 1 < len(pytest_args) else ""
+            if value not in {"0", "no"}:
+                return True
+        option, separator, value = argument.partition("=")
+        if separator and option in {"--numprocesses", "--dist"} and value not in {"0", "no"}:
+            return True
+        if argument.startswith("-n") and argument != "-n" and argument[2:].lstrip("=") != "0":
+            return True
+    return False
+
+
 def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
     paths = args.paths or list(DEFAULT_EVAL_PATHS)
     json_output = bool(getattr(args, "json", False))
+    trial_timeout = validate_timeout_s(getattr(args, "trial_timeout", DEFAULT_TRIAL_TIMEOUT_S))
+    judge_timeout = validate_timeout_s(getattr(args, "judge_timeout", DEFAULT_JUDGE_TIMEOUT_S))
+    if _pytest_args_enable_xdist(pytest_args):
+        if json_output:
+            cli_output.print_json_envelope(
+                command="eval",
+                ok=False,
+                exit_code=2,
+                summary="Kensa eval does not support distributed pytest execution.",
+                data={"paths": paths, "pytest_args": pytest_args},
+                errors=[DISTRIBUTED_PYTEST_UNSUPPORTED],
+            )
+        else:
+            click.echo(DISTRIBUTED_PYTEST_UNSUPPORTED, err=True)
+        return 2
+    if not supported_watchdog_platform():
+        message = "kensa eval trial timeouts require macOS or Linux."
+        if json_output:
+            cli_output.print_json_envelope(
+                command="eval",
+                ok=False,
+                exit_code=2,
+                summary="Kensa eval is unsupported on this platform.",
+                data={"paths": paths, "pytest_args": pytest_args},
+                errors=[message],
+            )
+        else:
+            click.echo(message, err=True)
+        return 2
+    artifact_dir = Path.cwd() / ".kensa"
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    artifact = artifact_dir / "results" / f"{run_id}.json"
+    control_path = artifact_dir / "state" / f"{run_id}.json"
+    write_run_artifacts(
+        run_id=run_id,
+        trials=[],
+        result_path=artifact,
+        artifact_dir=artifact_dir,
+    )
+    write_control(
+        control_path,
+        WatchdogControl(
+            run_id=run_id,
+            result_path=artifact,
+            artifact_dir=artifact_dir,
+            default_timeout_s=trial_timeout,
+            judge_timeout_s=judge_timeout,
+        ),
+    )
     cmd = [
         sys.executable,
         "-m",
@@ -703,21 +815,30 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
         *paths,
         "--kensa-write-artifacts",
         "--kensa-report=json" if json_output else "--kensa-report=term",
+        "--kensa-control-path",
+        str(control_path),
     ]
     if args.no_judge:
         cmd.append("--kensa-no-judge")
     cmd.extend(pytest_args)
-    if json_output:
-        with cli_output.wait_status("Running Kensa evals"):
-            completed = subprocess.run(
+    try:
+        if json_output:
+            with cli_output.wait_status("Running Kensa evals"):
+                completed = run_eval_process(
+                    cmd,
+                    control_path=control_path,
+                    capture_output=True,
+                    heartbeat=_print_eval_heartbeat,
+                )
+        else:
+            completed = run_eval_process(
                 cmd,
-                check=False,
-                capture_output=True,
-                text=True,
+                control_path=control_path,
+                capture_output=False,
+                heartbeat=_print_eval_heartbeat,
             )
-    else:
-        completed = subprocess.run(cmd, check=False, capture_output=False, text=False)
-    artifact = _latest_result_artifact(Path.cwd() / ".kensa" / "results")
+    finally:
+        control_path.unlink(missing_ok=True)
     warnings: list[str] = []
     errors: list[str] = []
     next_steps: list[str] = []
@@ -747,7 +868,18 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
     next_steps.extend(eval_problem.next_steps)
     final_exit_code = exit_code
     summary = eval_problem.summary
-    if exit_code == 0 and readiness.smoke_only:
+    distributed_pytest_rejected = DISTRIBUTED_PYTEST_UNSUPPORTED in (
+        getattr(completed, "stderr", "") or ""
+    )
+    if distributed_pytest_rejected:
+        errors.append(DISTRIBUTED_PYTEST_UNSUPPORTED)
+        summary = "Kensa eval does not support distributed pytest execution."
+        final_exit_code = 2
+    elif completed.timeout is not None:
+        errors.append(completed.timeout.message)
+        summary = "Kensa eval timed out."
+        final_exit_code = 1
+    elif exit_code == 0 and readiness.smoke_only:
         warnings.append(_SMOKE_ONLY_WARNING)
         next_steps.append(_EVALS_NEXT_STEP)
         errors.append("Evals readiness is missing: only the readiness smoke passed.")
@@ -778,6 +910,7 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
                 "markdown_report": markdown_report,
                 "run_id": artifact_payload.get("run_id") if artifact_payload else None,
                 "aggregates": artifact_payload.get("aggregates", []) if artifact_payload else [],
+                "timeout": completed.timeout.to_dict() if completed.timeout else None,
                 **_eval_readiness_data(readiness),
                 "pytest": {
                     "returncode": exit_code,
@@ -789,6 +922,10 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
             errors=errors,
             next_steps=next_steps,
         )
+    elif completed.timeout is not None:
+        cli_output.step("kensa eval")
+        cli_output.item(completed.timeout.message, ok=False, err=True)
+        cli_output.notice(f"Artifact: {cli_output.display_path(artifact)}")
     elif exit_code == _PYTEST_NO_TESTS_COLLECTED:
         cli_output.step("kensa eval")
         cli_output.item(eval_problem.errors[0], ok=False, err=True)

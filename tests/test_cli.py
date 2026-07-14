@@ -506,11 +506,11 @@ def test_eval_terminal_failure_prints_next_steps(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        del kwargs
-        return subprocess.CompletedProcess(args=args[0], returncode=1)
+    def fake_run(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args, kwargs
+        return SimpleNamespace(returncode=1, stdout="", stderr="", timeout=None)
 
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "run_eval_process", fake_run)
 
     code = cli._cmd_eval(
         SimpleNamespace(
@@ -2160,26 +2160,26 @@ def test_eval_json_warns_on_malformed_artifact(
     capsys,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result_dir = tmp_path / ".kensa" / "results"
-    result_dir.mkdir(parents=True)
-    (result_dir / "run.json").write_text("{bad")
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda *a, **kw: subprocess.CompletedProcess(
-            args=[],
+
+    def malformed_run(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args
+        control = json.loads(Path(kwargs["control_path"]).read_text())
+        Path(control["result_path"]).write_text("{bad")
+        return SimpleNamespace(
             returncode=1,
             stdout="pytest out",
             stderr="pytest err",
-        ),
-    )
+            timeout=None,
+        )
+
+    monkeypatch.setattr(cli, "run_eval_process", malformed_run)
 
     code = main(["eval", "--json"])
 
     assert code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["data"]["artifact"].endswith("run.json")
+    assert payload["data"]["artifact"].endswith(".json")
     assert payload["data"]["run_id"] is None
     assert payload["data"]["aggregates"] == []
     assert payload["warnings"]
@@ -2196,13 +2196,13 @@ def test_eval_json_fails_when_trace_artifact_missing_and_no_durable_evals(
     result_dir.mkdir(parents=True)
     (result_dir / "run.json").write_text(json.dumps({"run_id": "run", "aggregates": []}))
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda *a, **kw: subprocess.CompletedProcess(
-            args=[],
+        cli,
+        "run_eval_process",
+        lambda *a, **kw: SimpleNamespace(
             returncode=0,
             stdout="pytest out",
             stderr="pytest err",
+            timeout=None,
         ),
     )
 
@@ -2226,9 +2226,14 @@ def test_eval_terminal_reports_missing_durable_when_no_aggregates(
     result_dir.mkdir(parents=True)
     (result_dir / "run.json").write_text(json.dumps({"run_id": "run", "aggregates": []}))
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda *a, **kw: subprocess.CompletedProcess(args=[], returncode=0),
+        cli,
+        "run_eval_process",
+        lambda *a, **kw: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+            timeout=None,
+        ),
     )
 
     code = main(["eval"])
