@@ -1,0 +1,61 @@
+---
+title: Skill
+description: The kensa-evals skill drives the eval lifecycle from your coding agent.
+sidebarTitle: Skill
+keywords:
+  - skill
+  - kensa-evals
+  - claude code
+  - codex
+  - cursor
+---
+
+`kensa init` installs the Kensa skill set into your coding agent, led by the **`kensa-evals`** orchestrator. Ask the agent to set up or extend evals and `kensa-evals` walks the full lifecycle: wire the harness, confirm readiness, import evidence, inspect it into eval ideas, and generate and run evals.
+
+## Installation
+
+```bash
+kensa init
+```
+
+`kensa init` detects your coding agent from project markers and writes the skills to the right place. The `kensa-evals` entrypoint lands at:
+
+| Agent | Markers | Skill path |
+|---|---|---|
+| Claude Code | `.claude/`, `CLAUDE.md` | `.claude/skills/kensa-evals/SKILL.md` |
+| Codex | `.agents/`, `AGENTS.md` | `.agents/skills/kensa-evals/SKILL.md` |
+| Cursor | `.cursor/` | `.cursor/skills/kensa-evals/SKILL.md` |
+
+The `kensa-setup`, `kensa-inspect`, and `kensa-generate` skills install alongside it in the same `skills/` directory. If no agent is detected, `kensa init` prints a copyable setup prompt instead. Re-run `kensa init` to refresh the skills after upgrading Kensa.
+
+## Lifecycle
+
+`kensa-evals` starts with state detection and routes to the first incomplete stage of the Kensa lifecycle:
+
+```text
+setup  →  evidence  →  inspect  →  approval  →  generate  →  verify
+```
+
+Its checklist:
+
+1. **Wire the harness** - connect `tests/evals/conftest.py::kensa_run(case)` to the real agent, then run `kensa doctor` and resolve any warnings.
+2. **Import evidence** - `kensa import --from <provider>` to pull bounded trace evidence.
+3. **Inspect** - mine imports into a YAML eval-idea queue under `.kensa/inspect/`, read with `kensa inspect list`.
+4. **Approve** - mark the ideas worth keeping `status: approved`, then validate with `kensa inspect lint`.
+5. **Generate** - materialize approved ideas as `tests/evals/test_<id>.py`.
+6. **Verify** - `kensa eval` runs the suite and reports verdicts.
+
+## The skill set
+
+`kensa-evals` is the only entrypoint you invoke; it hands off to phase skills at each stage:
+
+| Skill | Role |
+|---|---|
+| `kensa-evals` | Orchestrator - detects state and routes the lifecycle from setup through verification |
+| `kensa-setup` | Connects the pytest harness to the real local agent boundary until `kensa doctor` passes |
+| `kensa-inspect` | Reads redacted TraceView evidence and writes a schema-validated YAML queue of eval ideas |
+| `kensa-generate` | Writes and maintains `tests/evals/test_*.py` files from approved ideas |
+
+## Guardrails
+
+The skill is built to keep evals honest. `kensa doctor` flags harness patterns that fake a passing run - stub or mock agent classes, constructor bypasses, swallowed exceptions, hard-coded output fallbacks. The goal is evals wired to your real agent, so a green suite actually means the behavior held.

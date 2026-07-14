@@ -1,0 +1,112 @@
+---
+title: Tracing & imports
+description: Bring real agent behavior into Kensa from Langfuse, a trace export, or local capture.
+sidebarTitle: Tracing
+keywords:
+  - tracing
+  - imports
+  - langfuse
+  - opentelemetry
+---
+
+Kensa turns observed behavior into evals. Trace evidence reaches Kensa two ways: **imported** from an observability provider or export file, or **captured locally** from an instrumented run. Imports become minimized, redacted evidence under `.kensa/traces/` that your coding agent can mine into evals.
+
+<Note>`.kensa/traces/` is local evidence, not an observability backend. Kensa imports bounded exports to build CI regression tests; it does not stream or store your production telemetry.</Note>
+
+## Importing from a provider
+
+**Langfuse** is supported as a live connection. Connect once, then import.
+
+```bash
+kensa connect langfuse           # verify credentials, save non-secret metadata
+kensa import --from langfuse --since 7d --limit 200
+```
+
+`kensa connect` saves connection metadata to `.kensa/connections/<provider>.json`. API keys are read from environment variables (or a configured dotenv) at run time and are **never** written to that file. By default `connect` verifies access before saving; pass `--configure-only` to skip the check.
+
+| Provider | Connect | Key env vars |
+|---|---|---|
+| Langfuse | `kensa connect langfuse` | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
+
+Kensa automatically chooses between the legacy traces API and observations v2. Use `--langfuse-mode legacy_traces` or `--langfuse-mode observations_v2` only when you need to force one path.
+
+See the [CLI reference](/cli) for every `connect` and `import` flag.
+
+## Importing from a file
+
+You do not need a live connection. `kensa import` reads bounded export files in several formats:
+
+```bash
+kensa import --from json   --source traces.json
+kensa import --from jsonl  --source spans.jsonl
+kensa import --from otlp   --source otlp-export.json
+kensa import --from langfuse --source langfuse-export.json
+```
+
+| `--from` | Source |
+|---|---|
+| `json` | A JSON array of spans |
+| `jsonl` | One span per line |
+| `otlp` | OpenTelemetry Protocol export |
+| `langfuse` | A Langfuse export file (or a live connection) |
+
+Imports are normalized to Kensa's TraceView schema and written to `.kensa/traces/imports/<provider>-<timestamp>.jsonl`, with a `.manifest.json` recording provenance and redaction, and a `latest.json` pointer.
+
+## Evidence minimization and redaction
+
+Import has two privacy boundaries:
+
+1. Kensa projects provider payloads into a minimal TraceView. It retains trace and span relationships, names and kinds, tool names, timing and status, input and output, and model usage. Arbitrary provider metadata is dropped.
+2. Kensa scans retained values with deterministic recognizers, detect-secrets, Presidio, and spaCy NER. PII and secrets become typed placeholders such as `[PERSON_1]` before the artifact is written.
+
+Redaction is mandatory and fails closed. Missing dependencies or model readiness block imports, trace access, inspection, and generation. Missing or mismatched manifests also block artifact access.
+
+`kensa init` installs `kensa[redaction]` and prepares the small English model by default. Select the larger model when recall matters more than download size:
+
+```bash
+kensa init --redaction-model large
+```
+
+## Capturing traces locally
+
+If you do not have an observability provider, instrument your agent and let Kensa record spans directly. The recording helpers are exported from the top-level package:
+
+```python
+from kensa import instrument, record_tool_call, record_llm_call, record_span
+
+instrument()  # set up OpenTelemetry span capture
+
+with record_tool_call("lookup_customer"):
+    customer = lookup(order_id)
+
+with record_llm_call(provider="openai", model="gpt-5.4-mini"):
+    reply = client.responses.create(...)
+```
+
+Set `KENSA_TRACE_DIR` so spans are written to disk, then import them like any other JSONL source:
+
+```bash
+KENSA_TRACE_DIR=.kensa/traces python my_agent.py
+kensa import --from jsonl --source .kensa/traces/spans.jsonl
+```
+
+<Warning>Local capture files are raw telemetry and can contain sensitive payloads. Treat only successfully imported artifacts with valid redaction manifests as safe evidence.</Warning>
+
+Inside an eval, the same helpers feed the live `kensa_trace` fixture - your `kensa_run` harness wraps real tool and model calls with `record_tool_call` / `record_llm_call` so trace assertions have something to assert on. See [Pytest plugin](/pytest).
+
+## From traces to evals
+
+Once evidence is imported, your coding agent turns it into evals. The `kensa-inspect` skill reads the redacted evidence and proposes reviewable **eval ideas** as a YAML queue under `.kensa/inspect/`, which the CLI can read and validate:
+
+```bash
+kensa traces list         # list imported trace IDs
+kensa traces sample       # preview one trace
+kensa inspect list        # read the eval-idea review queue
+kensa inspect lint        # validate the queue against the imported traces
+```
+
+Approve the ideas worth keeping (change `status: pending` to `status: approved`), then the `kensa-generate` skill materializes them as `tests/evals/test_<id>.py`. No traces yet? Capture a local run (below), or let the skill seed a first eval from one realistic prompt.
+
+## OpenTelemetry compatibility
+
+Spans are standard [OpenTelemetry](https://opentelemetry.io/). Kensa annotates them with `kensa.span.kind`, `kensa.tool.name`, and `kensa.llm.provider` / `kensa.llm.model` attributes, and reads cost and token counts from LLM spans. Anything that emits OTLP can be exported and imported with `--from otlp`.

@@ -1,0 +1,85 @@
+---
+title: CI
+description: Run Kensa evals in continuous integration.
+sidebarTitle: CI
+keywords:
+  - ci
+  - github actions
+  - pull request
+  - regression
+  - secrets
+---
+
+Because evals are plain pytest files, `kensa eval` runs anywhere your Python tests already run. `kensa init` scaffolds a GitHub Actions workflow; here's a minimal version.
+
+## GitHub Actions
+
+```yaml title=".github/workflows/kensa.yml"
+name: Kensa
+
+on: [pull_request]
+
+jobs:
+  kensa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync
+      - run: uv run kensa eval
+```
+
+A failed eval fails the pytest session, which fails the job - regressions block the PR.
+
+## What needs credentials
+
+| Eval uses | Needs |
+|---|---|
+| Deterministic assertions only (`kensa_trace`, plain `assert`) | Nothing |
+| `judge(...)` | A provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), or `KENSA_JUDGE_RESULT` |
+| Trace imports from Langfuse | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` |
+
+Deterministic assertions run entirely locally and cost nothing, so you can gate on tool usage, output shape, cost, and latency without any secrets.
+
+If your evals call `judge(...)`, add the provider secret and (optionally) pin the model:
+
+```yaml title="Judge step with secrets"
+- run: uv run kensa eval
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    KENSA_JUDGE_MODEL: gpt-5.4-mini
+```
+
+To keep judge-bearing evals green without a live model, force a deterministic verdict instead:
+
+```yaml
+- run: uv run kensa eval
+  env:
+    KENSA_JUDGE_RESULT: pass
+```
+
+## Reports and PR comments
+
+Write a Markdown summary and post it as a sticky PR comment:
+
+```yaml title="PR comment step"
+- run: uv run kensa eval --markdown-report eval-report.md
+
+- uses: marocchino/sticky-pull-request-comment@v2
+  with:
+    path: eval-report.md
+```
+
+Use `--json-report eval.json` when you want a machine-readable artifact to upload or feed a dashboard.
+
+## Running on a schedule
+
+Pull-request runs catch regressions in changed code. A nightly run catches drift from model and dependency updates that no diff touched:
+
+```yaml title="Nightly drift check"
+on:
+  schedule:
+    - cron: "0 7 * * *"
+```
+
+Raise `trials` on the evals you run nightly to surface flakiness that a single run would miss. See [Pytest plugin](/pytest) for trial verdicts.

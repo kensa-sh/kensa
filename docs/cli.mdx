@@ -1,0 +1,160 @@
+---
+title: CLI reference
+description: Every kensa command and its options.
+sidebarTitle: CLI
+keywords:
+  - cli
+  - kensa init
+  - kensa import
+  - kensa inspect
+  - kensa eval
+---
+
+Kensa works standalone without a coding agent. Python 3.11+. The core pipeline is `init → doctor → connect → import → eval`; the review-and-generate steps in between are driven by your coding agent (the `kensa-inspect` and `kensa-generate` skills), with `kensa inspect` for reading the queue. Add `--json` to any command for a stable, machine-readable envelope.
+
+```bash
+kensa --help
+kensa <command> --help
+```
+
+## kensa init
+
+Set up the harness: scaffold `tests/evals/conftest.py` (the `kensa_run` fixture), `tests/evals/test_kensa_smoke.py`, a GitHub Actions workflow, and the Kensa skills for your coding agent. Interactive mode also offers to configure a first trace source (Langfuse, an existing trace export, or local capture). When trace evidence is configured, `init` installs the redaction dependencies and prepares the selected spaCy model.
+
+```bash
+kensa init
+kensa init --agent codex --trace-source langfuse
+kensa init --redaction-model large
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--agent` | interactive detection | Install instructions for `auto`, `claude`, `codex`, `cursor`, `other`, or `all` |
+| `--trace-source` | interactive selection | Persist `langfuse`, `trace_export`, or `local` |
+| `--redaction-model` | `small` | Prepare the `small` model, or use `large` for higher recall |
+
+## kensa doctor
+
+Verify the harness is wired to a real agent boundary and run the persistent smoke test. `kensa eval` expects `doctor` to pass first.
+
+```bash
+kensa doctor
+kensa doctor --json
+```
+
+| Flag | Description |
+|---|---|
+| `--json` | Emit a machine-readable envelope |
+| `--allow-suspicious-harness` | Warn instead of failing when the harness looks like a stub or mock |
+
+## kensa connect
+
+Authenticate with an observability provider and save non-secret connection metadata to `.kensa/connections/<provider>.json`. API keys are read from environment variables at run time and are never written to that file.
+
+### kensa connect langfuse
+
+```bash
+kensa connect langfuse
+kensa connect langfuse --endpoint https://cloud.langfuse.com --project prod
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--endpoint` | `LANGFUSE_BASE_URL`, then cloud | Langfuse base URL |
+| `--project` | - | Default Langfuse project |
+| `--public-key-env` | `LANGFUSE_PUBLIC_KEY` | Env var holding the public key |
+| `--secret-key-env` | `LANGFUSE_SECRET_KEY` | Env var holding the secret key |
+| `--configure-only` | off | Save metadata without verifying credentials |
+| `--json` | off | Machine-readable envelope |
+
+## kensa import
+
+Import bounded trace evidence into `.kensa/traces/imports/<provider>-<timestamp>.jsonl`. Kensa keeps only its allowlisted TraceView fields, redacts retained values in memory, and writes a provenance and redaction manifest bound to the artifact.
+
+```bash
+kensa import --from langfuse --since 7d --limit 200
+kensa import --from jsonl --source spans.jsonl
+kensa import --from otlp --source otlp-export.json
+kensa import --from langfuse --langfuse-mode observations_v2 --since 7d
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--from` | required | Provider: `json`, `jsonl`, `otlp`, `langfuse` |
+| `--source` | - | Local export file (required for file imports) |
+| `--endpoint` | - | One-off connected-provider endpoint override |
+| `--since` | - | Time window for connected imports (e.g. `7d`, `1h`, `30m`) |
+| `--limit` | `50` connected / `1000` files | Maximum traces to import |
+| `--max-payload-bytes` | `50000000` | Maximum local import payload size |
+| `--langfuse-mode` | `auto` | Use automatic fallback, `legacy_traces`, or `observations_v2` |
+| `--json` | off | Machine-readable envelope |
+
+Connected Langfuse imports use the metadata saved by `kensa connect` and do not need `--source`. Redaction is mandatory and cannot be disabled. Imports land in `.kensa/traces/imports/<provider>-<timestamp>.jsonl` with a `.manifest.json` and a `latest.json` pointer. See [Tracing & imports](/tracing).
+
+## kensa inspect
+
+Read and validate the YAML eval-idea review queue under `.kensa/inspect/` that the `kensa-inspect` skill writes from imported traces.
+
+```bash
+kensa inspect list                         # list queue items
+kensa inspect list --status approved       # filter by approval status
+kensa inspect lint                         # validate queue files
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--status` | - | Filter items by `pending`, `approved`, `rejected`, or `generated` |
+| `--json` | off | Machine-readable envelope |
+
+Approve ideas by changing `status: pending` to `status: approved`; the `kensa-generate` skill then materializes them as `tests/evals/test_<id>.py`.
+
+## kensa eval
+
+Run the evals through pytest and write CI-friendly artifacts to `.kensa/results/`.
+
+```bash
+kensa eval                                  # runs tests/evals/
+kensa eval --markdown-report eval.md
+kensa eval --json-report eval.json
+kensa eval --no-judge
+kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--json` | off | Machine-readable envelope |
+| `--json-report` | - | Write a Kensa JSON artifact to this path |
+| `--markdown-report` | - | Write a Markdown summary to this path |
+| `--no-judge` | off | Disable judge calls |
+
+Positional eval paths default to `tests/evals`. Anything after `--` is passed straight to pytest. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
+
+## kensa traces
+
+Read redacted TraceView evidence from the latest import (or a `--source` file). Your coding agent uses these to inspect imported behavior; you rarely call them directly.
+
+```bash
+kensa traces list                          # list imported trace IDs
+kensa traces sample                        # print one trace
+kensa traces get <trace-id>                # print one trace by ID
+kensa traces list --source <file> --json   # read a specific export as JSON
+```
+
+Each subcommand takes `--source` (defaults to the latest import) and `--json`.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `KENSA_JUDGE_MODEL` | Override the judge model (e.g. `claude-sonnet-4-6`) |
+| `KENSA_JUDGE_PROVIDER` | Override the judge provider (`openai`, `anthropic`) |
+| `KENSA_JUDGE_RESULT` | Force a fake judge verdict for local tests (`pass`, `fail`, `error`) |
+| `KENSA_LLM_MODEL` | Fallback model for judging |
+| `KENSA_LLM_PROVIDER` | Fallback provider for judging |
+| `KENSA_TRACE_DIR` | Directory for local span capture |
+| `KENSA_DOTENV` | Path to a dotenv file loaded at CLI startup |
+| `KENSA_MODELS_DIR` | Override the local redaction-model directory |
+| `KENSA_SERVICE_NAME` | Service name attached to local trace metadata |
+| `LANGFUSE_BASE_URL` | Default Langfuse endpoint |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Langfuse credentials |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Provider credentials for the judge |

@@ -1,0 +1,115 @@
+---
+title: Assertions
+description: Deterministic trace and output assertions. Fast, free, and they gate the judge.
+sidebarTitle: Assertions
+keywords:
+  - assertions
+  - kensa_trace
+  - output
+  - tools
+  - cost
+---
+
+Assertions are ordinary pytest `assert` statements. Deterministic ones are free and fast, so put them before any `judge(...)` call - pytest stops at the first failure, and a failed assertion never spends judge tokens.
+
+The `kensa_trace` fixture is your assertion helper for what the agent *did*. What it *said* is just the return value of `case.run(...)`, which you check with plain Python.
+
+## Trace assertions
+
+The `kensa_trace` fixture exposes the trace collected during the run.
+
+### Tool calls
+
+`kensa_trace.tools` answers questions about which tools were invoked:
+
+```python
+def test_refund(case, kensa_run, kensa_trace):
+    case.run(kensa_run)
+
+    # All listed tools were called (set membership, order-free)
+    assert kensa_trace.tools.include(["lookup_customer"])
+
+    # None of these tools were called (safety check)
+    assert kensa_trace.tools.exclude(["issue_refund", "delete_account"])
+
+    # Called in this relative order (other tools may interleave)
+    assert kensa_trace.tools.order(["search_flights", "book_flight"])
+
+    # No tool was called twice
+    assert kensa_trace.tools.no_repeats()
+```
+
+| Member | Returns | Checks |
+|---|---|---|
+| `tools.names` | `list[str]` | Tool names in call order |
+| `tools.include(names)` | `bool` | Every listed tool was called |
+| `tools.exclude(names)` | `bool` | None of the listed tools were called |
+| `tools.order(names)` | `bool` | Listed tools appear in this relative order |
+| `tools.no_repeats()` | `bool` | No tool was called more than once |
+
+### Resource bounds
+
+`kensa_trace` also reports cost, turns, and latency for budget assertions:
+
+```python
+def test_within_budget(case, kensa_run, kensa_trace):
+    case.run(kensa_run)
+
+    assert kensa_trace.cost_usd < 0.10        # under 10 cents
+    assert kensa_trace.llm_turns <= 5         # at most five model calls
+    assert kensa_trace.duration_ms < 30_000   # under 30 seconds
+```
+
+| Accessor | Type | Meaning |
+|---|---|---|
+| `kensa_trace.cost_usd` | `float` | Total trace cost in USD |
+| `kensa_trace.llm_turns` | `int` | Number of LLM spans |
+| `kensa_trace.duration_ms` | `float` | Total trace duration |
+| `kensa_trace.spans` | `list` | Raw collected spans, for custom checks |
+
+<Note>`kensa_trace.incomplete` is `True` when the trace could not be fully collected. Guard budget assertions on it if your harness can return early.</Note>
+
+## Output assertions
+
+`case.run(kensa_run)` returns whatever your agent produced - a string, a dict, or any JSON-serializable value. Assert on it directly with plain Python; no special helper is involved.
+
+```python
+import json
+import re
+
+
+def test_output_shape(case, kensa_run):
+    output = case.run(kensa_run)
+    text = output if isinstance(output, str) else json.dumps(output)
+
+    # Substring (case-insensitive)
+    assert "confirmation number" in text.lower()
+
+    # Regex match
+    assert re.search(r"\d{6,}", text)
+
+    # Structured output: assert on fields directly
+    assert output["status"] == "resolved"
+
+    # Safety check
+    assert "refund" not in text.lower()
+```
+
+## Assertions gate the judge
+
+Order matters. Deterministic assertions first, semantic judge last:
+
+```python
+def test_refund_policy(case, kensa_run, kensa_trace):
+    output = case.run(kensa_run)
+
+    # 1. Free, deterministic - fails fast.
+    assert kensa_trace.tools.include(["lookup_customer"])
+    assert kensa_trace.tools.exclude(["issue_refund"])
+
+    # 2. Only reached if the cheap checks passed.
+    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
+    assert result.passed, result.reasoning
+```
+
+If a tool assertion fails, the test fails immediately and the LLM judge never runs. See [Judge](/judge) for the semantic half.

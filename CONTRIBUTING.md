@@ -88,6 +88,21 @@ Coverage is intentionally strict: `src/kensa` must stay at 100%.
 
 The default suite is offline. Tests marked `live` are skipped unless explicitly enabled.
 
+## Documentation
+
+User documentation lives in `docs/` and deploys through Mintlify. Update it in the same PR as any
+user-facing CLI, API, workflow, or configuration change.
+
+Use Node.js 24 and run the documentation checks from the docs directory:
+
+```bash
+npm install --global mint@4.2.693
+cd docs
+mint validate
+mint broken-links
+mint a11y
+```
+
 ## Live Integration Tests
 
 Live provider tests exercise OpenAI and Anthropic through the same public LLM and pytest/judge
@@ -156,4 +171,5 @@ Release with generated notes.
 - GitHub release notes are grouped by PR labels; the PR Labels workflow applies those labels from
   conventional PR titles.
 - Keep eval files constrained to `tests/evals/test_*.py`.
+- Include matching `docs/` updates for user-facing behavior changes.
 - Include a short test plan in the PR.
