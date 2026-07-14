@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -15,14 +16,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from kensa.artifacts import load_trials, upsert_trial, write_json_atomic, write_run_artifacts
+from kensa.artifacts import (
+    load_trials,
+    trial_sort_key,
+    upsert_trial,
+    write_json_atomic,
+    write_run_artifacts,
+)
 from kensa.runtime import ActiveOperation, TrialMetadata
 
 DEFAULT_JUDGE_TIMEOUT_S = 30.0
 DEFAULT_TRIAL_TIMEOUT_S = 300.0
-DISTRIBUTED_PYTEST_UNSUPPORTED = (
-    "kensa eval does not support distributed pytest execution; remove pytest-xdist worker options."
-)
 WATCHDOG_HEARTBEAT_INTERVAL_S = 10.0
 WATCHDOG_OUTPUT_DRAIN_TIMEOUT_S = 0.5
 WATCHDOG_POLL_INTERVAL_S = 0.1
@@ -100,6 +104,7 @@ class WatchdogControl:
     result_path: Path
     artifact_dir: Path
     default_timeout_s: float
+    expected_workers: int | None = None
     judge_timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S
     active_trial: ActiveTrial | None = None
 
@@ -109,6 +114,7 @@ class WatchdogControl:
             "result_path": str(self.result_path),
             "artifact_dir": str(self.artifact_dir),
             "default_timeout_s": timeout_value(self.default_timeout_s),
+            "expected_workers": self.expected_workers,
             "judge_timeout_s": timeout_value(self.judge_timeout_s),
             "active_trial": self.active_trial.to_dict() if self.active_trial else None,
         }
@@ -121,6 +127,11 @@ class WatchdogControl:
             result_path=Path(str(payload["result_path"])),
             artifact_dir=Path(str(payload["artifact_dir"])),
             default_timeout_s=validate_timeout_s(payload["default_timeout_s"]),
+            expected_workers=(
+                int(payload["expected_workers"])
+                if payload.get("expected_workers") is not None
+                else None
+            ),
             judge_timeout_s=validate_timeout_s(
                 payload.get("judge_timeout_s", DEFAULT_JUDGE_TIMEOUT_S)
             ),
@@ -175,8 +186,6 @@ def supported_watchdog_platform() -> bool:
 
 
 def read_control(path: Path) -> WatchdogControl:
-    import json
-
     payload = json.loads(path.read_text())
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid Kensa watchdog control file: {path}")
@@ -185,6 +194,23 @@ def read_control(path: Path) -> WatchdogControl:
 
 def write_control(path: Path, control: WatchdogControl) -> None:
     write_json_atomic(path, control.to_dict())
+
+
+def worker_control_path(control_path: Path, worker_id: str) -> Path:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", worker_id) is None:
+        raise ValueError(f"Invalid pytest-xdist worker ID: {worker_id}")
+    return control_path.with_name(f"{control_path.stem}-{worker_id}{control_path.suffix}")
+
+
+def control_paths(control_path: Path) -> list[Path]:
+    worker_pattern = f"{control_path.stem}-*{control_path.suffix}"
+    paths = [control_path] if control_path.is_file() else []
+    return [*paths, *sorted(control_path.parent.glob(worker_pattern))]
+
+
+def remove_control_files(control_path: Path) -> None:
+    for path in control_paths(control_path):
+        path.unlink(missing_ok=True)
 
 
 def run_eval_process(
@@ -201,20 +227,43 @@ def run_eval_process(
         text=capture_output,
         start_new_session=True,
     )
-    last_heartbeat: tuple[str, int, int] | None = None
+    last_heartbeats: dict[Path, tuple[str, int, int] | None] = {}
     try:
         while True:
-            control = read_control(control_path)
-            active = control.active_trial
-            if active is not None and heartbeat is not None:
-                last_heartbeat = _emit_heartbeat(active, heartbeat, last_heartbeat)
-            if active is not None and _trial_expired(active):
-                confirmed = read_control(control_path).active_trial
+            active_controls: list[tuple[Path, WatchdogControl, ActiveTrial]] = []
+            observed_controls = _read_controls(control_path)
+            for path, control in observed_controls:
+                active = control.active_trial
+                if active is None:
+                    continue
+                active_controls.append((path, control, active))
+                if heartbeat is not None:
+                    last_heartbeats[path] = _emit_heartbeat(
+                        active,
+                        heartbeat,
+                        last_heartbeats.get(path),
+                    )
+            expired = [entry for entry in active_controls if _trial_expired(entry[2])]
+            if expired:
+                path, control, active = min(
+                    expired,
+                    key=lambda entry: (
+                        entry[2].started_monotonic_ns + int(entry[2].timeout_s * 1_000_000_000)
+                    ),
+                )
+                try:
+                    confirmed = read_control(path).active_trial
+                except FileNotFoundError:
+                    confirmed = None
                 if confirmed == active:
                     elapsed_ms = _trial_elapsed_ms(active)
                     _terminate_process_group(process)
                     stdout, stderr = _collect_output(process, capture_output)
-                    timeout = _record_timeout(control, active, duration_ms=elapsed_ms)
+                    timeout = _record_timeout(
+                        control,
+                        active,
+                        duration_ms=elapsed_ms,
+                    )
                     return EvalProcessResult(
                         returncode=1,
                         stdout=stdout,
@@ -228,6 +277,16 @@ def run_eval_process(
         _terminate_process_group(process)
         _collect_output(process, capture_output)
         raise
+
+
+def _read_controls(control_path: Path) -> list[tuple[Path, WatchdogControl]]:
+    controls: list[tuple[Path, WatchdogControl]] = []
+    for path in control_paths(control_path):
+        try:
+            controls.append((path, read_control(path)))
+        except FileNotFoundError:
+            continue
+    return controls
 
 
 def _trial_expired(active: ActiveTrial) -> bool:
@@ -447,11 +506,20 @@ def _record_timeout(
             ),
         )
     upsert_trial(trials, metadata)
+    trials.sort(key=trial_sort_key)
     write_run_artifacts(
         run_id=control.run_id,
         trials=trials,
         result_path=control.result_path,
         artifact_dir=control.artifact_dir,
+        complete=False,
+        interruption={
+            "kind": "timeout",
+            "message": message,
+            "nodeid": active.nodeid,
+            "case_id": active.case_id,
+            "trial_index": active.trial_index,
+        },
     )
     return TimeoutResult(
         case_id=active.case_id,
@@ -464,7 +532,6 @@ def _record_timeout(
 __all__ = [
     "DEFAULT_JUDGE_TIMEOUT_S",
     "DEFAULT_TRIAL_TIMEOUT_S",
-    "DISTRIBUTED_PYTEST_UNSUPPORTED",
     "ActiveTrial",
     "EvalProcessResult",
     "TimeoutResult",
@@ -472,9 +539,11 @@ __all__ = [
     "format_heartbeat",
     "format_timeout_s",
     "read_control",
+    "remove_control_files",
     "run_eval_process",
     "supported_watchdog_platform",
     "timeout_value",
     "validate_timeout_s",
+    "worker_control_path",
     "write_control",
 ]

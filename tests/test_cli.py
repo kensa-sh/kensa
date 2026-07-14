@@ -314,7 +314,7 @@ def test_agent(case, kensa_run):
 """
     )
 
-    code = main(["eval"])
+    code = main(["eval", "--workers", "1"])
 
     assert code == 0
     assert list((tmp_path / ".kensa" / "results").glob("*.json"))
@@ -334,7 +334,7 @@ def test_eval_json_fails_when_only_smoke_passes(
     monkeypatch.chdir(tmp_path)
     _write_ready_harness(tmp_path / "tests" / "evals")
 
-    code = main(["eval", "--json"])
+    code = main(["eval", "--workers", "1", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 1
@@ -360,7 +360,7 @@ def test_eval_terminal_fails_when_only_smoke_passes_and_reports_trace_path(
     monkeypatch.chdir(tmp_path)
     _write_ready_harness(tmp_path / "tests" / "evals")
 
-    code = main(["eval"])
+    code = main(["eval", "--workers", "1"])
 
     captured = capsys.readouterr()
     assert code == 1
@@ -391,6 +391,8 @@ def test_eval_help_omits_removed_require_durable(capsys) -> None:
     assert main(["eval", "--help"]) == 0
     output = capsys.readouterr().out
     assert "--require-durable" not in output
+    assert "--workers" in output
+    assert "default: 4" in output
     assert "Pass extra pytest arguments after --." in output
 
 
@@ -398,10 +400,10 @@ def test_eval_cli_rejects_bare_pytest_flags_and_accepts_dash_dash(
     monkeypatch,
     capsys,
 ) -> None:
-    calls: list[tuple[list[str], list[str]]] = []
+    calls: list[tuple[list[str], list[str], int]] = []
 
     def fake_cmd_eval(args, pytest_args: list[str]) -> int:
-        calls.append((args.paths, pytest_args))
+        calls.append((args.paths, pytest_args, args.workers))
         return 0
 
     monkeypatch.setattr(cli, "_cmd_eval", fake_cmd_eval)
@@ -413,7 +415,174 @@ def test_eval_cli_rejects_bare_pytest_flags_and_accepts_dash_dash(
     assert calls == []
 
     assert main(["eval", "--", "-k", "refund", "-q"]) == 0
-    assert calls == [(["tests/evals"], ["-k", "refund", "-q"])]
+    assert main(["eval", "--workers", "8", "--", "-q"]) == 0
+    assert calls == [
+        (["tests/evals"], ["-k", "refund", "-q"], 4),
+        (["tests/evals"], ["-q"], 8),
+    ]
+
+
+@pytest.mark.parametrize("workers", ["0", "-1", "many"])
+def test_eval_rejects_invalid_worker_counts(workers: str, capsys) -> None:
+    assert main(["eval", "--workers", workers]) == 2
+
+    assert "Invalid value for '--workers'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "pytest_args",
+    [
+        ["-n", "2"],
+        ["-n2"],
+        ["--numprocesses", "2"],
+        ["--numprocesses=2"],
+    ],
+)
+def test_eval_rejects_pytest_worker_count_passthrough(
+    pytest_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("pytest must not start for conflicting worker flags"),
+    )
+
+    assert main(["eval", "--", *pytest_args]) == 2
+
+    captured = capsys.readouterr()
+    assert "kensa eval --workers N" in captured.err
+
+
+@pytest.mark.parametrize("pytest_args", [["-d"], ["--tx", "popen"], ["--tx=popen"]])
+def test_eval_rejects_remote_xdist_workers(
+    pytest_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_eval_process",
+        lambda *args, **kwargs: pytest.fail("pytest must not start with remote workers"),
+    )
+
+    assert main(["eval", "--", *pytest_args]) == 2
+
+    assert "supports local workers only" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("pytest_args", [["--dist=each"], ["--dist", "each"]])
+def test_eval_rejects_each_distribution(
+    pytest_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("pytest must not start with --dist=each"),
+    )
+
+    assert main(["eval", "--", *pytest_args]) == 2
+
+    assert "--dist=each is incompatible with Kensa trials" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("pytest_args", "expected_error"),
+    [
+        (
+            ["-n", "2"],
+            "Set pytest worker count with kensa eval --workers N instead of passing "
+            "-n or --numprocesses after --.",
+        ),
+        (
+            ["--tx=popen"],
+            "Kensa concurrency supports local workers only; do not pass -d or --tx.",
+        ),
+        (
+            ["--dist=each"],
+            "pytest --dist=each is incompatible with Kensa trials because it runs every "
+            "trial on every worker. Use the default load mode or --dist=worksteal.",
+        ),
+    ],
+)
+def test_eval_json_rejects_incompatible_pytest_worker_options(
+    pytest_args: list[str],
+    expected_error: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_eval_process",
+        lambda *args, **kwargs: pytest.fail(
+            "pytest must not start with incompatible worker options"
+        ),
+    )
+
+    code = main(["eval", "--json", "--", *pytest_args])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert captured.err == ""
+    assert payload["command"] == "eval"
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 2
+    assert payload["summary"] == "Kensa eval received an incompatible pytest option."
+    assert payload["data"] == {
+        "paths": ["tests/evals"],
+        "workers": 4,
+        "pytest_args": pytest_args,
+    }
+    assert payload["errors"] == [expected_error]
+
+
+@pytest.mark.parametrize(
+    ("workers", "pytest_args", "expected_xdist"),
+    [
+        (1, [], []),
+        (4, [], ["-n", "4", "--dist=load"]),
+        (8, ["--dist=worksteal"], ["-n", "8", "--dist=load", "--dist=worksteal"]),
+    ],
+)
+def test_eval_constructs_worker_command(
+    workers: int,
+    pytest_args: list[str],
+    expected_xdist: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        del kwargs
+        commands.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="", timeout=None)
+
+    monkeypatch.setattr(cli, "run_eval_process", fake_run)
+
+    code = cli._cmd_eval(
+        SimpleNamespace(
+            paths=["tests/evals"],
+            json=False,
+            json_report=None,
+            markdown_report=None,
+            no_judge=False,
+            workers=workers,
+        ),
+        pytest_args,
+    )
+
+    assert code == 1
+    command = commands[0]
+    xdist_args = [token for token in command if token in {"-n", "0", "4", "8"} or "dist=" in token]
+    assert xdist_args == expected_xdist
+    capsys.readouterr()
 
 
 def test_eval_passes_with_domain_eval(
@@ -436,7 +605,7 @@ def test_answers_domain_question(case, kensa_run):
 """
     )
 
-    code = main(["eval", "--json"])
+    code = main(["eval", "--workers", "1", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
@@ -468,7 +637,7 @@ def kensa_run():
 """
     )
 
-    code = main(["eval", "--json"])
+    code = main(["eval", "--workers", "1", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 5
@@ -489,7 +658,7 @@ def test_eval_reports_no_tests_as_specific_terminal_problem(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "tests" / "evals").mkdir(parents=True)
 
-    code = main(["eval"])
+    code = main(["eval", "--workers", "1"])
 
     captured = capsys.readouterr()
     assert code == 5
@@ -519,6 +688,7 @@ def test_eval_terminal_failure_prints_next_steps(
             json_report=None,
             markdown_report=None,
             no_judge=False,
+            workers=1,
         ),
         [],
     )
@@ -1210,7 +1380,7 @@ def test_agent(case, kensa_run):
 """
     )
 
-    code = main(["eval", "--json"])
+    code = main(["eval", "--workers", "1", "--json"])
 
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1218,7 +1388,10 @@ def test_agent(case, kensa_run):
     assert payload["ok"] is True
     assert payload["data"]["artifact"]
     assert payload["data"]["run_id"]
+    assert payload["data"]["complete"] is True
+    assert payload["data"]["interruption"] is None
     assert payload["data"]["aggregates"][0]["verdict"] == "pass"
+    assert payload["data"]["workers"] == 1
     assert payload["data"]["pytest"]["returncode"] == 0
     assert "--kensa-report=json" in payload["data"]["pytest_command"]
 
@@ -2186,6 +2359,86 @@ def test_eval_json_warns_on_malformed_artifact(
     assert "Could not read eval artifact" in payload["warnings"][0]
 
 
+def test_eval_json_uses_its_assigned_artifact_when_another_run_finishes(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    result_dir = tmp_path / ".kensa" / "results"
+    result_dir.mkdir(parents=True)
+    json_report = tmp_path / "report.json"
+
+    def fake_run(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args
+        control = json.loads(Path(kwargs["control_path"]).read_text())
+        assert Path(control["result_path"]).parent == result_dir
+        (result_dir / "other-run.json").write_text(
+            json.dumps({"run_id": "other-run", "aggregates": [{"verdict": "pass"}]})
+        )
+        return SimpleNamespace(
+            returncode=1,
+            stdout="pytest out",
+            stderr="pytest err",
+            timeout=None,
+        )
+
+    monkeypatch.setattr(cli, "run_eval_process", fake_run)
+
+    code = main(["eval", "--json", "--json-report", str(json_report)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["data"]["run_id"] != "other-run"
+    assert Path(payload["data"]["artifact"]).stem == payload["data"]["run_id"]
+    assert json.loads(json_report.read_text())["run_id"] == payload["data"]["run_id"]
+
+
+def test_eval_json_uses_assigned_artifact_after_collection_error(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    eval_dir = tmp_path / "tests" / "evals"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "test_broken.py").write_text("def test_broken(:\n")
+    result_dir = tmp_path / ".kensa" / "results"
+    result_dir.mkdir(parents=True)
+    stale_artifact = result_dir / "old-run.json"
+    stale_artifact.write_text(
+        json.dumps(
+            {
+                "run_id": "old-run",
+                "aggregates": [{"verdict": "pass", "group_id": "old-group"}],
+            }
+        )
+    )
+    json_report = tmp_path / "report.json"
+    markdown_report = tmp_path / "report.md"
+
+    code = main(
+        [
+            "eval",
+            "--workers",
+            "1",
+            "--json",
+            "--json-report",
+            str(json_report),
+            "--markdown-report",
+            str(markdown_report),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code != 0
+    assert Path(payload["data"]["artifact"]).name == f"{payload['data']['run_id']}.json"
+    assert payload["data"]["aggregates"] == []
+    assert json_report.exists()
+    assert markdown_report.exists()
+    assert json.loads(stale_artifact.read_text())["run_id"] == "old-run"
+
+
 def test_eval_json_fails_when_trace_artifact_missing_and_no_durable_evals(
     tmp_path: Path,
     monkeypatch,
@@ -2194,7 +2447,6 @@ def test_eval_json_fails_when_trace_artifact_missing_and_no_durable_evals(
     monkeypatch.chdir(tmp_path)
     result_dir = tmp_path / ".kensa" / "results"
     result_dir.mkdir(parents=True)
-    (result_dir / "run.json").write_text(json.dumps({"run_id": "run", "aggregates": []}))
     monkeypatch.setattr(
         cli,
         "run_eval_process",
@@ -2224,7 +2476,7 @@ def test_eval_terminal_reports_missing_durable_when_no_aggregates(
     monkeypatch.chdir(tmp_path)
     result_dir = tmp_path / ".kensa" / "results"
     result_dir.mkdir(parents=True)
-    (result_dir / "run.json").write_text(json.dumps({"run_id": "run", "aggregates": []}))
+
     monkeypatch.setattr(
         cli,
         "run_eval_process",
@@ -4138,7 +4390,7 @@ def test_codex_smoke_only_failure_mode_requires_durable_eval(
 
     assert main(["doctor"]) == 0
     capsys.readouterr()
-    assert main(["eval", "--json"]) == 1
+    assert main(["eval", "--workers", "1", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["pytest"]["returncode"] == 0
     assert payload["data"]["evals_readiness"]["ready"] is False

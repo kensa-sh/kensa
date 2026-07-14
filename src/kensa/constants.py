@@ -42,6 +42,7 @@ Examples:
   kensa doctor --json
   kensa import --from jsonl --source traces.jsonl
   kensa traces sample --json
+  kensa eval --workers 1
   kensa eval -- --maxfail=1 -q
 
 Pass extra pytest arguments after --.

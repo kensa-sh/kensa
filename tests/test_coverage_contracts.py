@@ -22,12 +22,10 @@ from kensa.pytest_plugin import (
     KensaAggregate,
     KensaSessionState,
     _case_id,
-    _distributed_pytest_enabled,
     _kensa_trial_fixture,
     _marker_timeout,
     _marker_trials,
     _runtime_for_item,
-    pytest_configure,
     pytest_make_parametrize_id,
     pytest_runtest_makereport,
     pytest_runtest_protocol,
@@ -322,7 +320,9 @@ def test_cli_edge_paths(
         return SimpleNamespace(returncode=0, stdout="", stderr="", timeout=None)
 
     monkeypatch.setattr(cli, "run_eval_process", successful_eval)
-    args = argparse.Namespace(paths=[], no_judge=True, json_report=None, markdown_report=None)
+    args = argparse.Namespace(
+        paths=[], no_judge=True, json_report=None, markdown_report=None, workers=1
+    )
     assert cli._cmd_eval(args, ["-k", "x"]) == 0
     assert capsys.readouterr().err == ""
     assert cli._cmd_eval(args, []) == 0
@@ -331,6 +331,7 @@ def test_cli_edge_paths(
         no_judge=False,
         json_report=str(tmp_path / "eval.json"),
         markdown_report=str(tmp_path / "eval.md"),
+        workers=1,
     )
     assert cli._cmd_eval(args, []) == 0
     assert (tmp_path / "eval.json").exists()
@@ -508,7 +509,7 @@ def test_cli_edge_paths(
     )
 
 
-def test_pytest_plugin_direct_helpers() -> None:
+def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (
         pytest_make_parametrize_id(cast(Any, None), kensa_case(id="case_id", input="x"), "case")
         == "case_id"
@@ -546,6 +547,7 @@ def test_pytest_plugin_direct_helpers() -> None:
     assert _runtime_for_item(cast(Any, markerless_item)) is None
     config = SimpleNamespace(getoption=lambda name: None)
     state = KensaSessionState(cast(Any, config))
+    assert len(state.run_id) == 32
     assert state.artifact_dir == Path.cwd() / ".kensa"
     assert not state.write_artifacts
 
@@ -589,7 +591,7 @@ def test_pytest_plugin_direct_helpers() -> None:
             return self._report
 
     non_runtime_item = SimpleNamespace(nodeid="n", config=config_obj)
-    report = SimpleNamespace(when="setup", failed=True)
+    report = SimpleNamespace(when="setup", failed=True, passed=False)
     call = SimpleNamespace(excinfo=None)
     hook = pytest_runtest_makereport(cast(Any, non_runtime_item), cast(Any, call))
     next(hook)
@@ -657,7 +659,14 @@ def test_pytest_plugin_watchdog_control_paths(
     assert cleared_active.active_operation is None
     with pytest.raises(StopIteration):
         hook.send(None)
-    assert read_control(control_path).active_trial is None
+    completed_control = read_control(control_path)
+    assert completed_control.active_trial is None
+    state.set_active_trial(active)
+    assert read_control(control_path).active_trial == active
+    state.set_active_trial(None)
+    state.mark_incomplete("pytest_stopped", "stopped")
+    assert state.complete is False
+    assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
 
     plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
     plain_state.set_active_operation("n", operation)
@@ -709,40 +718,6 @@ def test_pytest_plugin_watchdog_control_paths(
     next(hook)
     with pytest.raises(StopIteration):
         hook.send(Outcome(report))
-
-
-def test_pytest_plugin_rejects_distributed_eval() -> None:
-    class Config:
-        def __init__(self) -> None:
-            self.values = {
-                "--kensa-control-path": ".kensa/state/run.json",
-                "numprocesses": 2,
-                "dist": "load",
-                "tx": ["popen", "popen"],
-                "distload": False,
-            }
-
-        def getoption(self, name: str, default: Any = None) -> Any:
-            return self.values.get(name, default)
-
-    config = cast(pytest.Config, Config())
-
-    assert _distributed_pytest_enabled(config)
-    with pytest.raises(pytest.UsageError, match="does not support distributed pytest"):
-        pytest_configure(config)
-
-    direct = cast(
-        pytest.Config,
-        SimpleNamespace(
-            getoption=lambda name, default=None: {
-                "numprocesses": 0,
-                "dist": "no",
-                "tx": [],
-                "distload": False,
-            }.get(name, default)
-        ),
-    )
-    assert not _distributed_pytest_enabled(direct)
 
 
 def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -> None:

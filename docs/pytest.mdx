@@ -143,10 +143,13 @@ kensa eval --markdown-report eval.md        # Markdown summary for a PR comment
 kensa eval --json-report eval.json          # machine-readable artifact
 kensa eval --judge-timeout 30               # advisory deadline for judge calls
 kensa eval --trial-timeout 180              # default timeout for each trial
+kensa eval --workers 1                      # disable parallel trial execution
 kensa eval -- -k refund -q                  # pass args through to pytest after --
 ```
 
-`kensa eval` stops trials after 300 seconds by default and preserves available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
+`kensa eval` stops trials after 300 seconds by default and preserves results already received by the controller; use `--trial-timeout` or the `timeout_s` marker option to change the limit. Timeout artifacts set `complete` to `false`, include a structured `interruption`, and omit trials that did not report a result before termination.
+
+Trials run in four local pytest worker processes by default. Each worker has independent process globals and session-scoped fixtures. Parallel workers also increase concurrent provider calls and burst spend; reduce `--workers`, including to `--workers 1`, if an eval hits provider rate limits. Use `--workers 1` for sequential execution, debugging, or non-concurrency-safe resources. Conflicting worker counts or remote gateways from pytest configuration and `PYTEST_ADDOPTS` are rejected before collection. Parallel watchdog support is available only through `kensa eval`; direct and remote xdist runs are left untouched and do not receive Kensa watchdog containment. Conversation turns within one trial remain sequential; separate trial items run concurrently.
 
 Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
 

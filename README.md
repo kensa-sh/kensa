@@ -132,7 +132,10 @@ with `kensa.instrument()` and import the JSONL.
 | `kensa import --from <provider>` | Import local or connected trace evidence. |
 | `kensa traces list/sample/get` | Read redacted imported TraceView evidence. |
 | `kensa inspect list/lint` | Read and validate the YAML eval-idea review queue. |
-| `kensa eval` | Run Kensa evals through pytest. |
+| `kensa eval` | Run Kensa evals through pytest (four parallel workers by default). |
+
+Each worker is a separate process with its own session fixtures and module globals. Use
+`kensa eval --workers 1` for process-global fixtures, debugging, or non-concurrency-safe resources.
 
 Recommended agent flow: `kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify.
 `kensa-evals` reads `.kensa/settings.json` to choose the evidence path.

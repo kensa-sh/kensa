@@ -19,12 +19,16 @@ from kensa.runtime import ActiveOperation
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     DEFAULT_TRIAL_TIMEOUT_S,
-    DISTRIBUTED_PYTEST_UNSUPPORTED,
     ActiveTrial,
     EvalProcessResult,
+    WatchdogControl,
+    control_paths,
     format_heartbeat,
     read_control,
+    remove_control_files,
     validate_timeout_s,
+    worker_control_path,
+    write_control,
 )
 
 
@@ -95,6 +99,8 @@ def test_bounded(case, kensa_run, hanging_fixture):
     assert trial["status"] == "error"
     assert trial["error_kind"] == "timeout"
     assert trial["trace"]["incomplete"] is True
+    assert result["complete"] is False
+    assert result["interruption"]["kind"] == "timeout"
     assert list((tmp_path / ".kensa" / "state").glob("*.json")) == []
     if phase == "teardown":
         assert trial["output"] == {"input": "hello"}
@@ -144,7 +150,7 @@ def test_three_trials(case, kensa_run, request):
 """,
     )
 
-    code = main(["eval", "--json", "tests/evals", "--", "-s"])
+    code = main(["eval", "--workers", "1", "--json", "tests/evals", "--", "-s"])
 
     payload = json.loads(capsys.readouterr().out)
     artifact = Path(payload["data"]["artifact"])
@@ -169,6 +175,265 @@ def test_three_trials(case, kensa_run, request):
         time.sleep(0.05)
     else:
         pytest.fail(f"descendant process {child_pid} survived watchdog termination")
+
+
+def test_eval_timeout_monitors_parallel_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(timeout_s=0.5)
+@pytest.mark.parametrize("case", [
+    kensa_case(id="hang", input="hang"),
+    kensa_case(id="fast_a", input="a"),
+    kensa_case(id="fast_b", input="b"),
+    kensa_case(id="fast_c", input="c"),
+])
+def test_parallel_timeout(case, kensa_run):
+    output = case.run(kensa_run)
+    if case.id == "hang":
+        time.sleep(60)
+    assert output == {"input": case.input}
+""",
+    )
+
+    started = time.monotonic()
+    code = main(["eval", "--workers", "2", "--json", "tests/evals"])
+
+    elapsed = time.monotonic() - started
+    payload = json.loads(capsys.readouterr().out)
+    result = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trials = {trial["case_id"]: trial for trial in result["trials"]}
+    sort_keys = [
+        (trial["group_id"], trial["trial_index"], trial["nodeid"]) for trial in result["trials"]
+    ]
+    assert code == 1
+    assert elapsed < 3
+    assert payload["data"]["workers"] == 2
+    assert payload["data"]["timeout"] == {
+        "case_id": "hang",
+        "trial_index": 1,
+        "timeout_s": 0.5,
+    }
+    assert "hang" in trials
+    assert set(trials) <= {"hang", "fast_a", "fast_b", "fast_c"}
+    assert sort_keys == sorted(sort_keys)
+    assert trials["hang"]["error_kind"] == "timeout"
+    passed = {case_id for case_id, trial in trials.items() if trial["status"] == "pass"}
+    assert passed
+    assert passed <= {"fast_a", "fast_b", "fast_c"}
+    sibling_trials = [trial for case_id, trial in trials.items() if case_id != "hang"]
+    assert all(trial["error_kind"] is None for trial in sibling_trials)
+    assert result["complete"] is False
+    assert result["interruption"] == {
+        "kind": "timeout",
+        "message": "Kensa timeout: hang trial 1 exceeded 0.5 seconds.",
+        "nodeid": trials["hang"]["nodeid"],
+        "case_id": "hang",
+        "trial_index": 1,
+    }
+    assert list((tmp_path / ".kensa" / "state").glob("*.json")) == []
+
+
+def test_parallel_timeout_preserves_reported_sibling_call_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import os
+import time
+from pathlib import Path
+
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.fixture
+def hanging_teardown():
+    yield
+    Path("teardown.started").write_text("yes")
+    time.sleep(60)
+
+
+@pytest.mark.kensa(timeout_s=5)
+@pytest.mark.parametrize("case", [kensa_case(id="teardown_active", input="fast")])
+def test_teardown_active(case, kensa_run, hanging_teardown):
+    Path("teardown.worker").write_text(os.environ["PYTEST_XDIST_WORKER"])
+    assert case.run(kensa_run) == {"input": "fast"}
+
+
+@pytest.mark.kensa(timeout_s=1)
+@pytest.mark.parametrize("case", [kensa_case(id="call_timeout", input="slow")])
+def test_call_timeout(case):
+    Path("timeout.worker").write_text(os.environ["PYTEST_XDIST_WORKER"])
+    time.sleep(60)
+""",
+    )
+    conftest = tmp_path / "tests" / "evals" / "conftest.py"
+    conftest.write_text(
+        conftest.read_text()
+        + """
+
+import os
+from pathlib import Path
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    if (
+        os.environ.get("PYTEST_XDIST_WORKER") is None
+        and report.when == "call"
+        and "teardown_active" in report.nodeid
+    ):
+        Path("teardown_pass.reported").write_text("yes")
+"""
+    )
+
+    code = main(["eval", "--workers", "2", "--json", "tests/evals"])
+
+    payload = json.loads(capsys.readouterr().out)
+    result = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trials = {trial["case_id"]: trial for trial in result["trials"]}
+    assert code == 1
+    assert (tmp_path / "teardown.started").is_file()
+    assert (tmp_path / "teardown_pass.reported").is_file()
+    assert (tmp_path / "teardown.worker").read_text() != (tmp_path / "timeout.worker").read_text()
+    assert trials["call_timeout"]["error_kind"] == "timeout"
+    assert trials["teardown_active"]["error_kind"] is None
+    assert trials["teardown_active"]["status"] == "pass"
+    assert result["complete"] is False
+
+
+@pytest.mark.parametrize("source", ["config", "environment"])
+def test_workers_one_rejects_resolved_xdist_worker_override(
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    if source == "config":
+        (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\naddopts = "-n 2"\n')
+    else:
+        monkeypatch.setenv("PYTEST_ADDOPTS", "-n 2")
+    _write_eval(
+        tmp_path,
+        """import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="sequential", input="hello")])
+def test_sequential(case, kensa_run):
+    case.run(kensa_run)
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "tests/evals"]) == 2
+
+    assert "expected 1 local pytest worker, but pytest resolved 2" in capfd.readouterr().err
+
+
+def test_eval_json_reports_resolved_worker_mismatch_as_usage_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-n 4")
+    _write_eval(
+        tmp_path,
+        """import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="sequential", input="hello")])
+def test_sequential(case, kensa_run):
+    case.run(kensa_run)
+""",
+    )
+
+    code = main(["eval", "--workers", "1", "--json", "tests/evals"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["exit_code"] == 2
+    assert payload["summary"] == "Kensa eval received invalid pytest configuration."
+    assert payload["warnings"] == []
+    assert payload["next_steps"] == []
+    assert payload["data"]["pytest"]["returncode"] == 4
+    assert len(payload["errors"]) == 1
+    assert "expected 1 local pytest worker, but pytest resolved 4" in payload["errors"][0]
+
+
+def test_eval_rejects_resolved_xdist_worker_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "--maxprocesses=2"\n'
+    )
+    _write_eval(
+        tmp_path,
+        """import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="limited", input="hello")])
+def test_limited(case, kensa_run):
+    case.run(kensa_run)
+""",
+    )
+
+    assert main(["eval", "--workers", "4", "tests/evals"]) == 2
+
+    assert "expected 4 local pytest workers, but pytest resolved 2" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "addopts",
+    ["-d --tx ssh=example.invalid", "--px socket=example.invalid:8888"],
+)
+def test_eval_rejects_configured_remote_xdist_gateways(
+    addopts: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(f'[tool.pytest.ini_options]\naddopts = "{addopts}"\n')
+    _write_eval(
+        tmp_path,
+        """import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="local", input="hello")])
+def test_local(case, kensa_run):
+    case.run(kensa_run)
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "tests/evals"]) == 2
+
+    assert "supports local pytest workers only" in capfd.readouterr().err
 
 
 def test_eval_timeout_does_not_wait_for_detached_descendant_output(
@@ -205,7 +470,7 @@ def test_detached(case):
 
     started = time.monotonic()
     try:
-        code = main(["eval", "--json", "tests/evals", "--", "-s"])
+        code = main(["eval", "--workers", "1", "--json", "tests/evals", "--", "-s"])
     finally:
         child_pid = int((tmp_path / "detached.pid").read_text())
         with suppress(ProcessLookupError):
@@ -251,7 +516,7 @@ def test_background(case, kensa_run):
     pid_path = tmp_path / "background.pid"
     child_pid: int | None = None
     try:
-        code = main(["eval", "--json", "tests/evals", "--", "-s"])
+        code = main(["eval", "--workers", "1", "--json", "tests/evals", "--", "-s"])
         child_pid = int(pid_path.read_text())
         elapsed = time.monotonic() - started
         payload = json.loads(capsys.readouterr().out)
@@ -317,55 +582,6 @@ def test_active_operation(case):
             "model": "test-model",
         },
     }
-
-
-def test_eval_timeout_preserves_completed_case_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
-    _write_eval(
-        tmp_path,
-        """import time
-
-import pytest
-from kensa.pytest import judge, kensa_case
-
-
-@pytest.mark.kensa(timeout_s=0.3)
-@pytest.mark.parametrize("case", [kensa_case(id="snapshot", input="hello")])
-def test_snapshot(case, kensa_run):
-    output = case.run(kensa_run)
-    result = judge(output, "must preserve evidence")
-    assert result.passed
-    time.sleep(60)
-""",
-    )
-
-    assert main(["eval", "--json", "tests/evals"]) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
-    trial = artifact["trials"][0]
-    assert trial["status"] == "error"
-    assert trial["error_kind"] == "timeout"
-    assert trial["case"] == {"id": "snapshot", "input": "hello"}
-    assert trial["output"] == {"input": "hello"}
-    assert trial["trace"]["spans"][0]["name"] == "kensa.pytest.trial"
-    assert trial["trace"]["incomplete"] is True
-    assert trial["judges"] == [
-        {
-            "passed": True,
-            "reasoning": "Environment judge returned pass for: must preserve evidence",
-            "evidence": [],
-            "provider": "env",
-            "model": "KENSA_JUDGE_RESULT",
-            "metadata": {},
-            "error": False,
-        }
-    ]
 
 
 @pytest.mark.parametrize("value", [True, False, 0, -1, float("nan"), float("inf")])
@@ -454,119 +670,6 @@ def test_eval_rejects_unsupported_platform_before_launch(
     assert "require macOS or Linux" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "xdist_args",
-    [
-        ["-n", "2"],
-        ["-n2"],
-        ["--numprocesses=auto"],
-        ["-d"],
-        ["--dist=load"],
-        ["--tx=popen"],
-    ],
-)
-def test_eval_rejects_distributed_pytest_before_launch(
-    xdist_args: list[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "run_eval_process",
-        lambda *args, **kwargs: pytest.fail("pytest should not launch"),
-    )
-
-    assert main(["eval", "--json", "--", *xdist_args]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["errors"] == [
-        "kensa eval does not support distributed pytest execution; "
-        "remove pytest-xdist worker options."
-    ]
-    assert not (tmp_path / ".kensa").exists()
-
-
-def test_xdist_argument_detection_allows_disabled_modes() -> None:
-    assert not cli._pytest_args_enable_xdist(["-n", "0"])
-    assert not cli._pytest_args_enable_xdist(["-n0"])
-    assert not cli._pytest_args_enable_xdist(["--numprocesses=0"])
-    assert not cli._pytest_args_enable_xdist(["--dist", "no"])
-
-
-def test_eval_terminal_rejects_distributed_pytest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "run_eval_process",
-        lambda *args, **kwargs: pytest.fail("pytest should not launch"),
-    )
-
-    assert main(["eval", "--", "-n2"]) == 2
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "does not support distributed pytest execution" in captured.err
-    assert not (tmp_path / ".kensa").exists()
-
-
-def test_eval_json_surfaces_xdist_config_rejection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    def rejected(*args: Any, **kwargs: Any) -> EvalProcessResult:
-        del args, kwargs
-        return EvalProcessResult(
-            returncode=4,
-            stderr=(
-                "ERROR: kensa eval does not support distributed pytest execution; "
-                "remove pytest-xdist worker options.\n"
-            ),
-        )
-
-    monkeypatch.setattr(cli, "run_eval_process", rejected)
-
-    assert main(["eval", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["summary"] == "Kensa eval does not support distributed pytest execution."
-    assert payload["errors"] == [
-        "kensa eval does not support distributed pytest execution; "
-        "remove pytest-xdist worker options."
-    ]
-
-
-def test_eval_json_does_not_reclassify_failed_test_output_as_xdist(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "run_eval_process",
-        lambda *args, **kwargs: EvalProcessResult(
-            returncode=1,
-            stderr=DISTRIBUTED_PYTEST_UNSUPPORTED,
-        ),
-    )
-
-    assert main(["eval", "--json"]) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["summary"] != "Kensa eval does not support distributed pytest execution."
-    assert DISTRIBUTED_PYTEST_UNSUPPORTED not in payload["errors"]
-    assert payload["data"]["pytest"]["returncode"] == 1
-
-
 def test_eval_terminal_timeout_prints_reason_and_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,12 +711,37 @@ def test_watchdog_rejects_invalid_control_and_artifact(
         load_trials(result_path)
 
 
+def test_worker_control_paths_are_isolated_and_removed(tmp_path: Path) -> None:
+    root = tmp_path / "state" / "run.json"
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "results" / "run.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=30,
+    )
+    worker_a = worker_control_path(root, "gw0")
+    worker_b = worker_control_path(root, "gw1")
+    write_control(root, control)
+    write_control(worker_a, control)
+    write_control(worker_b, control)
+
+    assert control_paths(root) == [root, worker_a, worker_b]
+    with pytest.raises(ValueError, match="Invalid pytest-xdist worker ID"):
+        worker_control_path(root, "../gw2")
+
+    remove_control_files(root)
+
+    assert control_paths(root) == []
+
+
 def test_watchdog_cleans_up_when_monitoring_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     process = object()
     terminated: list[object] = []
+    control_path = tmp_path / "control.json"
+    control_path.write_text("{}")
     monkeypatch.setattr(watchdog.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(
         watchdog,
@@ -625,10 +753,64 @@ def test_watchdog_cleans_up_when_monitoring_raises(
     with pytest.raises(RuntimeError, match="control failed"):
         watchdog.run_eval_process(
             ["pytest"],
-            control_path=tmp_path / "control.json",
+            control_path=control_path,
             capture_output=False,
         )
     assert terminated == [process]
+
+
+def test_watchdog_tolerates_worker_control_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = object()
+    control_path = tmp_path / "control.json"
+    active = ActiveTrial(
+        nodeid="test.py::test_case[trial1]",
+        group_id="test.py::test_case",
+        case_id="case",
+        trial_index=1,
+        configured_trials=1,
+        timeout_s=1,
+        started_monotonic_ns=0,
+    )
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "result.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=1,
+        active_trial=active,
+    )
+    completed = EvalProcessResult(returncode=0)
+    monkeypatch.setattr(watchdog.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(watchdog, "control_paths", lambda path: [control_path])
+    monkeypatch.setattr(watchdog, "_wait_once", lambda *args: completed)
+
+    monkeypatch.setattr(
+        watchdog,
+        "read_control",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    assert (
+        watchdog.run_eval_process(["pytest"], control_path=control_path, capture_output=False)
+        == completed
+    )
+
+    controls = iter([control, FileNotFoundError()])
+
+    def disappearing_control(path: Path) -> WatchdogControl:
+        del path
+        value = next(controls)
+        if isinstance(value, FileNotFoundError):
+            raise value
+        return value
+
+    monkeypatch.setattr(watchdog, "read_control", disappearing_control)
+    monkeypatch.setattr(watchdog, "_trial_expired", lambda trial: True)
+    assert (
+        watchdog.run_eval_process(["pytest"], control_path=control_path, capture_output=False)
+        == completed
+    )
 
 
 def test_process_group_termination_edge_paths(monkeypatch: pytest.MonkeyPatch) -> None:
