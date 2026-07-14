@@ -9,14 +9,101 @@ keywords:
   - release notes
 ---
 
-The canonical, dated release history lives on [GitHub Releases](https://github.com/kensa-sh/kensa/releases). Each release links its pull requests and the exact source diff, so this page does not duplicate a second version history.
+<Note>The canonical, dated release history lives on [GitHub Releases](https://github.com/kensa-sh/kensa/releases). This page summarizes the current line.</Note>
 
-[View Kensa releases](https://github.com/kensa-sh/kensa/releases).
+## 0.12.0
+
+Imported trace evidence is now minimized to a versioned, allowlisted TraceView before mandatory redaction.
+
+- Only eval-required input, output, timing, status, tool, model, token, and cost fields are retained.
+- Trace and span identifiers use import-local aliases, and Langfuse requests only required fields.
+- `kensa init --redaction-model large` prepares the higher-recall redaction model.
+- **Breaking:** persisted TraceView artifacts use the v2 evidence contract.
+
+[View the 0.12.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.12.0).
+
+## 0.11.1
+
+Redaction setup is now automatic and fails clearly when incomplete.
+
+- Selecting a trace source installs missing redaction dependencies as a development dependency.
+- Setup output reports one protection status and preserves actionable diagnostics on failure.
+
+[View the 0.11.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.11.1).
+
+## 0.11.0
+
+Trace redaction is now mandatory and fails closed across import, inspection, trace access, and eval generation.
+
+- Redaction happens in memory before connected Langfuse payloads reach disk.
+- Safe import manifests are bound to the exact artifact with SHA-256. Missing or mismatched manifests block access.
+- `kensa doctor` reports missing redaction readiness and unsafe or modified artifacts.
+- **Breaking:** `kensa import` no longer accepts `--redact`. Redaction cannot be disabled or bypassed.
+
+[View the 0.11.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.11.0).
+
+## 0.10.3
+
+- `kensa connect langfuse` now validates the endpoint and credentials without reading trace data.
+- Langfuse imports use the CLI's default scope unless you explicitly request a different one.
+
+[View the 0.10.3 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.3).
+
+## 0.10.2
+
+Connected Langfuse imports now use the official Langfuse SDK while preserving legacy trace and observations v2 import formats.
+
+[View the 0.10.2 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.2).
+
+## 0.10.1
+
+- Langfuse observation input and output are parsed locally instead of sent as unsupported request parameters.
+- `kensa init` can connect Langfuse before judge credentials are configured and now surfaces clearer setup errors.
+
+[View the 0.10.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.1).
+
+## 0.10.0
+
+Langfuse imports now support events-only deployments by reconstructing traces from observations v2 when the legacy traces API is unavailable.
+
+[View the 0.10.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.0).
+
+## 0.9.4
+
+- `kensa connect langfuse` reports endpoint, authentication, and import-readiness checks separately.
+- Omitted endpoints now resolve from `LANGFUSE_BASE_URL` before using the cloud default.
+
+[View the 0.9.4 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.4).
+
+## 0.9.3
+
+- The interactive agent picker starts on Claude Code and offers one agent at a time. `kensa init --agent all` remains available for non-interactive setup.
+- README assets and the license link now render correctly on PyPI.
+
+[View the 0.9.3 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.3).
+
+## 0.9.2
+
+`kensa init --agent` now supports explicit agent choices and `all`, persists the selection in `.kensa/settings.json`, and fails clearly when automatic detection finds no supported agent.
+
+[View the 0.9.2 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.2).
+
+## 0.9.1
+
+Relaxed lower dependency bounds improve compatibility with existing Python environments while retaining Python 3.11+ support.
+
+[View the 0.9.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.1).
+
+## 0.9.0
+
+Added Kensa's pytest-native eval workflow for turning agent traces into plain pytest tests with deterministic assertions, repeated trials, optional LLM judges, and CI reporting.
+
+[View the 0.9.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.0).
 
 ## Legacy releases
 
 <Warning>
-Versions 0.1.0 through 0.8.0 are part of Kensa's legacy implementation and have been yanked from PyPI. Kensa 0.9.0 is a complete rewrite with a new API. The old implementation remains available for historical reference.
+Versions 0.1.0 through 0.8.0 are part of Kensa's legacy implementation and have been yanked from PyPI. Kensa 0.9.0 is a complete rewrite with a new API. These release notes are preserved for historical reference.
 </Warning>
 
-[View the legacy repository](https://github.com/satyaborg/kensa).
+[View the legacy changelog](https://github.com/satyaborg/kensa/blob/main/docs/changelog.mdx).
