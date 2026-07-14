@@ -1,0 +1,147 @@
+---
+title: Pytest plugin
+description: The marker, fixtures, and harness that make Kensa evals plain pytest tests.
+sidebarTitle: Pytest
+keywords:
+  - pytest
+  - fixtures
+  - kensa_run
+  - trials
+  - marker
+---
+
+Kensa is a pytest plugin. Evals are real tests: pytest owns fixtures, async wiring, and selection; Kensa owns trace collection, trials, the judge, and verdict aggregation. Install with the rest of your dev dependencies:
+
+```bash
+uv add --dev kensa     # or: python -m pip install kensa
+```
+
+## Anatomy of an eval
+
+```python
+import pytest
+
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.mark.kensa(trials=3)
+@pytest.mark.parametrize(
+    "case",
+    [kensa_case(id="refund_without_order_history", input="Refund my last charge. No order ID.")],
+)
+def test_refund_policy(case, kensa_run, kensa_trace):
+    output = case.run(kensa_run)
+
+    assert kensa_trace.tools.include(["lookup_customer"])
+    assert kensa_trace.tools.exclude(["issue_refund"])
+
+    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
+    assert result.passed, result.reasoning
+```
+
+Three pieces do the work: the `kensa` marker sets trials, the `case` parameter carries the input, and the `kensa_run` / `kensa_trace` fixtures connect to your agent and its trace.
+
+## The harness fixture
+
+`kensa_run` is **yours**. You implement it once in `tests/evals/conftest.py` to bridge a case to your real agent, wrapping tool and model calls with the recording helpers so the trace is populated:
+
+```python
+import pytest
+
+from kensa.tracing import record_tool_call
+
+
+@pytest.fixture
+def kensa_run():
+    def _run(case):
+        with record_tool_call("lookup_customer"):
+            text = str(case.input).lower()
+            found_order = "order #" in text or "order id:" in text
+        if found_order:
+            with record_tool_call("issue_refund"):
+                return {"message": "Refund issued."}
+        return {"message": "I need order history before issuing a refund."}
+
+    return _run
+```
+
+`case.run(kensa_run)` invokes this with the current case, records a trace, and returns the output. `kensa doctor` inspects `conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
+
+## Fixtures and marker
+
+| Name | Provided by | Description |
+|---|---|---|
+| `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
+| `kensa_run` | you (`conftest.py`) | Callable that runs a case through your agent |
+| `kensa_trace` | Kensa | The trace collected for the current trial |
+| `@pytest.mark.kensa(trials=N)` | Kensa | Run each case `N` times (default `1`) |
+
+## Async agents
+
+Async tests work through the normal pytest async plugins:
+
+```python
+import pytest
+
+
+@pytest.mark.asyncio
+@pytest.mark.kensa(trials=3)
+@pytest.mark.parametrize("case", [kensa_case(id="draft_no_send", input="...")])
+async def test_sdr_draft(case, kensa_run, async_client):
+    output = await case.run(kensa_run)
+    ...
+```
+
+## Trials and verdicts
+
+Each case expands into one pytest item per trial:
+
+```text
+test_refund_policy[refund_without_order_history-trial1]
+test_refund_policy[refund_without_order_history-trial2]
+test_refund_policy[refund_without_order_history-trial3]
+```
+
+Kensa aggregates the trials per case at session end:
+
+| Verdict | Meaning |
+|---|---|
+| `pass` | Every trial passed |
+| `fail` | Every trial failed |
+| `flaky` | At least one trial passed and at least one failed |
+| `error` | A test, fixture, trace, or setup error occurred |
+| `partial` | Fewer trials completed than configured |
+
+`fail`, `flaky`, and `error` fail the pytest session.
+
+## Plugin options
+
+The plugin adds these pytest options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--kensa-no-judge` | off | Disable judge calls (deterministic assertions still run) |
+| `--kensa-report` | `term` | Summary format: `term` or `json` |
+| `--kensa-write-artifacts` | off | Write `.kensa/results/<run_id>.json` and trial traces |
+| `--kensa-artifact-dir` | `.kensa` | Override the artifact directory |
+
+## Running evals
+
+Plain pytest is a valid gate:
+
+```bash
+pytest tests/evals/
+pytest tests/evals/ --kensa-no-judge
+pytest tests/evals/ -k refund --kensa-report=json
+```
+
+Use `kensa eval` when you want CI-friendly artifacts written automatically:
+
+```bash
+kensa eval                                  # runs tests/evals/ via pytest
+kensa eval --markdown-report eval.md        # Markdown summary for a PR comment
+kensa eval --json-report eval.json          # machine-readable artifact
+kensa eval -- -k refund -q                  # pass args through to pytest after --
+```
+
+`kensa eval` enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).

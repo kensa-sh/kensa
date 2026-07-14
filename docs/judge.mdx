@@ -1,0 +1,105 @@
+---
+title: Judge
+description: LLM-as-judge for semantic criteria that resist deterministic checks.
+sidebarTitle: Judge
+keywords:
+  - judge
+  - llm judge
+  - criteria
+  - JudgeResult
+  - model resolution
+---
+
+`judge(...)` evaluates a natural-language criterion against your agent's output and returns a pass/fail verdict with reasoning. Reach for it only when a check can't be expressed deterministically - whether a response promised an unsupported refund, stayed on policy, or avoided a hallucinated detail.
+
+```python
+from kensa.pytest import judge
+
+result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
+assert result.passed, result.reasoning
+```
+
+## Signature
+
+```python
+def judge(
+    output: Any,
+    criteria: str,
+    *,
+    input: Any = None,
+    trace: Any = None,
+    context: Any = None,
+) -> JudgeResult
+```
+
+| Argument | Description |
+|---|---|
+| `output` | The agent output to evaluate (the return value of `case.run(...)`) |
+| `criteria` | The natural-language pass condition |
+| `input` | The original case input, for grounding (`input=case.input`) |
+| `trace` | The `kensa_trace`, so the judge can consider tool calls (`trace=kensa_trace`) |
+| `context` | Any extra reference material the judge should weigh |
+
+## JudgeResult
+
+```python
+@dataclass(frozen=True)
+class JudgeResult:
+    passed: bool
+    reasoning: str
+    evidence: list[str]
+    provider: str | None
+    model: str | None
+    metadata: dict[str, Any]
+    error: bool
+```
+
+Assert on `passed` and surface `reasoning` as the failure message so a red test explains itself:
+
+```python
+assert result.passed, result.reasoning
+```
+
+## Assertions gate the judge
+
+Put deterministic assertions before `judge(...)` so obvious failures fail fast and never reach a model. See [Assertions](/assertions).
+
+## Model resolution
+
+The judge resolves a model in this order:
+
+1. `KENSA_JUDGE_MODEL` (or `KENSA_LLM_MODEL`) - explicit override
+2. Default: `gpt-5.4-mini` via OpenAI
+
+Provider is taken from `KENSA_JUDGE_PROVIDER` (or `KENSA_LLM_PROVIDER`), otherwise inferred from the model. Calls go through the [Any LLM](https://pypi.org/project/any-llm-sdk/) SDK, so the supported providers are `openai` and `anthropic`.
+
+| Model | Provider |
+|---|---|
+| `gpt-5.4-mini` (default) | `openai` |
+| `gpt-5.5` | `openai` |
+| `claude-sonnet-4-6` | `anthropic` |
+| `claude-opus-4-7` | `anthropic` |
+
+```bash
+export KENSA_JUDGE_MODEL=claude-sonnet-4-6
+export KENSA_JUDGE_PROVIDER=anthropic
+kensa eval
+```
+
+Provider credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) come from the environment or a configured dotenv. They are never written to Kensa connection metadata.
+
+## Testing without a model
+
+Two ways to keep judge-bearing evals runnable without live credentials:
+
+- **Deterministic fake** - set `KENSA_JUDGE_RESULT` to `pass`, `fail`, or `error`. `judge(...)` returns that verdict without calling a model. Useful for local runs and CI smoke tests.
+
+  ```bash
+  KENSA_JUDGE_RESULT=pass pytest tests/evals/
+  ```
+
+- **Disable judging** - pass `--no-judge` to `kensa eval` (or `--kensa-no-judge` to plain pytest). Judge calls return an error result; gate on deterministic assertions only.
+
+## Cold-start caveat
+
+Without human-labeled examples, a judge is unvalidated: its verdicts have not been measured against ground truth. Treat early results as directional, keep criteria narrow and binary, and lean on deterministic assertions wherever a behavior can be checked without an LLM.

@@ -1,0 +1,120 @@
+---
+title: Cases
+description: Define agent inputs and trials with kensa_case.
+sidebarTitle: Cases
+keywords:
+  - cases
+  - kensa_case
+  - messages
+  - trials
+  - parametrize
+---
+
+A **case** is one input to your agent. You build cases with `kensa_case` and parametrize them into a pytest test. Each case carries an id, an input (or a conversation), and any extra fields your harness needs.
+
+```python
+from kensa.pytest import kensa_case
+
+kensa_case(id="refund_no_order", input="Refund my last charge. I do not have an order ID.")
+```
+
+## Signature
+
+```python
+def kensa_case(
+    *,
+    id: str,
+    input: Any = ...,
+    messages: list[KensaMessage] | None = None,
+    **fields: Any,
+) -> KensaCase
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `id` | Yes | Unique, stable identifier. Shows up in pytest item ids and verdicts. |
+| `input` | One of `input`/`messages` | Literal input passed to your agent. |
+| `messages` | One of `input`/`messages` | A conversation: a list of role/content messages. |
+| `**fields` | No | Extra per-case data (fixtures, expected values, metadata) available on `case.row`. |
+
+## Case object
+
+Inside a test, the `case` fixture is a `KensaCase`:
+
+| Attribute or method | Description |
+|---|---|
+| `case.id` | The case identifier |
+| `case.input` | The resolved input (from `input`, `messages`, or the first field) |
+| `case.messages` | The conversation list when `messages=` was provided |
+| `case.row` | The immutable mapping of everything passed to `kensa_case` |
+| `case.run(kensa_run)` | Runs the case through your harness fixture and returns the output |
+
+## Literal input vs messages
+
+Use `input` for a single prompt:
+
+```python
+kensa_case(id="classify_outage", input="Our entire team can't log in. SSO returns 502 since 7am.")
+```
+
+Use `messages` when the case is a partial conversation and the agent must respond to the latest turn:
+
+```python
+kensa_case(
+    id="draft_no_send",
+    messages=[
+        {"role": "user", "content": "Find the VP of Sales at Acme."},
+        {"role": "assistant", "content": "I found Dana Lee."},
+        {"role": "user", "content": "Draft a short note to Dana, but do not send it."},
+    ],
+)
+```
+
+Messages follow the standard role/content shape (`system`, `developer`, `user`, `assistant`, `tool`), including `tool_calls` on assistant turns and `tool_call_id` on tool turns.
+
+## Parametrize multiple cases
+
+One test can cover many cases. Each becomes its own pytest item:
+
+```python
+import pytest
+
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        kensa_case(id="p1_multi_user_outage", input="Whole team locked out since 7am."),
+        kensa_case(id="p3_single_user_typo", input="I mistyped my password once."),
+    ],
+)
+def test_severity(case, kensa_run, kensa_trace):
+    output = case.run(kensa_run)
+    result = judge(output, "Severity must reflect business impact, not tone.", input=case.input)
+    assert result.passed, result.reasoning
+```
+
+## Trials
+
+Wrap a test with the Kensa marker to run each case more than once:
+
+```python
+@pytest.mark.kensa(trials=5)
+@pytest.mark.parametrize("case", [kensa_case(id="draft_no_send", input="...")])
+def test_sdr_draft(case, kensa_run, kensa_trace):
+    ...
+```
+
+Each case expands into one pytest item per trial:
+
+```text
+test_sdr_draft[draft_no_send-trial1]
+test_sdr_draft[draft_no_send-trial2]
+```
+
+Kensa aggregates the trials into a single verdict per case. `trials: 1` is reported as a smoke check; `trials > 1` is measured evidence of flakiness. See [Pytest plugin](/pytest) for verdict aggregation.
+
+## Generated cases
+
+When your coding agent mines imported traces into eval ideas (the `kensa-inspect` skill) and materializes the approved ones (the `kensa-generate` skill), the generated `tests/evals/test_<id>.py` files use this same `kensa_case` API - plain pytest files you can edit, rename, and extend by hand. See [Tracing & imports](/tracing).

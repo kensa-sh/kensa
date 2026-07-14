@@ -157,7 +157,7 @@ jobs:
   kensa:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync
       - run: uv run --with kensa kensa eval
@@ -234,6 +234,7 @@ access stay blocked until `kensa init` fixes it.
 
 ## Resources & contributing
 
+- Read the [Kensa documentation](https://kensa.sh/docs).
 - Find a bug or request a feature in [GitHub Issues](https://github.com/kensa-sh/kensa/issues).
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 - Follow the [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and report vulnerabilities through
