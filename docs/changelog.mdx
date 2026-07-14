@@ -15,9 +15,7 @@ keywords:
 
 Imported trace evidence is now minimized to a versioned, allowlisted TraceView before mandatory redaction.
 
-- Only eval-required input, output, timing, status, tool, model, token, and cost fields are retained.
-- Trace and span identifiers use import-local aliases, and Langfuse requests only required fields.
-- `kensa init --redaction-model large` prepares the higher-recall redaction model.
+- Only eval-required fields are retained, and trace and span identifiers use import-local aliases.
 - **Breaking:** persisted TraceView artifacts use the v2 evidence contract.
 
 [View the 0.12.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.12.0).
