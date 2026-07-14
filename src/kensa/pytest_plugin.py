@@ -234,6 +234,10 @@ def _runtime_for_item(item: pytest.Item) -> KensaTrialRuntime | None:
             state.control.judge_timeout_s if state.control is not None else DEFAULT_JUDGE_TIMEOUT_S
         ),
         operation_callback=lambda operation: state.set_active_operation(item.nodeid, operation),
+        snapshot_callback=lambda completed: _record_trial(
+            item.config,
+            completed.metadata(status="pass", duration_ms=completed.trace.duration_ms),
+        ),
     )
     item.__dict__["_kensa_runtime"] = runtime
     return runtime

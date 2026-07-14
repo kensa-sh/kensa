@@ -135,6 +135,8 @@ Positional eval paths default to `tests/evals`. Anything after `--` is passed st
 
 The trial timeout covers setup, the test call, and teardown. Set `timeout_s` on `@pytest.mark.kensa(...)` to override the CLI default for one eval. A timeout stops the suite immediately, writes `error_kind: timeout` and the active traced operation to the exact run artifact, and preserves completed trials. While a trial runs, Kensa prints a parent-owned heartbeat every ten seconds. Hard timeouts require macOS or Linux and are only enforced by `kensa eval`.
 
+Timeout containment covers pytest and descendants that remain in its POSIX process group. A subprocess that creates a new process group or session is outside this boundary and may continue running, so eval code must clean up detached processes explicitly.
+
 The judge timeout is advisory. A built-in judge timeout returns an error-valued `JudgeResult`, so deterministic assertions can continue. Custom judge providers receive the configured deadline and must honor it.
 
 Distributed pytest execution is not supported by `kensa eval`. Remove pytest-xdist worker options such as `-n` or `--numprocesses`; `-n 0` remains valid.

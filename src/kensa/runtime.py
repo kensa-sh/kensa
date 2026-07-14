@@ -230,6 +230,7 @@ class KensaTrialRuntime:
         no_judge: bool,
         judge_timeout_s: float = 30.0,
         operation_callback: Callable[[ActiveOperation | None], None] | None = None,
+        snapshot_callback: Callable[[KensaTrialRuntime], None] | None = None,
     ) -> None:
         self.trial = trial
         self.nodeid = nodeid
@@ -246,6 +247,7 @@ class KensaTrialRuntime:
         self._trace_id: str | None = None
         self._active_operations: dict[object, ActiveOperation] = {}
         self._operation_callback = operation_callback
+        self._snapshot_callback = snapshot_callback
 
     @contextmanager
     def operation(self, name: str, attributes: dict[str, Any]) -> Iterator[None]:
@@ -314,7 +316,12 @@ class KensaTrialRuntime:
         self.output = value
         self.output_recorded = True
         self._flush_and_populate_trace()
+        self._publish_snapshot()
         return value
+
+    def _publish_snapshot(self) -> None:
+        if self.output_recorded and self._snapshot_callback is not None:
+            self._snapshot_callback(self)
 
     def _flush_and_populate_trace(self) -> None:
         incomplete = False
@@ -340,6 +347,7 @@ class KensaTrialRuntime:
 
     def record_judge(self, result: Any) -> None:
         self.judges.append(result)
+        self._publish_snapshot()
 
     def metadata(
         self,

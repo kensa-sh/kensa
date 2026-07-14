@@ -19,6 +19,7 @@ from kensa.runtime import ActiveOperation
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     DEFAULT_TRIAL_TIMEOUT_S,
+    DISTRIBUTED_PYTEST_UNSUPPORTED,
     ActiveTrial,
     EvalProcessResult,
     format_heartbeat,
@@ -318,6 +319,55 @@ def test_active_operation(case):
     }
 
 
+def test_eval_timeout_preserves_completed_case_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.mark.kensa(timeout_s=0.3)
+@pytest.mark.parametrize("case", [kensa_case(id="snapshot", input="hello")])
+def test_snapshot(case, kensa_run):
+    output = case.run(kensa_run)
+    result = judge(output, "must preserve evidence")
+    assert result.passed
+    time.sleep(60)
+""",
+    )
+
+    assert main(["eval", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trial = artifact["trials"][0]
+    assert trial["status"] == "error"
+    assert trial["error_kind"] == "timeout"
+    assert trial["case"] == {"id": "snapshot", "input": "hello"}
+    assert trial["output"] == {"input": "hello"}
+    assert trial["trace"]["spans"][0]["name"] == "kensa.pytest.trial"
+    assert trial["trace"]["incomplete"] is True
+    assert trial["judges"] == [
+        {
+            "passed": True,
+            "reasoning": "Environment judge returned pass for: must preserve evidence",
+            "evidence": [],
+            "provider": "env",
+            "model": "KENSA_JUDGE_RESULT",
+            "metadata": {},
+            "error": False,
+        }
+    ]
+
+
 @pytest.mark.parametrize("value", [True, False, 0, -1, float("nan"), float("inf")])
 def test_validate_timeout_rejects_invalid_values(value: Any) -> None:
     with pytest.raises(ValueError, match="positive finite"):
@@ -357,6 +407,32 @@ def test_eval_cli_rejects_invalid_timeout(value: str, capsys: pytest.CaptureFixt
 
     assert main(["eval", f"--judge-timeout={value}"]) == 2
     assert "positive finite number" in capsys.readouterr().err
+
+
+def test_eval_rejects_control_path_passthrough(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "run_eval_process",
+        lambda *args, **kwargs: pytest.fail("pytest should not launch"),
+    )
+
+    assert main(["eval", "--json", "--", "--kensa-control-path="]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"] == "Kensa eval received a reserved pytest option."
+    assert payload["errors"] == [
+        "--kensa-control-path is reserved for kensa eval and cannot be passed to pytest."
+    ]
+
+    assert main(["eval", "--", "--kensa-control-path", "ignored.json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--kensa-control-path is reserved" in captured.err
+    assert not (tmp_path / ".kensa").exists()
 
 
 def test_eval_rejects_unsupported_platform_before_launch(
@@ -466,6 +542,29 @@ def test_eval_json_surfaces_xdist_config_rejection(
         "kensa eval does not support distributed pytest execution; "
         "remove pytest-xdist worker options."
     ]
+
+
+def test_eval_json_does_not_reclassify_failed_test_output_as_xdist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "run_eval_process",
+        lambda *args, **kwargs: EvalProcessResult(
+            returncode=1,
+            stderr=DISTRIBUTED_PYTEST_UNSUPPORTED,
+        ),
+    )
+
+    assert main(["eval", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"] != "Kensa eval does not support distributed pytest execution."
+    assert DISTRIBUTED_PYTEST_UNSUPPORTED not in payload["errors"]
+    assert payload["data"]["pytest"]["returncode"] == 1
 
 
 def test_eval_terminal_timeout_prints_reason_and_artifact(
