@@ -131,7 +131,7 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 | `--judge-timeout` | `30` | Maximum seconds for each judge call |
 | `--trial-timeout` | `300` | Maximum seconds for each trial |
 
-Positional eval paths default to `tests/evals`. Anything after `--` is passed straight to pytest. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
+Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest except the reserved internal `--kensa-control-path` option, which is rejected. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
 
 The trial timeout covers setup, the test call, and teardown. Set `timeout_s` on `@pytest.mark.kensa(...)` to override the CLI default for one eval. A timeout stops the suite immediately, writes `error_kind: timeout` and the active traced operation to the exact run artifact, and preserves completed trials. While a trial runs, Kensa prints a parent-owned heartbeat every ten seconds. Hard timeouts require macOS or Linux and are only enforced by `kensa eval`.
 

@@ -411,6 +411,9 @@ def kensa_run():
     )
     pytester.makepyfile(
         test_eval="""
+import json
+from pathlib import Path
+
 import pytest
 from kensa.pytest import kensa_case
 
@@ -420,6 +423,9 @@ from kensa.pytest import kensa_case
 def test_agent(case, kensa_run):
     output = case.run(kensa_run)
     assert output["input"] == "hello"
+    artifact = next(Path(".kensa/results").glob("*.json"))
+    snapshot = json.loads(artifact.read_text())
+    assert snapshot["trials"][0]["status"] == "provisional"
 """
     )
 
@@ -429,6 +435,7 @@ def test_agent(case, kensa_run):
     artifacts = list((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
+    assert payload["trials"][0]["status"] == "pass"
     assert payload["trials"][0]["output"] == {"input": "hello"}
     assert "type" not in payload["trials"][0]
     assert "type" not in payload["aggregates"][0]
@@ -437,6 +444,48 @@ def test_agent(case, kensa_run):
     )
     trace_row = json.loads(trace_artifact.read_text().splitlines()[0])
     assert "type" not in trace_row
+
+
+def test_setup_error_replaces_provisional_case_snapshot(pytester: pytest.Pytester) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+
+
+@pytest.fixture
+def kensa_run():
+    return lambda case: {"input": case.input}
+
+
+@pytest.fixture
+def failing_setup(case, kensa_run):
+    case.run(kensa_run)
+    raise RuntimeError("setup failed after case run")
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
+def test_agent(case, failing_setup):
+    raise AssertionError("test call should not run")
+""",
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(errors=1)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trial = json.loads(artifact.read_text())["trials"][0]
+    assert trial["status"] == "error"
+    assert trial["error_kind"] == "setup"
+    assert trial["error"] == "setup failed after case run"
+    assert trial["case"] == {"id": "case_a", "input": "hello"}
+    assert trial["output"] == {"input": "hello"}
 
 
 def test_failed_assertions_still_write_trial_metadata(pytester: pytest.Pytester) -> None:

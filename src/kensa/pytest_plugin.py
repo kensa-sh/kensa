@@ -34,6 +34,7 @@ from kensa.watchdog import (
 )
 
 PRIVATE_TRIAL = "_kensa_trial"
+_PROVISIONAL_STATUS = "provisional"
 _TRIAL_RE = re.compile(r"-?trial\d+-?|trial\d+-?")
 
 
@@ -236,7 +237,10 @@ def _runtime_for_item(item: pytest.Item) -> KensaTrialRuntime | None:
         operation_callback=lambda operation: state.set_active_operation(item.nodeid, operation),
         snapshot_callback=lambda completed: _record_trial(
             item.config,
-            completed.metadata(status="pass", duration_ms=completed.trace.duration_ms),
+            completed.metadata(
+                status=_PROVISIONAL_STATUS,
+                duration_ms=completed.trace.duration_ms,
+            ),
         ),
     )
     item.__dict__["_kensa_runtime"] = runtime
@@ -340,8 +344,13 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
     runtime = _runtime_for_item(item)
     if runtime is None:
         return
-    if report.when == "setup" and any(t.nodeid == item.nodeid for t in _state(item.config).trials):
-        return
+    if report.when == "setup":
+        existing = next(
+            (trial for trial in _state(item.config).trials if trial.nodeid == item.nodeid),
+            None,
+        )
+        if existing is not None and existing.status != _PROVISIONAL_STATUS:
+            return
     _record_trial(
         item.config,
         runtime.metadata(
