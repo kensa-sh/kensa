@@ -146,12 +146,12 @@ kensa eval --trial-timeout 180              # default timeout for each trial
 kensa eval -- -k refund -q                  # pass args through to pytest after --
 ```
 
-`kensa eval` bounds the full setup, call, and teardown of each trial to 300 seconds by default. A marker `timeout_s` overrides `--trial-timeout`. On timeout, Kensa stops the suite immediately and preserves completed results, including the active operation published by `record_span`, `record_tool_call`, `record_llm_call`, or the built-in judge. Hard timeouts require macOS or Linux; explicit `timeout_s` values are rejected under direct `pytest` because there is no parent watchdog.
+`kensa eval` stops trials after 300 seconds by default and preserves available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
 
-Timeout containment covers pytest and descendants that remain in its POSIX process group. A subprocess that creates a new process group or session is outside this boundary and may continue running, so eval code must clean up detached processes explicitly.
+Trial timeouts require macOS or Linux, work only with `kensa eval`, and leave detached subprocess cleanup to the eval.
 
-Judge calls have a separate 30-second advisory deadline. Built-in judge timeouts return an error-valued `JudgeResult` instead of ending the trial. Custom judge providers receive `timeout_s` and must honor it.
+Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
 
-`kensa eval` rejects distributed pytest execution because the watchdog owns one active trial. Remove pytest-xdist worker options such as `-n` or `--numprocesses`, including options configured through pytest settings. Direct pytest remains unchanged.
+`kensa eval` does not support distributed pytest execution.
 
 `kensa eval` also enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).

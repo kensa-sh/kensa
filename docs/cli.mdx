@@ -131,15 +131,15 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 | `--judge-timeout` | `30` | Maximum seconds for each judge call |
 | `--trial-timeout` | `300` | Maximum seconds for each trial |
 
-Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest except the reserved internal `--kensa-control-path` option, which is rejected. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
+Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest, except reserved Kensa options. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
 
-The trial timeout covers setup, the test call, and teardown. Set `timeout_s` on `@pytest.mark.kensa(...)` to override the CLI default for one eval. A timeout stops the suite immediately, writes `error_kind: timeout` and the active traced operation to the exact run artifact, and preserves completed trials. While a trial runs, Kensa prints a parent-owned heartbeat every ten seconds. Hard timeouts require macOS or Linux and are only enforced by `kensa eval`.
+Trials time out after 300 seconds by default, stopping the suite while preserving available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
 
-Timeout containment covers pytest and descendants that remain in its POSIX process group. A subprocess that creates a new process group or session is outside this boundary and may continue running, so eval code must clean up detached processes explicitly.
+Trial timeouts require macOS or Linux, and evals remain responsible for cleaning up detached subprocesses.
 
-The judge timeout is advisory. A built-in judge timeout returns an error-valued `JudgeResult`, so deterministic assertions can continue. Custom judge providers receive the configured deadline and must honor it.
+Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
 
-Distributed pytest execution is not supported by `kensa eval`. Remove pytest-xdist worker options such as `-n` or `--numprocesses`; `-n 0` remains valid.
+`kensa eval` does not support distributed pytest execution.
 
 ## kensa traces
 

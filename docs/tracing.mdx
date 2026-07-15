@@ -83,7 +83,7 @@ with record_llm_call(provider="openai", model="gpt-5.4-mini"):
     reply = client.responses.create(...)
 ```
 
-During `kensa eval`, these context managers also publish the current operation to the parent watchdog. Ten-second heartbeats show the operation name plus allowlisted `attempt`, `turn`, `provider`, and `model` attributes. Heartbeat text is redacted and size-limited before it reaches terminal or CI logs. A trial timeout stores the full active operation in the local result artifact.
+During `kensa eval`, these context managers show the current operation in progress updates and preserve it when a trial times out.
 
 Set `KENSA_TRACE_DIR` so spans are written to disk, then import them like any other JSONL source:
 
