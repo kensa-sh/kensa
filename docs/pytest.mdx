@@ -148,10 +148,6 @@ kensa eval -- -k refund -q                  # pass args through to pytest after 
 
 `kensa eval` stops trials after 300 seconds by default and preserves available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
 
-Trial timeouts require macOS or Linux, work only with `kensa eval`, and leave detached subprocess cleanup to the eval.
-
 Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
-
-`kensa eval` does not support distributed pytest execution.
 
 `kensa eval` also enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).
