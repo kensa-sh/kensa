@@ -74,7 +74,7 @@ def kensa_run():
 | `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
 | `kensa_run` | you (`conftest.py`) | Callable that runs a case through your agent |
 | `kensa_trace` | Kensa | The trace collected for the current trial |
-| `@pytest.mark.kensa(trials=N)` | Kensa | Run each case `N` times (default `1`) |
+| `@pytest.mark.kensa(trials=N, timeout_s=SECONDS)` | Kensa | Run each case `N` times with an optional hard timeout under `kensa eval` |
 
 ## Async agents
 
@@ -141,7 +141,13 @@ Use `kensa eval` when you want CI-friendly artifacts written automatically:
 kensa eval                                  # runs tests/evals/ via pytest
 kensa eval --markdown-report eval.md        # Markdown summary for a PR comment
 kensa eval --json-report eval.json          # machine-readable artifact
+kensa eval --judge-timeout 30               # advisory deadline for judge calls
+kensa eval --trial-timeout 180              # default timeout for each trial
 kensa eval -- -k refund -q                  # pass args through to pytest after --
 ```
 
-`kensa eval` enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).
+`kensa eval` stops trials after 300 seconds by default and preserves available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
+
+Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
+
+`kensa eval` also enables artifact writing and checks evals readiness - it expects at least one passing non-smoke eval. See the [CLI reference](/cli) and [CI](/ci).

@@ -22,15 +22,20 @@ from kensa.pytest_plugin import (
     KensaAggregate,
     KensaSessionState,
     _case_id,
+    _distributed_pytest_enabled,
     _kensa_trial_fixture,
+    _marker_timeout,
     _marker_trials,
     _runtime_for_item,
+    pytest_configure,
     pytest_make_parametrize_id,
     pytest_runtest_makereport,
+    pytest_runtest_protocol,
     pytest_terminal_summary,
 )
 from kensa.pytest_plugin import kensa_trace as kensa_trace_fixture
 from kensa.runtime import (
+    ActiveOperation,
     KensaSpan,
     KensaTrace,
     KensaTrial,
@@ -43,6 +48,7 @@ from kensa.runtime import (
     set_current_runtime,
 )
 from kensa.tracing import JSONLSpanExporter, instrument
+from kensa.watchdog import ActiveTrial, WatchdogControl, read_control, write_control
 
 
 def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
@@ -294,7 +300,28 @@ def test_cli_edge_paths(
             }
         )
     )
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+
+    def successful_eval(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args
+        control = read_control(Path(kwargs["control_path"]))
+        cli.write_run_artifacts(
+            run_id=control.run_id,
+            trials=[
+                TrialMetadata(
+                    nodeid="n",
+                    group_id="g",
+                    case_id="domain_case",
+                    trial_index=1,
+                    configured_trials=1,
+                    status="pass",
+                )
+            ],
+            result_path=control.result_path,
+            artifact_dir=control.artifact_dir,
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="", timeout=None)
+
+    monkeypatch.setattr(cli, "run_eval_process", successful_eval)
     args = argparse.Namespace(paths=[], no_judge=True, json_report=None, markdown_report=None)
     assert cli._cmd_eval(args, ["-k", "x"]) == 0
     assert capsys.readouterr().err == ""
@@ -569,9 +596,95 @@ def test_pytest_plugin_direct_helpers() -> None:
     with pytest.raises(StopIteration):
         hook.send(Outcome(report))
 
+
+def test_pytest_plugin_watchdog_control_paths(
+    tmp_path: Path,
+) -> None:
+    control_path = tmp_path / "control.json"
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "results" / "run.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=10,
+    )
+    write_control(control_path, control)
+
+    class Config:
+        def getoption(self, name: str) -> Any:
+            if name == "--kensa-control-path":
+                return str(control_path)
+            if name == "--kensa-write-artifacts":
+                return True
+            return None
+
+    config = Config()
+    state = KensaSessionState(cast(Any, config))
+    config.__dict__["_kensa_state"] = state
+    assert state.artifact_dir == tmp_path
+    assert state.result_path == tmp_path / "results" / "run.json"
+    assert state.write_artifacts
+    marker = cast(Any, SimpleNamespace(args=[], kwargs={"timeout_s": 2}))
+    assert _marker_timeout(marker, cast(Any, config)) == 2
+    with pytest.raises(pytest.UsageError, match="positive finite"):
+        _marker_timeout(
+            cast(Any, SimpleNamespace(args=[], kwargs={"timeout_s": True})),
+            cast(Any, config),
+        )
+
+    item = SimpleNamespace(
+        nodeid="test.py::test_agent[trial1]",
+        config=config,
+        callspec=SimpleNamespace(params={PRIVATE_TRIAL: KensaTrial(1, 1, timeout_s=2)}),
+        get_closest_marker=lambda name: (
+            SimpleNamespace(args=[], kwargs={"timeout_s": 2}) if name == "kensa" else None
+        ),
+    )
+    hook = pytest_runtest_protocol(cast(Any, item), None)
+    next(hook)
+    active = read_control(control_path).active_trial
+    assert active is not None
+    assert active.timeout_s == 2
+    operation = ActiveOperation("model.call", {"attempt": 1})
+    state.set_active_operation("other", operation)
+    assert read_control(control_path).active_trial == active
+    state.set_active_operation(item.nodeid, operation)
+    operation_active = read_control(control_path).active_trial
+    assert operation_active is not None
+    assert operation_active.active_operation == operation
+    state.set_active_operation(item.nodeid, None)
+    cleared_active = read_control(control_path).active_trial
+    assert cleared_active is not None
+    assert cleared_active.active_operation is None
+    with pytest.raises(StopIteration):
+        hook.send(None)
+    assert read_control(control_path).active_trial is None
+
+    plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
+    plain_state.set_active_operation("n", operation)
+    plain_state.set_active_trial(
+        ActiveTrial(
+            nodeid="n",
+            group_id="g",
+            case_id="c",
+            trial_index=1,
+            configured_trials=1,
+            timeout_s=1,
+            started_monotonic_ns=1,
+        )
+    )
+
+    class Outcome:
+        def __init__(self, report: Any) -> None:
+            self._report = report
+
+        def get_result(self) -> Any:
+            return self._report
+
+    report = SimpleNamespace(when="setup", failed=True)
+    call = SimpleNamespace(excinfo=None)
     runtime_item = SimpleNamespace(
         nodeid="n[trial1]",
-        config=config_obj,
+        config=config,
         callspec=SimpleNamespace(params={PRIVATE_TRIAL: KensaTrial(1, 1)}),
         get_closest_marker=lambda name: (
             SimpleNamespace(
@@ -596,6 +709,40 @@ def test_pytest_plugin_direct_helpers() -> None:
     next(hook)
     with pytest.raises(StopIteration):
         hook.send(Outcome(report))
+
+
+def test_pytest_plugin_rejects_distributed_eval() -> None:
+    class Config:
+        def __init__(self) -> None:
+            self.values = {
+                "--kensa-control-path": ".kensa/state/run.json",
+                "numprocesses": 2,
+                "dist": "load",
+                "tx": ["popen", "popen"],
+                "distload": False,
+            }
+
+        def getoption(self, name: str, default: Any = None) -> Any:
+            return self.values.get(name, default)
+
+    config = cast(pytest.Config, Config())
+
+    assert _distributed_pytest_enabled(config)
+    with pytest.raises(pytest.UsageError, match="does not support distributed pytest"):
+        pytest_configure(config)
+
+    direct = cast(
+        pytest.Config,
+        SimpleNamespace(
+            getoption=lambda name, default=None: {
+                "numprocesses": 0,
+                "dist": "no",
+                "tx": [],
+                "distload": False,
+            }.get(name, default)
+        ),
+    )
+    assert not _distributed_pytest_enabled(direct)
 
 
 def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -> None:

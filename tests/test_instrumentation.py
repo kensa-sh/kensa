@@ -9,7 +9,7 @@ import pytest
 
 import kensa
 from kensa import cli_traces, redact, tracing
-from kensa.tracing import record_llm_call, record_tool_call
+from kensa.tracing import record_llm_call, record_span, record_tool_call
 
 
 def test_instrument_noops_without_trace_dir(monkeypatch) -> None:
@@ -56,6 +56,19 @@ def test_record_llm_call_exports_llm_span(tmp_path: Path) -> None:
     assert row["attributes"]["gen_ai.system"] == "openai"
     assert row["attributes"]["kensa.llm.model"] == "gpt-5-mini"
     assert row["attributes"]["gen_ai.request.model"] == "gpt-5-mini"
+
+
+def test_record_span_flattens_explicit_attributes(tmp_path: Path) -> None:
+    kensa.instrument(tmp_path)
+
+    with record_span("nested", attributes={"attempt": 1}):
+        pass
+    with record_span("scalar", attributes="value"):
+        pass
+
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    assert rows[-2]["attributes"] == {"attempt": 1}
+    assert rows[-1]["attributes"] == {"attributes": "value"}
 
 
 def test_instrument_run_directory_writes_manifest(tmp_path: Path) -> None:

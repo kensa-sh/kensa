@@ -6,10 +6,12 @@ from importlib.metadata import version as _metadata_version
 
 __version__ = _metadata_version("kensa")
 
+from kensa.errors import KensaTimeoutError
 from kensa.pytest import kensa_case
 from kensa.tracing import instrument, record_llm_call, record_span, record_tool_call
 
 __all__ = [
+    "KensaTimeoutError",
     "__version__",
     "instrument",
     "kensa_case",

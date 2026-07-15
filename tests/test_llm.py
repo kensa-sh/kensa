@@ -5,8 +5,10 @@ from typing import Any
 
 import pytest
 from any_llm.constants import LLMProvider as AnyLLMProvider
+from any_llm.exceptions import ProviderError
 from pydantic import BaseModel
 
+from kensa import KensaTimeoutError
 from kensa.llm import (
     DEFAULT_LLM_MODEL,
     LLMConfigurationError,
@@ -133,6 +135,26 @@ def test_complete_passes_response_format_and_handles_provider_import(
     ]
 
 
+def test_complete_passes_provider_deadline_without_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_completion(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return _chat_response()
+
+    monkeypatch.setattr("kensa.llm._completion", fake_completion)
+
+    result = complete(
+        [{"role": "user", "content": "hello"}],
+        timeout_s=12.5,
+    )
+
+    assert result.content == "ok"
+    assert calls[0]["client_args"] == {"timeout": 12.5, "max_retries": 0}
+
+
 def test_complete_rejects_json_object_response_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,6 +270,64 @@ def test_completion_import_success_and_failure(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("builtins.__import__", fake_import_success)
     assert _completion(model="m") == {"model": "m"}
+
+
+def test_completion_classifies_provider_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    def built_in_timeout(**kwargs: Any) -> None:
+        del kwargs
+        raise TimeoutError
+
+    monkeypatch.setattr("any_llm.completion", built_in_timeout)
+    with pytest.raises(KensaTimeoutError, match="LLM completion timed out"):
+        _completion(model="m")
+
+    provider_timeout = type("APITimeoutError", (Exception,), {"__module__": "openai._exceptions"})
+
+    def openai_timeout(**kwargs: Any) -> None:
+        del kwargs
+        raise provider_timeout("request timed out")
+
+    monkeypatch.setattr("any_llm.completion", openai_timeout)
+    with pytest.raises(KensaTimeoutError, match="request timed out"):
+        _completion(model="m")
+
+    def other_error(**kwargs: Any) -> None:
+        del kwargs
+        raise RuntimeError("provider failed")
+
+    monkeypatch.setattr("any_llm.completion", other_error)
+    with pytest.raises(RuntimeError, match="provider failed"):
+        _completion(model="m")
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_completion_classifies_unified_provider_timeouts(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_timeout = type(
+        "APITimeoutError",
+        (Exception,),
+        {"__module__": f"{provider}._exceptions"},
+    )
+    wrapped = ProviderError(
+        "unified provider error",
+        original_exception=ProviderError(
+            "nested provider error",
+            original_exception=provider_timeout("request timed out"),
+            provider_name=provider,
+        ),
+        provider_name=provider,
+    )
+
+    def unified_timeout(**kwargs: Any) -> None:
+        del kwargs
+        raise wrapped
+
+    monkeypatch.setattr("any_llm.completion", unified_timeout)
+
+    with pytest.raises(KensaTimeoutError, match="unified provider error"):
+        _completion(model="m")
 
 
 def test_complete_rejects_malformed_completion_responses(

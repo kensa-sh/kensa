@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 from pathlib import Path
@@ -7,8 +8,10 @@ from typing import Any
 
 import pytest
 
-from kensa.judge import judge, set_judge_provider
+from kensa import KensaTimeoutError, record_span
+from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
+from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
 
 
 def test_trace_spans_are_available_immediately_after_case_run(pytester: pytest.Pytester) -> None:
@@ -282,6 +285,7 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
         temperature: float | None = None,
         response_format: Any = None,
         metadata: dict[str, Any] | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResult:
         calls.append(
             {
@@ -291,6 +295,7 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
                 "temperature": temperature,
                 "response_format": response_format,
                 "metadata": metadata,
+                "timeout_s": timeout_s,
             }
         )
         payload = {
@@ -321,6 +326,7 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.evidence == ["safe response"]
     assert calls[0]["model"] == "gpt-5.4-mini"
     assert calls[0]["provider"] == "openai"
+    assert calls[0]["timeout_s"] == 30
     assert calls[0]["response_format"].__name__ == "_JudgeLLMResponse"
     system_message = calls[0]["messages"][0]
     assert system_message["role"] == "system"
@@ -328,3 +334,139 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "evaluations_judge" not in system_message["content"]
     assert "Set passed=false when required behavior is missing" in system_message["content"]
     assert "Do not include extra fields" in system_message["content"]
+
+
+def test_judge_timeout_is_advisory_and_reports_active_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations: list[dict[str, Any] | None] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+        judge_timeout_s=0.25,
+        operation_callback=lambda operation: operations.append(
+            operation.to_dict() if operation is not None else None
+        ),
+    )
+
+    def timed_out(*args: Any, **kwargs: Any) -> LLMResult:
+        del args, kwargs
+        raise KensaTimeoutError("provider request timed out")
+
+    set_judge_provider(None)
+    monkeypatch.setenv("KENSA_JUDGE_MODEL", "gpt-5.4-mini")
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "openai")
+    monkeypatch.setattr("kensa.judge.complete", timed_out)
+    token = set_current_runtime(runtime)
+    try:
+        result = judge("safe response", "must be safe")
+    finally:
+        reset_current_runtime(token)
+
+    assert not result.passed
+    assert result.error
+    assert result.reasoning == "Judge timed out after 0.25 seconds"
+    assert result.provider == "openai"
+    assert result.model == "gpt-5.4-mini"
+    assert result.metadata == {"timeout_s": 0.25}
+    assert runtime.judges == [result]
+    assert operations == [
+        {
+            "name": "judge",
+            "attributes": {"provider": "openai", "model": "gpt-5.4-mini"},
+        },
+        None,
+    ]
+
+
+def test_custom_judge_provider_receives_deadline() -> None:
+    observed: list[float] = []
+
+    class Provider:
+        def judge(self, **kwargs: Any) -> JudgeResult:
+            observed.append(kwargs["timeout_s"])
+            return JudgeResult(passed=True, reasoning="ok")
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+        judge_timeout_s=0.75,
+    )
+    set_judge_provider(Provider())
+    token = set_current_runtime(runtime)
+    try:
+        result = judge("safe response", "must be safe")
+    finally:
+        reset_current_runtime(token)
+        set_judge_provider(None)
+
+    assert result.passed
+    assert observed == [0.75]
+
+
+def test_overlapping_operations_publish_newest_remaining_operation() -> None:
+    operations: list[str | None] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+        operation_callback=lambda operation: operations.append(
+            operation.name if operation is not None else None
+        ),
+    )
+
+    async def exercise() -> None:
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        finish_first = asyncio.Event()
+        finish_second = asyncio.Event()
+
+        async def first() -> None:
+            with record_span("first"):
+                first_started.set()
+                await finish_first.wait()
+
+        async def second() -> None:
+            await first_started.wait()
+            with record_span("second"):
+                second_started.set()
+                await finish_second.wait()
+
+        token = set_current_runtime(runtime)
+        try:
+            first_task = asyncio.create_task(first())
+            second_task = asyncio.create_task(second())
+            await second_started.wait()
+            finish_first.set()
+            await first_task
+            finish_second.set()
+            await second_task
+        finally:
+            reset_current_runtime(token)
+
+    asyncio.run(exercise())
+
+    assert operations == ["first", "second", "second", None]
+
+
+def test_judge_timeout_before_provider_resolution_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kensa.judge._provider_from_environment",
+        lambda: (_ for _ in ()).throw(TimeoutError()),
+    )
+
+    result = judge("safe response", "must be safe")
+
+    assert result.error
+    assert result.provider is None
+    assert result.reasoning == "Judge timed out after 30 seconds"

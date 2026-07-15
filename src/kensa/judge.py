@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kensa.llm import DEFAULT_LLM_MODEL, complete, resolve_llm_config, validate_structured_result
 from kensa.models import LLMModel
 from kensa.runtime import current_runtime
+from kensa.watchdog import DEFAULT_JUDGE_TIMEOUT_S, format_timeout_s, timeout_value
 
 DEFAULT_ANTHROPIC_JUDGE_MODEL = LLMModel.CLAUDE_SONNET_4_6.value
 
@@ -25,6 +27,7 @@ class JudgeProvider(Protocol):
         input: Any = None,
         trace: Any = None,
         context: Any = None,
+        timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
     ) -> JudgeResult: ...
 
 
@@ -92,6 +95,7 @@ def judge(
     """Run a semantic assertion helper and return an explicit result object."""
 
     runtime = current_runtime()
+    timeout_s = runtime.judge_timeout_s if runtime is not None else DEFAULT_JUDGE_TIMEOUT_S
     if runtime is not None and runtime.no_judge:
         result = JudgeResult(
             passed=False,
@@ -103,6 +107,7 @@ def judge(
         runtime.record_judge(result)
         return result
 
+    provider: JudgeProvider | None = None
     try:
         provider = _PROVIDER or _provider_from_environment()
         if provider is None:
@@ -116,13 +121,30 @@ def judge(
                 error=True,
             )
         else:
-            result = provider.judge(
-                output=output,
-                criteria=criteria,
-                input=input,
-                trace=trace,
-                context=context,
+            operation = (
+                runtime.operation("judge", _judge_operation_attributes(provider))
+                if runtime is not None
+                else nullcontext()
             )
+            with operation:
+                result = provider.judge(
+                    output=output,
+                    criteria=criteria,
+                    input=input,
+                    trace=trace,
+                    context=context,
+                    timeout_s=timeout_s,
+                )
+    except TimeoutError:
+        provider_name, model = _judge_identity(provider)
+        result = JudgeResult(
+            passed=False,
+            reasoning=f"Judge timed out after {format_timeout_s(timeout_s)} seconds",
+            provider=provider_name,
+            model=model,
+            metadata={"timeout_s": timeout_value(timeout_s)},
+            error=True,
+        )
     except Exception as exc:
         result = JudgeResult(
             passed=False,
@@ -134,6 +156,26 @@ def judge(
     if runtime is not None:
         runtime.record_judge(result)
     return result
+
+
+def _judge_operation_attributes(provider: JudgeProvider) -> dict[str, Any]:
+    provider_name, model = _judge_identity(provider)
+    attributes: dict[str, Any] = {}
+    if provider_name is not None:
+        attributes["provider"] = provider_name
+    if model is not None:
+        attributes["model"] = model
+    return attributes
+
+
+def _judge_identity(provider: JudgeProvider | None) -> tuple[str | None, str | None]:
+    if isinstance(provider, _LLMJudge):
+        return provider.config.provider.value, provider.config.model.value
+    if isinstance(provider, _EnvJudge):
+        return "env", "KENSA_JUDGE_RESULT"
+    if provider is None:
+        return None, None
+    return type(provider).__name__, None
 
 
 def _provider_from_environment() -> JudgeProvider | None:
@@ -176,8 +218,9 @@ class _EnvJudge:
         input: Any = None,
         trace: Any = None,
         context: Any = None,
+        timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
     ) -> JudgeResult:
-        del output, input, trace, context
+        del output, input, trace, context, timeout_s
         if self.verdict == "error":
             raise RuntimeError("KENSA_JUDGE_RESULT=error")
         passed = self.verdict in {"1", "true", "pass", "passed", "yes"}
@@ -202,6 +245,7 @@ class _LLMJudge:
         input: Any = None,
         trace: Any = None,
         context: Any = None,
+        timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
     ) -> JudgeResult:
         payload = {
             "criteria": criteria,
@@ -226,6 +270,7 @@ class _LLMJudge:
             temperature=0.0,
             response_format=_JudgeLLMResponse,
             metadata={"task": "judge"},
+            timeout_s=timeout_s,
         )
         data = validate_structured_result(result, _JudgeLLMResponse)
         return JudgeResult(

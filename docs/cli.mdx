@@ -117,6 +117,8 @@ kensa eval                                  # runs tests/evals/
 kensa eval --markdown-report eval.md
 kensa eval --json-report eval.json
 kensa eval --no-judge
+kensa eval --judge-timeout 30
+kensa eval --trial-timeout 180
 kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 ```
 
@@ -126,8 +128,18 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 | `--json-report` | - | Write a Kensa JSON artifact to this path |
 | `--markdown-report` | - | Write a Markdown summary to this path |
 | `--no-judge` | off | Disable judge calls |
+| `--judge-timeout` | `30` | Maximum seconds for each judge call |
+| `--trial-timeout` | `300` | Maximum seconds for each trial |
 
-Positional eval paths default to `tests/evals`. Anything after `--` is passed straight to pytest. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
+Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest, except reserved Kensa options. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
+
+Trials time out after 300 seconds by default, stopping the suite while preserving available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
+
+Trial timeouts require macOS or Linux, and evals remain responsible for cleaning up detached subprocesses.
+
+Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
+
+`kensa eval` does not support distributed pytest execution.
 
 ## kensa traces
 

@@ -178,6 +178,24 @@ def test_agent(case):
     assert result.ret == 0
 
 
+def test_explicit_timeout_requires_kensa_eval(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+
+
+@pytest.mark.kensa(timeout_s=1)
+def test_agent():
+    pass
+"""
+    )
+
+    result = pytester.runpytest("-q")
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(["*timeout_s=...*requires kensa eval for hard containment*"])
+
+
 def test_kensa_marker_without_type_runs_successfully(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(
         test_eval="""
@@ -393,6 +411,9 @@ def kensa_run():
     )
     pytester.makepyfile(
         test_eval="""
+import json
+from pathlib import Path
+
 import pytest
 from kensa.pytest import kensa_case
 
@@ -402,6 +423,9 @@ from kensa.pytest import kensa_case
 def test_agent(case, kensa_run):
     output = case.run(kensa_run)
     assert output["input"] == "hello"
+    artifact = next(Path(".kensa/results").glob("*.json"))
+    snapshot = json.loads(artifact.read_text())
+    assert snapshot["trials"][0]["status"] == "provisional"
 """
     )
 
@@ -411,6 +435,7 @@ def test_agent(case, kensa_run):
     artifacts = list((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
+    assert payload["trials"][0]["status"] == "pass"
     assert payload["trials"][0]["output"] == {"input": "hello"}
     assert "type" not in payload["trials"][0]
     assert "type" not in payload["aggregates"][0]
@@ -419,6 +444,123 @@ def test_agent(case, kensa_run):
     )
     trace_row = json.loads(trace_artifact.read_text().splitlines()[0])
     assert "type" not in trace_row
+
+
+def test_setup_error_replaces_provisional_case_snapshot(pytester: pytest.Pytester) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+
+
+@pytest.fixture
+def kensa_run():
+    return lambda case: {"input": case.input}
+
+
+@pytest.fixture
+def failing_setup(case, kensa_run):
+    case.run(kensa_run)
+    raise RuntimeError("setup failed after case run")
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
+def test_agent(case, failing_setup):
+    raise AssertionError("test call should not run")
+""",
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(errors=1)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trial = json.loads(artifact.read_text())["trials"][0]
+    assert trial["status"] == "error"
+    assert trial["error_kind"] == "setup"
+    assert trial["error"] == "setup failed after case run"
+    assert trial["case"] == {"id": "case_a", "input": "hello"}
+    assert trial["output"] == {"input": "hello"}
+
+
+def test_teardown_judge_preserves_finalized_trial_outcomes(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    pytester.makeconftest(
+        """
+import json
+from pathlib import Path
+
+import pytest
+from kensa.pytest import judge
+
+
+@pytest.fixture
+def kensa_run():
+    return lambda case: {"input": case.input}
+
+
+@pytest.fixture
+def judge_in_teardown(request):
+    yield
+    artifact = next(Path(".kensa/results").glob("*.json"))
+    before = next(
+        trial
+        for trial in json.loads(artifact.read_text())["trials"]
+        if trial["nodeid"] == request.node.nodeid
+    )
+    result = judge(before["output"], "teardown evidence must pass")
+    assert result.passed
+    after = next(
+        trial
+        for trial in json.loads(artifact.read_text())["trials"]
+        if trial["nodeid"] == request.node.nodeid
+    )
+    for field in ("status", "duration_ms", "error", "error_kind"):
+        assert after[field] == before[field]
+    assert len(after["judges"]) == len(before["judges"]) + 1
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="pass_case", input="hello")])
+def test_pass(case, kensa_run, judge_in_teardown):
+    assert case.run(kensa_run) == {"input": "hello"}
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="fail_case", input="hello")])
+def test_fail(case, kensa_run, judge_in_teardown):
+    case.run(kensa_run)
+    assert False, "call failed"
+""",
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(passed=1, failed=1)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trials = json.loads(artifact.read_text())["trials"]
+    passed = next(trial for trial in trials if trial["case_id"] == "pass_case")
+    failed = next(trial for trial in trials if trial["case_id"] == "fail_case")
+    assert passed["status"] == "pass"
+    assert len(passed["judges"]) == 1
+    assert failed["status"] == "fail"
+    assert failed["error"] == "call failed\nassert False"
+    assert failed["error_kind"] == "assertion"
+    assert len(failed["judges"]) == 1
 
 
 def test_failed_assertions_still_write_trial_metadata(pytester: pytest.Pytester) -> None:
