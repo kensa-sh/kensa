@@ -235,13 +235,7 @@ def _runtime_for_item(item: pytest.Item) -> KensaTrialRuntime | None:
             state.control.judge_timeout_s if state.control is not None else DEFAULT_JUDGE_TIMEOUT_S
         ),
         operation_callback=lambda operation: state.set_active_operation(item.nodeid, operation),
-        snapshot_callback=lambda completed: _record_trial(
-            item.config,
-            completed.metadata(
-                status=_PROVISIONAL_STATUS,
-                duration_ms=completed.trace.duration_ms,
-            ),
-        ),
+        snapshot_callback=lambda completed: _record_trial_snapshot(item.config, completed),
     )
     item.__dict__["_kensa_runtime"] = runtime
     return runtime
@@ -367,6 +361,24 @@ def _record_trial(config: pytest.Config, metadata: TrialMetadata) -> None:
     upsert_trial(state.trials, metadata)
     if state.write_artifacts:
         _write_artifacts(state)
+
+
+def _record_trial_snapshot(config: pytest.Config, runtime: KensaTrialRuntime) -> None:
+    state = _state(config)
+    existing = next((trial for trial in state.trials if trial.nodeid == runtime.nodeid), None)
+    snapshot = runtime.metadata(
+        status=_PROVISIONAL_STATUS,
+        duration_ms=runtime.trace.duration_ms,
+    )
+    if existing is not None and existing.status != _PROVISIONAL_STATUS:
+        snapshot = replace(
+            existing,
+            case=snapshot.case,
+            output=snapshot.output,
+            trace=snapshot.trace,
+            judges=snapshot.judges,
+        )
+    _record_trial(config, snapshot)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitCode) -> None:

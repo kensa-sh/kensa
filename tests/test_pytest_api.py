@@ -488,6 +488,81 @@ def test_agent(case, failing_setup):
     assert trial["output"] == {"input": "hello"}
 
 
+def test_teardown_judge_preserves_finalized_trial_outcomes(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    pytester.makeconftest(
+        """
+import json
+from pathlib import Path
+
+import pytest
+from kensa.pytest import judge
+
+
+@pytest.fixture
+def kensa_run():
+    return lambda case: {"input": case.input}
+
+
+@pytest.fixture
+def judge_in_teardown(request):
+    yield
+    artifact = next(Path(".kensa/results").glob("*.json"))
+    before = next(
+        trial
+        for trial in json.loads(artifact.read_text())["trials"]
+        if trial["nodeid"] == request.node.nodeid
+    )
+    result = judge(before["output"], "teardown evidence must pass")
+    assert result.passed
+    after = next(
+        trial
+        for trial in json.loads(artifact.read_text())["trials"]
+        if trial["nodeid"] == request.node.nodeid
+    )
+    for field in ("status", "duration_ms", "error", "error_kind"):
+        assert after[field] == before[field]
+    assert len(after["judges"]) == len(before["judges"]) + 1
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="pass_case", input="hello")])
+def test_pass(case, kensa_run, judge_in_teardown):
+    assert case.run(kensa_run) == {"input": "hello"}
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="fail_case", input="hello")])
+def test_fail(case, kensa_run, judge_in_teardown):
+    case.run(kensa_run)
+    assert False, "call failed"
+""",
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(passed=1, failed=1)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trials = json.loads(artifact.read_text())["trials"]
+    passed = next(trial for trial in trials if trial["case_id"] == "pass_case")
+    failed = next(trial for trial in trials if trial["case_id"] == "fail_case")
+    assert passed["status"] == "pass"
+    assert len(passed["judges"]) == 1
+    assert failed["status"] == "fail"
+    assert failed["error"] == "call failed\nassert False"
+    assert failed["error_kind"] == "assertion"
+    assert len(failed["judges"]) == 1
+
+
 def test_failed_assertions_still_write_trial_metadata(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
