@@ -6,13 +6,20 @@ import json
 import re
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
-from kensa.artifacts import KensaAggregate, aggregate_trials, upsert_trial, write_run_artifacts
+from kensa.artifacts import (
+    KensaAggregate,
+    aggregate_trials,
+    trial_from_dict,
+    trial_sort_key,
+    upsert_trial,
+    write_run_artifacts,
+)
 from kensa.case import KensaCase
 from kensa.runtime import (
     ActiveOperation,
@@ -26,37 +33,52 @@ from kensa.runtime import (
 )
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
-    DISTRIBUTED_PYTEST_UNSUPPORTED,
     ActiveTrial,
     read_control,
     validate_timeout_s,
+    worker_control_path,
     write_control,
 )
 
 PRIVATE_TRIAL = "_kensa_trial"
 _PROVISIONAL_STATUS = "provisional"
 _TRIAL_RE = re.compile(r"-?trial\d+-?|trial\d+-?")
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_TRIAL_METADATA_REPORT_KEY = "_kensa_trial_metadata"
+_WORKER_CONTROL_PATH_KEY = "_kensa_control_path"
+_EACH_DIST_ERROR = (
+    "pytest --dist=each is incompatible with Kensa trials because it runs every trial "
+    "on every worker. Use load or worksteal distribution."
+)
 
 
 class KensaSessionState:
     def __init__(self, config: pytest.Config) -> None:
         self.config = config
-        raw_control_path = config.getoption("--kensa-control-path")
+        workerinput = getattr(config, "workerinput", {})
+        raw_control_path = (
+            workerinput.get(_WORKER_CONTROL_PATH_KEY) if isinstance(workerinput, dict) else None
+        )
+        if raw_control_path is None:
+            getoption = getattr(config, "getoption", None)
+            raw_control_path = getoption("--kensa-control-path") if callable(getoption) else None
         self.control_path = Path(raw_control_path) if raw_control_path else None
         self.control = read_control(self.control_path) if self.control_path else None
-        self.run_id = (
-            self.control.run_id
-            if self.control is not None
-            else datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-        )
+        configured_run_id = self.control.run_id if self.control is not None else None
+        if configured_run_id is not None and _RUN_ID_RE.fullmatch(configured_run_id) is None:
+            raise pytest.UsageError("Kensa control file contains an invalid Kensa run ID")
+        self.run_id = configured_run_id or uuid4().hex
         self.trials: list[TrialMetadata] = []
         self.aggregates: list[KensaAggregate] = []
+        self.complete = True
+        self.interruption: dict[str, Any] | None = None
 
     @property
     def artifact_dir(self) -> Path:
         if self.control is not None:
             return self.control.artifact_dir
-        raw = self.config.getoption("--kensa-artifact-dir")
+        getoption = getattr(self.config, "getoption", None)
+        raw = getoption("--kensa-artifact-dir") if callable(getoption) else None
         return Path(raw) if raw else Path.cwd() / ".kensa"
 
     @property
@@ -67,12 +89,24 @@ class KensaSessionState:
 
     @property
     def write_artifacts(self) -> bool:
-        return self.control is not None or bool(self.config.getoption("--kensa-write-artifacts"))
+        getoption = getattr(self.config, "getoption", None)
+        requested = bool(getoption("--kensa-write-artifacts")) if callable(getoption) else False
+        return not _is_xdist_worker(self.config) and (self.control is not None or requested)
 
     def set_active_trial(self, active_trial: ActiveTrial | None) -> None:
         if self.control_path is None or self.control is None:
             return
-        self.control = replace(self.control, active_trial=active_trial)
+        self.control = replace(
+            self.control,
+            active_trial=active_trial,
+            trial_snapshot=None if active_trial is not None else self.control.trial_snapshot,
+        )
+        write_control(self.control_path, self.control)
+
+    def set_trial_snapshot(self, snapshot: TrialMetadata) -> None:
+        if self.control_path is None or self.control is None:
+            return
+        self.control = replace(self.control, trial_snapshot=snapshot)
         write_control(self.control_path, self.control)
 
     def set_active_operation(
@@ -90,6 +124,10 @@ class KensaSessionState:
             active_trial=replace(active_trial, active_operation=operation),
         )
         write_control(self.control_path, self.control)
+
+    def mark_incomplete(self, kind: str, message: str, **details: Any) -> None:
+        self.complete = False
+        self.interruption = {"kind": kind, "message": message, **details}
 
 
 def _state(config: pytest.Config) -> KensaSessionState:
@@ -128,8 +166,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    if config.getoption("--kensa-control-path") and _distributed_pytest_enabled(config):
-        raise pytest.UsageError(DISTRIBUTED_PYTEST_UNSUPPORTED)
     config.addinivalue_line(
         "markers",
         "kensa(trials=1, timeout_s=None): mark a Kensa agent eval",
@@ -138,12 +174,43 @@ def pytest_configure(config: pytest.Config) -> None:
     ensure_tracing()
 
 
-def _distributed_pytest_enabled(config: pytest.Config) -> bool:
-    numprocesses = config.getoption("numprocesses", default=0)
-    dist = config.getoption("dist", default="no")
-    tx = config.getoption("tx", default=[])
-    distload = config.getoption("distload", default=False)
-    return bool(numprocesses) or bool(distload) or (dist != "no" and bool(tx))
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    state = _state(session.config)
+    expected_workers = state.control.expected_workers if state.control is not None else None
+    if expected_workers is None or _is_xdist_worker(session.config):
+        return
+    _validate_worker_configuration(session.config, expected_workers)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    state = _state(node.config)
+    if state.control_path is None or state.control is None:
+        return
+    if not node.gateway.spec.popen:
+        return
+    worker_id = str(node.workerinput["workerid"])
+    path = worker_control_path(state.control_path, worker_id)
+    write_control(
+        path,
+        replace(
+            state.control,
+            active_trial=None,
+            expected_workers=None,
+            trial_snapshot=None,
+        ),
+    )
+    node.workerinput[_WORKER_CONTROL_PATH_KEY] = str(path)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: object | None) -> None:
+    raw_path = node.workerinput.get(_WORKER_CONTROL_PATH_KEY)
+    if isinstance(raw_path, str):
+        Path(raw_path).unlink(missing_ok=True)
+    if error is not None:
+        _state(node.config).mark_incomplete("worker_crash", str(error))
 
 
 def pytest_make_parametrize_id(config: pytest.Config, val: Any, argname: str) -> str | None:
@@ -166,6 +233,31 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         metafunc.fixturenames.append(PRIVATE_TRIAL)
     values = [KensaTrial(i, trials, timeout_s=timeout_s) for i in range(1, trials + 1)]
     metafunc.parametrize(PRIVATE_TRIAL, values, ids=[v.id for v in values], indirect=True)
+
+
+def _validate_worker_configuration(config: pytest.Config, expected_workers: int) -> None:
+    numprocesses = config.getoption("numprocesses")
+    tx = config.getoption("tx")
+    px = config.getoption("px")
+    if px or any(spec != "popen" for spec in tx):
+        raise pytest.UsageError(
+            "Kensa eval supports local pytest workers only; remove configured --tx and --px "
+            "gateways."
+        )
+    if config.getoption("dist") == "each":
+        raise pytest.UsageError(_EACH_DIST_ERROR)
+    resolved_workers = len(tx)
+    if expected_workers == 1:
+        matches = numprocesses in (None, 0) and resolved_workers == 0
+    else:
+        matches = numprocesses == expected_workers and resolved_workers == expected_workers
+    if not matches:
+        raise pytest.UsageError(
+            f"Kensa eval expected {expected_workers} local pytest worker"
+            f"{'s' if expected_workers != 1 else ''}, but pytest resolved "
+            f"{resolved_workers}. Remove conflicting pytest addopts, PYTEST_ADDOPTS, and "
+            "xdist limits."
+        )
 
 
 def _marker_trials(marker: pytest.Mark) -> int:
@@ -333,32 +425,36 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> Any:
     outcome = yield
     report = outcome.get_result()
-    if report.when not in {"setup", "teardown"} or not report.failed:
-        return
     runtime = _runtime_for_item(item)
     if runtime is None:
         return
-    if report.when == "setup":
-        existing = next(
-            (trial for trial in _state(item.config).trials if trial.nodeid == item.nodeid),
-            None,
-        )
-        if existing is not None and existing.status != _PROVISIONAL_STATUS:
-            return
-    _record_trial(
-        item.config,
-        runtime.metadata(
-            status="error",
-            duration_ms=0.0,
-            error=str(call.excinfo.value) if call.excinfo else f"pytest {report.when} failed",
-            error_kind=report.when,
-        ),
-    )
+    if report.when == "setup" and getattr(report, "skipped", False):
+        return
+    if report.when in {"setup", "teardown"} and report.failed:
+        existing = _trial_metadata(item.config, item.nodeid)
+        if report.when != "setup" or existing is None or existing.status == _PROVISIONAL_STATUS:
+            _record_trial(
+                item.config,
+                runtime.metadata(
+                    status="error",
+                    duration_ms=0.0,
+                    error=(
+                        str(call.excinfo.value) if call.excinfo else f"pytest {report.when} failed"
+                    ),
+                    error_kind=report.when,
+                ),
+            )
+    if report.when in {"call", "teardown"} or (report.when == "setup" and report.failed):
+        metadata = _trial_metadata(item.config, item.nodeid)
+        if metadata is not None:
+            report.__dict__[_TRIAL_METADATA_REPORT_KEY] = metadata.to_dict()
 
 
 def _record_trial(config: pytest.Config, metadata: TrialMetadata) -> None:
     state = _state(config)
     upsert_trial(state.trials, metadata)
+    if _is_xdist_worker(config):
+        state.set_trial_snapshot(metadata)
     if state.write_artifacts:
         _write_artifacts(state)
 
@@ -381,8 +477,44 @@ def _record_trial_snapshot(config: pytest.Config, runtime: KensaTrialRuntime) ->
     _record_trial(config, snapshot)
 
 
+def _trial_metadata(config: pytest.Config, nodeid: str) -> TrialMetadata | None:
+    return next((trial for trial in _state(config).trials if trial.nodeid == nodeid), None)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    node = getattr(report, "node", None)
+    config = getattr(node, "config", None)
+    if config is None:
+        return
+    state = _state(config)
+    payload = getattr(report, _TRIAL_METADATA_REPORT_KEY, None)
+    if isinstance(payload, dict):
+        metadata = trial_from_dict(payload)
+        _record_trial(config, metadata)
+    elif report.when == "???":
+        state.mark_incomplete(
+            "worker_crash",
+            str(report.longrepr),
+            nodeid=report.nodeid,
+        )
+        if state.write_artifacts:
+            _write_artifacts(state)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitCode) -> None:
+    if _is_xdist_worker(session.config):
+        return
     state = _state(session.config)
+    stopped = session.shouldstop or session.shouldfail
+    if stopped:
+        state.mark_incomplete("pytest_stopped", str(stopped))
+    elif exitstatus in {
+        pytest.ExitCode.INTERRUPTED,
+        pytest.ExitCode.INTERNAL_ERROR,
+        pytest.ExitCode.USAGE_ERROR,
+    }:
+        state.mark_incomplete("pytest_error", f"pytest exited with status {int(exitstatus)}")
+    state.trials.sort(key=trial_sort_key)
     state.aggregates = aggregate_trials(state.trials)
     if state.write_artifacts and (state.trials or state.control is not None):
         _write_artifacts(state)
@@ -396,6 +528,8 @@ def _write_artifacts(state: KensaSessionState) -> None:
         trials=state.trials,
         result_path=state.result_path,
         artifact_dir=state.artifact_dir,
+        complete=state.complete,
+        interruption=state.interruption,
     )
 
 
@@ -405,6 +539,8 @@ def pytest_terminal_summary(
     config: pytest.Config,
 ) -> None:
     del exitstatus
+    if _is_xdist_worker(config):
+        return
     state = _state(config)
     if not state.trials:
         return
@@ -428,6 +564,10 @@ def pytest_terminal_summary(
             f"{label} {aggregate.group_id}: {aggregate.passed}/{aggregate.total} passed, "
             f"{aggregate.failed} failed, {aggregate.errored} errored"
         )
+
+
+def _is_xdist_worker(config: pytest.Config) -> bool:
+    return hasattr(config, "workerinput")
 
 
 __all__ = ["PRIVATE_TRIAL"]

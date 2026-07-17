@@ -184,7 +184,7 @@ def test_dotenv_secret(case, kensa_run, kensa_trace):
     )
     report = tmp_path / "report.json"
 
-    assert cli.main(["eval", "--json", "--json-report", str(report)]) == 0
+    assert cli.main(["eval", "--workers", "1", "--json", "--json-report", str(report)]) == 0
 
     captured = capsys.readouterr()
     trace_text = "\n".join(

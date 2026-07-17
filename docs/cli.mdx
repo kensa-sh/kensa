@@ -119,6 +119,7 @@ kensa eval --json-report eval.json
 kensa eval --no-judge
 kensa eval --judge-timeout 30
 kensa eval --trial-timeout 180
+kensa eval --workers 1                      # sequential execution
 kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 ```
 
@@ -130,16 +131,15 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 | `--no-judge` | off | Disable judge calls |
 | `--judge-timeout` | `30` | Maximum seconds for each judge call |
 | `--trial-timeout` | `300` | Maximum seconds for each trial |
+| `--workers` | `4` | Number of local pytest worker processes |
 
 Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest, except reserved Kensa options. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
 
-Trials time out after 300 seconds by default, stopping the suite while preserving available results; use `--trial-timeout` or the `timeout_s` marker option to change the limit.
-
-Trial timeouts require macOS or Linux, and evals remain responsible for cleaning up detached subprocesses.
+Trials time out after 300 seconds. On timeout, Kensa stops the suite, preserves reported results and the timed-out trial's latest evidence, and marks the artifact incomplete. Change the limit with `--trial-timeout` or `timeout_s`. Hard timeouts require macOS or Linux and do not clean up detached subprocesses.
 
 Judge calls time out after 30 seconds by default; built-in judges return an error result, while custom providers receive the configured limit.
 
-`kensa eval` does not support distributed pytest execution.
+`kensa eval` uses four local workers by default. Use `--workers 1` for debugging, shared process state, concurrency-unsafe resources, or provider rate limits. Set worker counts with `--workers`; Kensa rejects conflicting or remote xdist configuration. The parallel watchdog applies only to workers launched by `kensa eval`.
 
 ## kensa traces
 

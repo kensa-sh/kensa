@@ -40,6 +40,10 @@ class KensaAggregate:
         }
 
 
+def trial_sort_key(trial: TrialMetadata) -> tuple[str, int, str]:
+    return trial.group_id, trial.trial_index, trial.nodeid
+
+
 def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
     groups: dict[str, list[TrialMetadata]] = {}
     for trial in trials:
@@ -96,7 +100,7 @@ def load_trials(result_path: Path) -> list[TrialMetadata]:
     rows = payload.get("trials", []) if isinstance(payload, dict) else []
     if not isinstance(rows, list):
         raise ValueError(f"Kensa result artifact has invalid trials: {result_path}")
-    return [_trial_from_dict(row) for row in rows if isinstance(row, dict)]
+    return [trial_from_dict(row) for row in rows if isinstance(row, dict)]
 
 
 def write_run_artifacts(
@@ -105,10 +109,14 @@ def write_run_artifacts(
     trials: list[TrialMetadata],
     result_path: Path,
     artifact_dir: Path,
+    complete: bool = True,
+    interruption: dict[str, Any] | None = None,
 ) -> list[KensaAggregate]:
     aggregates = aggregate_trials(trials)
     payload = {
         "run_id": run_id,
+        "complete": complete,
+        "interruption": interruption,
         "trials": [trial.to_dict() for trial in trials],
         "aggregates": [aggregate.to_dict() for aggregate in aggregates],
     }
@@ -151,7 +159,7 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
     }
 
 
-def _trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
+def trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
     case = row.get("case")
     trace = row.get("trace")
     judges = row.get("judges")
@@ -199,6 +207,8 @@ __all__ = [
     "KensaAggregate",
     "aggregate_trials",
     "load_trials",
+    "trial_from_dict",
+    "trial_sort_key",
     "upsert_trial",
     "write_json_atomic",
     "write_run_artifacts",
