@@ -634,6 +634,81 @@ def test_snapshot(case, kensa_run):
     ]
 
 
+def test_parallel_timeout_prefers_teardown_snapshot_over_reported_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    _write_eval(
+        tmp_path,
+        """import time
+from pathlib import Path
+
+import pytest
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.fixture
+def judging_teardown():
+    yield
+    while not Path("call.reported").exists():
+        time.sleep(0.01)
+    result = judge({"input": "hello"}, "preserve teardown evidence")
+    assert result.passed
+    Path("judge.recorded").write_text("yes")
+    time.sleep(60)
+
+
+@pytest.mark.kensa(timeout_s=1)
+@pytest.mark.parametrize("case", [kensa_case(id="teardown_snapshot", input="hello")])
+def test_teardown_snapshot(case, kensa_run, judging_teardown):
+    assert case.run(kensa_run) == {"input": "hello"}
+""",
+    )
+    conftest = tmp_path / "tests" / "evals" / "conftest.py"
+    conftest.write_text(
+        conftest.read_text()
+        + """
+
+import os
+from pathlib import Path
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    if (
+        os.environ.get("PYTEST_XDIST_WORKER") is None
+        and report.when == "call"
+        and "teardown_snapshot" in report.nodeid
+    ):
+        Path("call.reported").write_text("yes")
+"""
+    )
+
+    assert main(["eval", "--workers", "2", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trial = artifact["trials"][0]
+    assert (tmp_path / "call.reported").is_file()
+    assert (tmp_path / "judge.recorded").is_file()
+    assert trial["status"] == "error"
+    assert trial["error_kind"] == "timeout"
+    assert trial["judges"] == [
+        {
+            "passed": True,
+            "reasoning": "Environment judge returned pass for: preserve teardown evidence",
+            "evidence": [],
+            "provider": "env",
+            "model": "KENSA_JUDGE_RESULT",
+            "metadata": {},
+            "error": False,
+        }
+    ]
+
+
 @pytest.mark.parametrize("value", [True, False, 0, -1, float("nan"), float("inf")])
 def test_validate_timeout_rejects_invalid_values(value: Any) -> None:
     with pytest.raises(ValueError, match="positive finite"):

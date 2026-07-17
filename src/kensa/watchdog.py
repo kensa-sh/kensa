@@ -472,11 +472,7 @@ def _record_timeout(
     )
     trials = load_trials(control.result_path)
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
-    if (
-        existing is None
-        and control.trial_snapshot is not None
-        and control.trial_snapshot.nodeid == active.nodeid
-    ):
+    if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
         existing = control.trial_snapshot
     if existing is None:
         trace = {
