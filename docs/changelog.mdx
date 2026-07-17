@@ -11,6 +11,26 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.14.0
+
+Kensa trials now run in parallel across four local pytest workers by default.
+
+- Use `kensa eval --workers N` to tune concurrency or `--workers 1` for sequential execution.
+- Timeout handling preserves completed results and the latest evidence from a timed-out trial.
+- **Breaking:** worker processes do not share process globals or session-scoped fixtures, and provider concurrency increases.
+
+[View the 0.14.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.14.0).
+
+## 0.13.0
+
+Eval runs now have hard per-trial timeouts and bounded judge calls.
+
+- Trials stop after 300 seconds by default. Use `--trial-timeout` or `@pytest.mark.kensa(timeout_s=...)` to change the limit.
+- Timeout artifacts preserve completed results, set `complete` to `false`, and include a structured interruption.
+- Judge calls time out after 30 seconds by default.
+
+[View the 0.13.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.13.0).
+
 ## 0.12.0
 
 Imported trace evidence is now minimized to a versioned, allowlisted TraceView before mandatory redaction.
