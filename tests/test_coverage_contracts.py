@@ -719,6 +719,12 @@ def test_pytest_plugin_watchdog_control_paths(
     with pytest.raises(StopIteration):
         hook.send(Outcome(report))
 
+    skipped_report = SimpleNamespace(when="setup", failed=False, skipped=True)
+    skipped_hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
+    next(skipped_hook)
+    with pytest.raises(StopIteration):
+        skipped_hook.send(Outcome(skipped_report))
+
 
 def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     case = kensa_case(id="runtime", input="hello")
