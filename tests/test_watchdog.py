@@ -584,6 +584,56 @@ def test_active_operation(case):
     }
 
 
+def test_parallel_timeout_preserves_published_trial_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "pass")
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.mark.kensa(timeout_s=0.5)
+@pytest.mark.parametrize("case", [kensa_case(id="snapshot", input="hello")])
+def test_snapshot(case, kensa_run):
+    output = case.run(kensa_run)
+    result = judge(output, "must preserve evidence")
+    assert result.passed
+    time.sleep(60)
+""",
+    )
+
+    assert main(["eval", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trial = artifact["trials"][0]
+    assert payload["data"]["workers"] == 4
+    assert trial["status"] == "error"
+    assert trial["error_kind"] == "timeout"
+    assert trial["case"] == {"id": "snapshot", "input": "hello"}
+    assert trial["output"] == {"input": "hello"}
+    assert trial["trace"]["spans"][0]["name"] == "kensa.pytest.trial"
+    assert trial["trace"]["incomplete"] is True
+    assert trial["judges"] == [
+        {
+            "passed": True,
+            "reasoning": "Environment judge returned pass for: must preserve evidence",
+            "evidence": [],
+            "provider": "env",
+            "model": "KENSA_JUDGE_RESULT",
+            "metadata": {},
+            "error": False,
+        }
+    ]
+
+
 @pytest.mark.parametrize("value", [True, False, 0, -1, float("nan"), float("inf")])
 def test_validate_timeout_rejects_invalid_values(value: Any) -> None:
     with pytest.raises(ValueError, match="positive finite"):

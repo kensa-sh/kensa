@@ -99,7 +99,14 @@ class KensaSessionState:
         self.control = replace(
             self.control,
             active_trial=active_trial,
+            trial_snapshot=None if active_trial is not None else self.control.trial_snapshot,
         )
+        write_control(self.control_path, self.control)
+
+    def set_trial_snapshot(self, snapshot: TrialMetadata) -> None:
+        if self.control_path is None or self.control is None:
+            return
+        self.control = replace(self.control, trial_snapshot=snapshot)
         write_control(self.control_path, self.control)
 
     def set_active_operation(
@@ -191,6 +198,7 @@ def pytest_configure_node(node: Any) -> None:
             state.control,
             active_trial=None,
             expected_workers=None,
+            trial_snapshot=None,
         ),
     )
     node.workerinput[_WORKER_CONTROL_PATH_KEY] = str(path)
@@ -445,6 +453,8 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
 def _record_trial(config: pytest.Config, metadata: TrialMetadata) -> None:
     state = _state(config)
     upsert_trial(state.trials, metadata)
+    if _is_xdist_worker(config):
+        state.set_trial_snapshot(metadata)
     if state.write_artifacts:
         _write_artifacts(state)
 

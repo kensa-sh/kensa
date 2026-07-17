@@ -1361,6 +1361,7 @@ def test_xdist_role_helpers_and_controller_ingestion(tmp_path: Path) -> None:
     assert pytest_plugin._is_xdist_worker(cast(Any, worker_config)) is True
     pytest_plugin._record_trial(cast(Any, worker_config), metadata)
     assert pytest_plugin._state(cast(Any, worker_config)).trials == [metadata]
+    assert read_control(worker_control).trial_snapshot == metadata
     assert read_control(worker_control).active_trial is None
     pytest_plugin.pytest_sessionfinish(cast(Any, SimpleNamespace(config=worker_config)), 0)
     pytest_plugin.pytest_terminal_summary(

@@ -661,14 +661,26 @@ def test_pytest_plugin_watchdog_control_paths(
         hook.send(None)
     completed_control = read_control(control_path)
     assert completed_control.active_trial is None
+    snapshot = TrialMetadata(
+        nodeid=item.nodeid,
+        group_id="g",
+        case_id="c",
+        trial_index=1,
+        configured_trials=1,
+        status="provisional",
+    )
+    state.set_trial_snapshot(snapshot)
+    assert read_control(control_path).trial_snapshot == snapshot
     state.set_active_trial(active)
     assert read_control(control_path).active_trial == active
+    assert read_control(control_path).trial_snapshot is None
     state.set_active_trial(None)
     state.mark_incomplete("pytest_stopped", "stopped")
     assert state.complete is False
     assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
 
     plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
+    plain_state.set_trial_snapshot(snapshot)
     plain_state.set_active_operation("n", operation)
     plain_state.set_active_trial(
         ActiveTrial(

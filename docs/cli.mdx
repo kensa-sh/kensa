@@ -135,7 +135,7 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 
 Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest, except reserved Kensa options. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
 
-Trials time out after 300 seconds by default, stopping the suite while preserving results already received by the controller; use `--trial-timeout` or the `timeout_s` marker option to change the limit. Timeout artifacts set `complete` to `false`, describe the timeout in `interruption`, and omit trials that never reported a result.
+Trials time out after 300 seconds by default, stopping the suite while preserving results already received by the controller and the latest evidence published by the timed-out trial; use `--trial-timeout` or the `timeout_s` marker option to change the limit. Timeout artifacts set `complete` to `false`, describe the timeout in `interruption`, and omit other trials that never reported a result.
 
 Trial timeouts require macOS or Linux, and evals remain responsible for cleaning up detached subprocesses. The watchdog monitors every active worker, terminates the pytest process group when a trial expires, and records that trial as a timeout.
 

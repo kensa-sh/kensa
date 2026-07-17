@@ -18,6 +18,7 @@ from typing import Any
 
 from kensa.artifacts import (
     load_trials,
+    trial_from_dict,
     trial_sort_key,
     upsert_trial,
     write_json_atomic,
@@ -107,6 +108,7 @@ class WatchdogControl:
     expected_workers: int | None = None
     judge_timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S
     active_trial: ActiveTrial | None = None
+    trial_snapshot: TrialMetadata | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,11 +119,13 @@ class WatchdogControl:
             "expected_workers": self.expected_workers,
             "judge_timeout_s": timeout_value(self.judge_timeout_s),
             "active_trial": self.active_trial.to_dict() if self.active_trial else None,
+            "trial_snapshot": self.trial_snapshot.to_dict() if self.trial_snapshot else None,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WatchdogControl:
         active_payload = payload.get("active_trial")
+        snapshot_payload = payload.get("trial_snapshot")
         return cls(
             run_id=str(payload["run_id"]),
             result_path=Path(str(payload["result_path"])),
@@ -137,6 +141,9 @@ class WatchdogControl:
             ),
             active_trial=(
                 ActiveTrial.from_dict(active_payload) if isinstance(active_payload, dict) else None
+            ),
+            trial_snapshot=(
+                trial_from_dict(snapshot_payload) if isinstance(snapshot_payload, dict) else None
             ),
         )
 
@@ -252,15 +259,15 @@ def run_eval_process(
                     ),
                 )
                 try:
-                    confirmed = read_control(path).active_trial
+                    confirmed_control = read_control(path)
                 except FileNotFoundError:
-                    confirmed = None
-                if confirmed == active:
+                    confirmed_control = None
+                if confirmed_control is not None and confirmed_control.active_trial == active:
                     elapsed_ms = _trial_elapsed_ms(active)
                     _terminate_process_group(process)
                     stdout, stderr = _collect_output(process, capture_output)
                     timeout = _record_timeout(
-                        control,
+                        confirmed_control,
                         active,
                         duration_ms=elapsed_ms,
                     )
@@ -465,6 +472,12 @@ def _record_timeout(
     )
     trials = load_trials(control.result_path)
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
+    if (
+        existing is None
+        and control.trial_snapshot is not None
+        and control.trial_snapshot.nodeid == active.nodeid
+    ):
+        existing = control.trial_snapshot
     if existing is None:
         trace = {
             "spans": [],
