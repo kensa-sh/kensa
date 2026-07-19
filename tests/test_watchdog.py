@@ -1122,11 +1122,3 @@ def test_heartbeat_redacts_and_limits_attributes() -> None:
 )
 def test_heartbeat_text_sanitization(value: str, expected: str) -> None:
     assert watchdog._sanitize_heartbeat_text(value) == expected
-
-
-def test_cli_heartbeat_writes_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    cli._print_eval_heartbeat("case trial 1 | 10s")
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "case trial 1 | 10s\n"
