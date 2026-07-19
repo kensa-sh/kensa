@@ -1,13 +1,14 @@
 ---
 name: kensa-diagnose
 description: >
-  Diagnose one or more completed Kensa runs from result JSON and current repository evidence,
-  without changing the repository.
+  Diagnose one or more Kensa runs through meta-analysis of result JSON and current repository
+  evidence, without changing the repository.
 ---
 
 # Kensa Diagnose
 
-Produce a concise, source-grounded diagnosis in chat. This skill is strictly read-only.
+Produce a concise, source-grounded meta-analysis of run outcomes and failure modes in chat. This
+skill is strictly read-only.
 
 Do not edit files, write reports, change configuration, generate evals, rerun evals, implement
 recommendations, or run commands that create a new eval result. Read-only repository inspection
@@ -48,23 +49,17 @@ For each selected result:
 4. For an incomplete or interrupted run, diagnose available trials, state the coverage limit, and
    do not treat partial aggregates as a complete verdict.
 
-Compare multiple runs for recurring, regressed, improved, and run-specific patterns. Use passing
-cases and trials to constrain explanations and avoid broad changes to behavior that is working.
+## Analyze Failure Modes
 
-## Diagnose Against the Repository
+Compare selected runs for recurring, regressed, improved, and run-specific patterns. Use passing
+cases and trials as contrast evidence to constrain explanations. Group related failures into
+distinct failure modes and trace each cascade to the earliest supported cause. Do not report every
+downstream failed check as an independent failure mode.
 
-Cluster recurring failures and trace each cascade to the earliest supported cause. Do not report
-every downstream failed check as an independent defect. An absent tool behind an unmet stage gate,
-for example, is downstream unless evidence shows a separate omission.
-
-Classify each finding as `agent/product`, `simulator`, `measurement/harness`, `configuration`, or
-`infrastructure`, and label it as a likely root cause, downstream failure, or unresolved symptom.
-
-Before asserting a source-level cause, inspect the current repository source files and tests,
-including the relevant eval case, harness, simulator, and product path. Cite the repository code
-that supports the causal link. Classify a suspected measurement artifact as measurement/harness
-only after both result evidence and current harness source support it. Recommend simulator or
-harness changes under the same two-source rule.
+Before asserting a source-level cause, inspect the relevant source files and tests in the current
+repository and cite the code that supports the causal link. Use repository evidence only to
+explain failure modes observed in the selected runs; do not turn the diagnosis into a general
+codebase review.
 
 Separate observation from inference. If current source does not prove an explanation, label it a
 hypothesis and say what evidence is missing. If no supported source-level cause exists, keep the
@@ -75,14 +70,13 @@ artifact-level finding unresolved instead of inventing a cause or fix.
 Keep the response free-form while making these elements clear:
 
 1. **Overall verdict** across all selected runs, including completeness limitations.
-2. Findings ordered by impact, not artifact or file order.
-3. For each finding, its category and root/downstream status, observed evidence, supported cause or
-   explicit hypothesis, and smallest concrete fix.
+2. Failure modes ordered by impact, not artifact or file order.
+3. For each failure mode, the affected runs, cases, and trials; whether it is recurring, regressed,
+   improved, or run-specific; its observed evidence; its earliest supported cause or explicit
+   hypothesis; downstream effects; and the smallest concrete next step.
 4. Evidence citations naming the run ID, case ID, and trial index wherever available, plus the
    current repository-relative file path and line number wherever available.
-5. Agent, simulator, measurement, harness, configuration, or infrastructure improvements only when
-   relevant and evidence-backed.
-6. Provide focused verification guidance naming the smallest cases or commands that should test
-   the fixes.
+5. Provide focused verification guidance naming the smallest cases or commands that should test
+   the diagnosis or next steps.
    Recommend the verification but do not run it.
-7. Questions the available evidence cannot answer.
+6. Questions the available evidence cannot answer.

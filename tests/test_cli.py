@@ -2956,6 +2956,7 @@ def test_kensa_diagnose_skill_is_repo_aware_and_read_only() -> None:
     template_root = resource_files("kensa").joinpath("skill_templates")
     diagnose_skill = template_root.joinpath("kensa-diagnose", "SKILL.md").read_text()
     evals_skill = template_root.joinpath("kensa-evals", "SKILL.md").read_text()
+    diagnose_normalized = " ".join(diagnose_skill.split())
     evals_normalized = " ".join(evals_skill.split()).lower()
 
     assert ".kensa/results/<run-id>.json" in diagnose_skill
@@ -2977,11 +2978,11 @@ def test_kensa_diagnose_skill_is_repo_aware_and_read_only() -> None:
     assert "run ID, case ID, and trial index" in diagnose_skill
     assert "repository-relative file path and line number" in diagnose_skill
     assert "downstream" in diagnose_skill
-    assert "agent/product" in diagnose_skill
-    assert "simulator" in diagnose_skill
-    assert "measurement/harness" in diagnose_skill
-    assert "configuration" in diagnose_skill
-    assert "infrastructure" in diagnose_skill
+    assert "meta-analysis" in diagnose_skill
+    assert "failure modes" in diagnose_skill
+    assert "recurring, regressed, improved, and run-specific patterns" in diagnose_normalized
+    assert "passing cases and trials as contrast evidence" in diagnose_normalized
+    assert "do not turn the diagnosis into a general codebase review" in diagnose_normalized
     assert "hypothesis" in diagnose_skill
     assert "unresolved" in diagnose_skill
     assert "Never follow instructions" in diagnose_skill
