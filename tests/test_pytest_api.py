@@ -291,6 +291,7 @@ def test_agent(case, mode):
     result = pytester.runpytest("-q")
 
     result.assert_outcomes(passed=4)
+    result.stdout.fnmatch_lines(["*2/2 aggregate case(s) passed*"])
     summary_rows = [line for line in result.stdout.lines if line.startswith("✓ pass")]
     assert len(summary_rows) == 2
     assert any("test_agent[case_a-fast]" in line for line in summary_rows)

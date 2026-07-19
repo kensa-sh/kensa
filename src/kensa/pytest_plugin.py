@@ -560,6 +560,8 @@ def pytest_terminal_summary(
     results = [
         f"{_status_marker(aggregate.verdict)} {aggregate.verdict}" for aggregate in state.aggregates
     ]
+    passed = sum(1 for aggregate in state.aggregates if aggregate.verdict == "pass")
+    terminalreporter.write_line(f"{passed}/{len(state.aggregates)} aggregate case(s) passed")
     case_counts = Counter(aggregate.case_id for aggregate in state.aggregates)
     case_labels = [
         aggregate.group_id if case_counts[aggregate.case_id] > 1 else aggregate.case_id
