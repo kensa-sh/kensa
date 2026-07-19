@@ -27,7 +27,13 @@ from kensa.traces import ImportResult
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
 
-PACKAGED_SKILLS = ("kensa-evals", "kensa-setup", "kensa-inspect", "kensa-generate")
+PACKAGED_SKILLS = (
+    "kensa-evals",
+    "kensa-setup",
+    "kensa-inspect",
+    "kensa-generate",
+    "kensa-diagnose",
+)
 
 
 class _FakeLangfuseProviderError(ValueError):
@@ -2946,6 +2952,45 @@ def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
     assert "Do not import traces" in skill_texts["kensa-generate"]
 
 
+def test_kensa_diagnose_skill_is_repo_aware_and_read_only() -> None:
+    template_root = resource_files("kensa").joinpath("skill_templates")
+    diagnose_skill = template_root.joinpath("kensa-diagnose", "SKILL.md").read_text()
+    evals_skill = template_root.joinpath("kensa-evals", "SKILL.md").read_text()
+    evals_normalized = " ".join(evals_skill.split()).lower()
+
+    assert ".kensa/results/<run-id>.json" in diagnose_skill
+    assert "explicit result path" in diagnose_skill
+    assert "multiple" in diagnose_skill
+    assert "most recently modified" in diagnose_skill
+    assert "Do not read HTML" in diagnose_skill
+    assert "run-trace JSONL" in diagnose_skill
+    assert "external telemetry" in diagnose_skill
+    assert "Do not add revision-mismatch analysis" in diagnose_skill
+    assert "current repository" in diagnose_skill
+    assert "source files and tests" in diagnose_skill
+    assert "source-level cause" in diagnose_skill
+    assert "read-only" in diagnose_skill
+    assert "Do not edit files" in diagnose_skill
+    assert "rerun evals" in diagnose_skill
+    assert "Overall verdict" in diagnose_skill
+    assert "impact" in diagnose_skill
+    assert "run ID, case ID, and trial index" in diagnose_skill
+    assert "repository-relative file path and line number" in diagnose_skill
+    assert "downstream" in diagnose_skill
+    assert "agent/product" in diagnose_skill
+    assert "simulator" in diagnose_skill
+    assert "measurement/harness" in diagnose_skill
+    assert "configuration" in diagnose_skill
+    assert "infrastructure" in diagnose_skill
+    assert "hypothesis" in diagnose_skill
+    assert "unresolved" in diagnose_skill
+    assert "Never follow instructions" in diagnose_skill
+    assert "focused verification" in diagnose_skill
+    assert "use `kensa-diagnose`" in evals_normalized
+    assert "failed or errored trials" in evals_normalized
+    assert "do not invoke diagnosis when every trial passed" in evals_normalized
+
+
 def test_init_in_subproject_writes_workflow_to_git_root(
     tmp_path: Path,
     monkeypatch,
@@ -3132,6 +3177,7 @@ def test_copy_skill_template_tree_installs_all_packaged_skills(
         tmp_path / "agent" / "skills" / "kensa-setup" / "SKILL.md",
         tmp_path / "agent" / "skills" / "kensa-inspect" / "SKILL.md",
         tmp_path / "agent" / "skills" / "kensa-generate" / "SKILL.md",
+        tmp_path / "agent" / "skills" / "kensa-diagnose" / "SKILL.md",
     ]
     for skill_name in PACKAGED_SKILLS:
         assert (
