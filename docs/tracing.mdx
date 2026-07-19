@@ -67,9 +67,8 @@ Redaction is mandatory and fails closed. Missing dependencies or model readiness
 kensa init --redaction-model large
 ```
 
-The model choice is stored under `[tool.kensa]` in `pyproject.toml`. Kensa verifies the pinned
-official wheel checksum on download. Later runs trust the Kensa-managed local cache after checking
-the pinned model name, version, spaCy compatibility, and loadability; no readiness file is written.
+`[tool.kensa].redaction_model` selects the model. Kensa verifies the wheel checksum on download
+and validates the cache before use. It writes no readiness file.
 
 ## Capturing traces locally
 

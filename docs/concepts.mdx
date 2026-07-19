@@ -24,7 +24,7 @@ tests/evals/
 └── test_<id>.py                # your evals (hand-written or materialized)
 
 pyproject.toml
-└── [tool.kensa]                # trace source + redaction model (kensa init)
+└── [tool.kensa]                # project config (kensa init)
 
 .kensa/
 ├── connections/                # non-secret provider metadata (kensa connect)
@@ -35,8 +35,8 @@ pyproject.toml
 └── results/                    # eval results (kensa eval)
 ```
 
-You write evals and the `kensa_run` harness. Kensa generates ignored runtime artifacts under
-`.kensa/`; `kensa doctor` derives readiness live without persisting it.
+You write evals and the `kensa_run` harness. `.kensa/` holds ignored runtime artifacts;
+`kensa doctor` computes readiness live.
 
 ## Cases
 

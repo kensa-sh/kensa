@@ -19,7 +19,7 @@ kensa <command> --help
 
 ## kensa init
 
-Set up the harness: scaffold `tests/evals/conftest.py` (the `kensa_run` fixture), `tests/evals/test_kensa_smoke.py`, a GitHub Actions workflow, and the Kensa skills for your coding agent. Interactive mode also offers to configure a first trace source (Langfuse, an existing trace export, or local capture). Established project choices are stored under `[tool.kensa]` in the nearest `pyproject.toml`; if none exists, Kensa creates a tool-only file only when it has a value to persist. When trace evidence is configured, `init` installs the redaction dependencies and prepares the selected spaCy model.
+`kensa init` scaffolds the eval harness, smoke test, CI workflow, and agent skills. With a trace source, it also prepares redaction. Project config lives under `[tool.kensa]` in the nearest `pyproject.toml`; Kensa creates one only when needed.
 
 ```bash
 kensa init
@@ -35,9 +35,8 @@ kensa init --redaction-model large
 
 ## kensa doctor
 
-Verify the harness is wired to a real agent boundary and run the persistent smoke test. Readiness
-is derived live and is never persisted, so `doctor` does not modify project files. `kensa eval`
-expects `doctor` to pass first.
+`kensa doctor` checks the real-agent harness, smoke test, and live readiness without changing
+project files. It must pass before `kensa eval`.
 
 ```bash
 kensa doctor

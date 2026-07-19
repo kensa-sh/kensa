@@ -61,7 +61,7 @@ kensa init
 kensa
 ```
 
-Then ask your coding agent to run the generated `kensa-evals` skill. In interactive mode, `kensa init` asks for the first trace source: Langfuse, an existing trace export, or local Kensa trace capture. It saves the trace source and redaction model under `[tool.kensa]` in `pyproject.toml`. When trace evidence is configured, it also installs the mandatory redaction dependencies and prepares the small English model. Use `--redaction-model large` when you want the higher-recall model.
+Then ask your coding agent to run the generated `kensa-evals` skill. With a trace source, `kensa init` stores it and the redaction model under `[tool.kensa]` and prepares redaction. Use `--redaction-model large` for higher recall.
 
 `kensa init` scaffolds `tests/evals/conftest.py` (the `kensa_run` harness), a `tests/evals/test_kensa_smoke.py` smoke eval, a GitHub Actions workflow, and the coding-agent instructions.
 
