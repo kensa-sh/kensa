@@ -7,12 +7,13 @@ import contextlib
 import importlib.metadata
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -72,6 +73,7 @@ from kensa.watchdog import (
 )
 
 CONTEXT_SETTINGS = {"max_content_width": 120}
+_LOGGER = logging.getLogger(__name__)
 _COMMAND_ORDER = ["init", "doctor", "connect", "import", "eval", "traces", "inspect"]
 AgentInstructionChoice = Literal[
     "auto",
@@ -394,6 +396,7 @@ def _validate_timeout_option(
     epilog=CLI_EPILOG,
 )
 @click.option("--json", "json_output", is_flag=True, help="Emit an agent-readable JSON envelope.")
+@click.option("--verbose", is_flag=True, help="Show periodic eval heartbeat details.")
 @click.option("--json-report", default=None, help="Write the Kensa JSON artifact to this path.")
 @click.option("--markdown-report", default=None, help="Write a Markdown summary to this path.")
 @click.option("--no-judge", is_flag=True, help="Disable judge calls.")
@@ -424,6 +427,7 @@ def _validate_timeout_option(
 def eval_command(
     tokens: tuple[str, ...],
     json_output: bool,
+    verbose: bool,
     json_report: str | None,
     markdown_report: str | None,
     no_judge: bool,
@@ -436,6 +440,7 @@ def eval_command(
     args = SimpleNamespace(
         paths=paths,
         json=json_output,
+        verbose=verbose,
         json_report=json_report,
         markdown_report=markdown_report,
         no_judge=no_judge,
@@ -758,8 +763,28 @@ class _Steps:
         self._console.print()
 
 
-def _print_eval_heartbeat(message: str) -> None:
-    click.echo(message, err=True)
+def _log_eval_heartbeat(message: str) -> None:
+    _LOGGER.debug("%s", message)
+
+
+@contextlib.contextmanager
+def _eval_heartbeat_logging(verbose: bool) -> Iterator[None]:
+    if not verbose:
+        yield
+        return
+    handler = logging.StreamHandler()
+    previous_level = _LOGGER.level
+    previous_propagate = _LOGGER.propagate
+    _LOGGER.addHandler(handler)
+    _LOGGER.setLevel(logging.DEBUG)
+    _LOGGER.propagate = False
+    try:
+        yield
+    finally:
+        _LOGGER.removeHandler(handler)
+        _LOGGER.setLevel(previous_level)
+        _LOGGER.propagate = previous_propagate
+        handler.close()
 
 
 def _pytest_args_override_control_path(pytest_args: list[str]) -> bool:
@@ -853,21 +878,22 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
         cmd.append("--kensa-no-judge")
     cmd.extend(pytest_args)
     try:
-        if json_output:
-            with cli_output.wait_status("Running Kensa evals"):
+        with _eval_heartbeat_logging(bool(getattr(args, "verbose", False))):
+            if json_output:
+                with cli_output.wait_status("Running Kensa evals"):
+                    completed = run_eval_process(
+                        cmd,
+                        control_path=control_path,
+                        capture_output=True,
+                        heartbeat=_log_eval_heartbeat,
+                    )
+            else:
                 completed = run_eval_process(
                     cmd,
                     control_path=control_path,
-                    capture_output=True,
-                    heartbeat=_print_eval_heartbeat,
+                    capture_output=False,
+                    heartbeat=_log_eval_heartbeat,
                 )
-        else:
-            completed = run_eval_process(
-                cmd,
-                control_path=control_path,
-                capture_output=False,
-                heartbeat=_print_eval_heartbeat,
-            )
     finally:
         remove_control_files(control_path)
     warnings: list[str] = []

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -409,9 +410,24 @@ def test_eval_help_omits_removed_require_durable(capsys) -> None:
     assert main(["eval", "--help"]) == 0
     output = capsys.readouterr().out
     assert "--require-durable" not in output
+    assert "--verbose" in output
     assert "--workers" in output
     assert "default: 4" in output
     assert "Pass extra pytest arguments after --." in output
+
+
+def test_eval_accepts_verbose(monkeypatch: pytest.MonkeyPatch) -> None:
+    verbose_values: list[bool] = []
+
+    def fake_cmd_eval(args: SimpleNamespace, pytest_args: list[str]) -> int:
+        del pytest_args
+        verbose_values.append(bool(args.verbose))
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_eval", fake_cmd_eval)
+
+    assert main(["eval", "--verbose"]) == 0
+    assert verbose_values == [True]
 
 
 def test_eval_cli_rejects_bare_pytest_flags_and_accepts_dash_dash(
@@ -601,6 +617,47 @@ def test_eval_constructs_worker_command(
     xdist_args = [token for token in command if token in {"-n", "0", "4", "8"} or "dist=" in token]
     assert xdist_args == expected_xdist
     capsys.readouterr()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_eval_routes_heartbeats_by_verbosity(
+    json_output: bool,
+    verbose: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        del command
+        kwargs["heartbeat"]("case_a trial 1 | 10s")
+        return SimpleNamespace(returncode=1, stdout="", stderr="", timeout=None)
+
+    monkeypatch.setattr(cli, "run_eval_process", fake_run)
+
+    with caplog.at_level(logging.DEBUG, logger=cli.__name__):
+        code = cli._cmd_eval(
+            SimpleNamespace(
+                paths=["tests/evals"],
+                json=json_output,
+                verbose=verbose,
+                json_report=None,
+                markdown_report=None,
+                no_judge=False,
+                workers=1,
+            ),
+            [],
+        )
+
+    captured = capsys.readouterr()
+    assert code == 1
+    if not verbose:
+        assert "case_a trial 1 | 10s" in caplog.messages
+    assert "case_a trial 1 | 10s" not in captured.out
+    assert ("case_a trial 1 | 10s" in captured.err) is verbose
 
 
 def test_eval_passes_with_domain_eval(

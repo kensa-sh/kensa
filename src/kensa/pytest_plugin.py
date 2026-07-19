@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -544,7 +545,7 @@ def pytest_terminal_summary(
     state = _state(config)
     if not state.trials:
         return
-    terminalreporter.write_sep("=", "Kensa summary")
+    terminalreporter.write_sep("=", "Kensa evaluation complete")
     if config.getoption("--kensa-report") == "json":
         terminalreporter.write_line(
             json.dumps(
@@ -556,14 +557,26 @@ def pytest_terminal_summary(
             )
         )
         return
-    passed = sum(1 for aggregate in state.aggregates if aggregate.verdict == "pass")
-    terminalreporter.write_line(f"{passed}/{len(state.aggregates)} aggregate case(s) passed")
-    for aggregate in state.aggregates:
-        label = aggregate.verdict.upper()
-        terminalreporter.write_line(
-            f"{label} {aggregate.group_id}: {aggregate.passed}/{aggregate.total} passed, "
-            f"{aggregate.failed} failed, {aggregate.errored} errored"
+    results = [
+        f"{_status_marker(aggregate.verdict)} {aggregate.verdict}" for aggregate in state.aggregates
+    ]
+    case_counts = Counter(aggregate.case_id for aggregate in state.aggregates)
+    case_labels = [
+        aggregate.group_id if case_counts[aggregate.case_id] > 1 else aggregate.case_id
+        for aggregate in state.aggregates
+    ]
+    result_width = max(len("Result"), *(len(result) for result in results)) + 2
+    case_width = max(len("Case"), *(len(case_label) for case_label in case_labels)) + 2
+    terminalreporter.write_line(f"{'Result':<{result_width}}{'Case':<{case_width}}Trials")
+    for aggregate, result, case_label in zip(state.aggregates, results, case_labels, strict=True):
+        trials = "  ".join(
+            f"{_status_marker(trial.status)} T{trial.trial_index}" for trial in aggregate.trials
         )
+        terminalreporter.write_line(f"{result:<{result_width}}{case_label:<{case_width}}{trials}")
+
+
+def _status_marker(status: str) -> str:
+    return {"pass": "✓", "fail": "✗"}.get(status, "!")
 
 
 def _is_xdist_worker(config: pytest.Config) -> bool:

@@ -121,6 +121,7 @@ kensa eval --no-judge
 kensa eval --judge-timeout 30
 kensa eval --trial-timeout 180
 kensa eval --workers 1                      # sequential execution
+kensa eval --verbose                        # show heartbeat details
 kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 ```
 
@@ -133,6 +134,7 @@ kensa eval tests/evals/ -- -k refund -q     # pytest passthrough after --
 | `--judge-timeout` | `30` | Maximum seconds for each judge call |
 | `--trial-timeout` | `300` | Maximum seconds for each trial |
 | `--workers` | `4` | Number of local pytest worker processes |
+| `--verbose` | off | Show periodic heartbeat details on stderr |
 
 Positional eval paths default to `tests/evals`. Anything after `--` is passed to pytest, except reserved Kensa options. `kensa eval` checks evals readiness and expects at least one passing non-smoke eval.
 

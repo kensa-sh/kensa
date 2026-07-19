@@ -291,7 +291,11 @@ def test_agent(case, mode):
     result = pytester.runpytest("-q")
 
     result.assert_outcomes(passed=4)
-    result.stdout.fnmatch_lines(["*2/2 aggregate case(s) passed*"])
+    summary_rows = [line for line in result.stdout.lines if line.startswith("✓ pass")]
+    assert len(summary_rows) == 2
+    assert any("test_agent[case_a-fast]" in line for line in summary_rows)
+    assert any("test_agent[case_a-slow]" in line for line in summary_rows)
+    assert all("✓ T1  ✓ T2" in line for line in summary_rows)
 
 
 def test_plain_failing_assertions_fail_trials_and_aggregate_fail(pytester: pytest.Pytester) -> None:
@@ -312,7 +316,7 @@ def test_agent(case):
 
     result.assert_outcomes(failed=2)
     assert result.ret == 1
-    result.stdout.fnmatch_lines(["*FAIL *test_agent*"])
+    result.stdout.fnmatch_lines(["*✗ fail*case_a*✗ T1*✗ T2*"])
 
 
 def test_mixed_trial_outcomes_are_flaky_and_fail_session(pytester: pytest.Pytester) -> None:
@@ -337,7 +341,7 @@ def test_agent(case):
 
     result.assert_outcomes(passed=2, failed=1)
     assert result.ret == 1
-    result.stdout.fnmatch_lines(["*FLAKY *test_agent*"])
+    result.stdout.fnmatch_lines(["*! flaky*case_a*✓ T1*✗ T2*✓ T3*"])
 
 
 def test_pytest_x_reports_partial_aggregate(pytester: pytest.Pytester) -> None:
@@ -358,7 +362,7 @@ def test_agent(case):
 
     result.assert_outcomes(failed=1)
     assert result.ret == 1
-    result.stdout.fnmatch_lines(["*PARTIAL *test_agent*"])
+    result.stdout.fnmatch_lines(["*! partial*case_a*✗ T1*"])
 
 
 def test_xdist_x_reports_unrun_trials_as_partial(pytester: pytest.Pytester) -> None:
@@ -385,7 +389,7 @@ def test_agent(case):
     )
 
     assert result.ret == 1
-    result.stdout.fnmatch_lines(["*PARTIAL *test_agent*"])
+    result.stdout.fnmatch_lines(["*! partial*case_a*✗ T1*"])
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
     aggregate = payload["aggregates"][0]
@@ -822,7 +826,7 @@ def test_agent(case, kensa_run):
 
     result.assert_outcomes(passed=6)
     assert result.ret == 0
-    assert result.stdout.str().count("Kensa summary") == 1
+    assert result.stdout.str().count("Kensa evaluation complete") == 1
     result_dir = Path(str(pytester.path)) / ".kensa" / "results"
     artifacts = list(result_dir.glob("*.json"))
     assert len(artifacts) == 1
