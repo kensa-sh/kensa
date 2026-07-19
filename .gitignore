@@ -178,5 +178,4 @@ plans/
 # Kensa runtime data
 .kensa/*
 !.kensa/.gitignore
-!.kensa/settings.json
 tests/evals/.kensa_doctor_tmp/

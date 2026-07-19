@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kensa import redact
+from kensa.config import update_project_config
 from kensa.traces import import_trace_source, load_trace_views
 
 pytestmark = pytest.mark.live
@@ -35,8 +36,7 @@ def test_live_sm_readiness_and_redaction_pass(
     readiness = redact.ensure_redaction_ready()
     assert readiness.model == "en_core_web_sm"
     assert readiness.checksum_verified is True
-    settings = json.loads((tmp_path / ".kensa" / "settings.json").read_text())
-    assert settings["redaction"]["model"] == "en_core_web_sm"
+    update_project_config({"redaction_model": "small"}, start=tmp_path)
     assert redact.assert_redaction_ready().model == "en_core_web_sm"
 
     source = tmp_path / "AKIAIOSFODNN7EXAMPLE" / "alice.smith@example.com"

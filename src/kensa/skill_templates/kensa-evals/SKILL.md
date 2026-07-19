@@ -35,7 +35,7 @@ working form for every later command.
 
 Check, in order:
 
-1. `.kensa/settings.json`
+1. `[tool.kensa]` in the nearest `pyproject.toml`
 2. `tests/evals/conftest.py`
 3. `tests/evals/test_kensa_smoke.py`
 4. `kensa doctor --json`
@@ -64,7 +64,7 @@ Do not import traces, inspect traces, or write evals during setup.
 
 ## 2. Evidence
 
-Read `.kensa/settings.json` and use `init.evidence_source` when it is saved. Valid saved values
+Read `[tool.kensa].evidence_source` from the nearest `pyproject.toml` when it is saved. Valid values
 are `langfuse`, `trace_export`, and `local`. If no saved source exists, infer it from the repo
 state or ask the user.
 

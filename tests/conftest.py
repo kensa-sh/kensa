@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from kensa import redact
+from kensa.config import update_project_config
 
 pytest_plugins = ("pytester",)
 
@@ -190,26 +191,13 @@ class FakeRedactionEnv:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        checksum_verified: bool = True,
+        model: str = "small",
     ) -> None:
-        spec = redact.DEFAULT_SPACY_MODEL
+        spec = redact.LARGE_SPACY_MODEL if model == "large" else redact.DEFAULT_SPACY_MODEL
         models_dir = tmp_path / "kensa-models"
         monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
         write_fake_model_dir(models_dir / spec.label, spec)
-        readiness = redact.RedactionReadiness(
-            model=spec.name,
-            model_version=spec.version,
-            checksum_verified=checksum_verified,
-        )
-        path = redact.settings_path(tmp_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = (
-            json.loads(path.read_text())
-            if path.exists()
-            else {"schema_version": "kensa.settings.v1"}
-        )
-        payload["redaction"] = readiness.to_dict()
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        update_project_config({"redaction_model": model}, start=tmp_path)
 
 
 def write_fake_model_dir(path: Path, spec: redact.SpacyModelSpec) -> None:

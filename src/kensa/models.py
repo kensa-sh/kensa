@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -47,38 +46,14 @@ class CliEnvelope(KensaModel):
 
 EvidenceSource = Literal["langfuse", "trace_export", "local"]
 AgentInstruction = Literal["codex", "claude", "cursor", "other"]
+RedactionModelChoice = Literal["small", "large"]
 
 
-class KensaInitSettings(KensaModel):
+class KensaProjectConfig(KensaModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     evidence_source: EvidenceSource | None = None
-    agents: tuple[AgentInstruction, ...] | None = None
-
-
-class KensaHarnessSettings(KensaModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    ready: bool = False
-    checked_at: datetime | None = None
-    warnings: list[str] = Field(default_factory=list)
-
-
-class KensaRedactionSettings(KensaModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    model: Literal["en_core_web_sm", "en_core_web_lg"]
-    model_version: str
-    checksum_verified: bool
-
-
-class KensaSettings(KensaModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["kensa.settings.v1"] = "kensa.settings.v1"
-    init: KensaInitSettings = Field(default_factory=KensaInitSettings)
-    harness: KensaHarnessSettings = Field(default_factory=KensaHarnessSettings)
-    redaction: KensaRedactionSettings | None = None
+    redaction_model: RedactionModelChoice | None = None
 
 
 class InspectStatus(StrEnum):

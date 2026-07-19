@@ -12,6 +12,7 @@ from conftest import FakeRedactionEnv, write_fake_model_dir
 
 from kensa import redact
 from kensa import traces as traces_module
+from kensa.config import update_project_config
 from kensa.redact import (
     RULESET_HASH,
     RedactionError,
@@ -492,6 +493,7 @@ def test_import_rejects_corrupt_pseudonym_key(
     redaction_ready: FakeRedactionEnv,
 ) -> None:
     key_path = tmp_path / ".kensa" / "pseudonym.key"
+    key_path.parent.mkdir()
     key_path.write_bytes(b"short")
     source = tmp_path / "traces.jsonl"
     source.write_text(json.dumps({"id": "trace"}) + "\n")
@@ -606,14 +608,7 @@ def test_large_model_import_artifact_passes_exposure_gate(
     models_dir = tmp_path / "large-models"
     monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
     write_fake_model_dir(models_dir / spec.label, spec)
-    settings_path = redact.settings_path(tmp_path)
-    settings = json.loads(settings_path.read_text())
-    settings["redaction"] = {
-        "model": spec.name,
-        "model_version": spec.version,
-        "checksum_verified": True,
-    }
-    settings_path.write_text(json.dumps(settings))
+    update_project_config({"redaction_model": "large"}, start=tmp_path)
     source = tmp_path / "large-model.jsonl"
     source.write_text(json.dumps({"id": "trace", "input": "Alice"}) + "\n")
     out = tmp_path / "imports" / "large-model.jsonl"

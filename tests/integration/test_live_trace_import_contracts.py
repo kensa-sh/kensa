@@ -10,6 +10,7 @@ from langfuse import Langfuse
 
 from kensa import redact
 from kensa import traces as traces_module
+from kensa.config import update_project_config
 from kensa.providers import langfuse as langfuse_provider
 
 pytestmark = pytest.mark.live
@@ -118,6 +119,7 @@ def _prepare_live_redaction_readiness(tmp_path: Path) -> None:
     os.chdir(tmp_path)
     try:
         redact.ensure_redaction_ready()
+        update_project_config({"redaction_model": "small"}, start=tmp_path)
     finally:
         os.chdir(original_cwd)
 
