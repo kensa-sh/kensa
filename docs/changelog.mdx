@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.15.0
+
+Project configuration is now explicit in `pyproject.toml`, failed eval runs can be diagnosed against repository evidence, and console output is easier to scan.
+
+- **Breaking:** Kensa no longer reads `.kensa/settings.json`; trace source and redaction model settings now live under `[tool.kensa]` in the nearest `pyproject.toml`, and readiness is computed live.
+- `kensa init` installs a read-only `kensa-diagnose` skill that analyzes failed or errored result JSON against the current repository's source and tests.
+- `kensa eval` keeps periodic heartbeat details behind `--verbose` and prints a compact aggregate and per-trial summary.
+
+[View the 0.15.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.15.0).
+
 ## 0.14.0
 
 Kensa trials now run in parallel across four local pytest workers by default.
