@@ -176,6 +176,11 @@ Report:
 7. Doctor status.
 8. Remaining blockers.
 
+After verification, inspect the selected completed run result. If it contains failed or errored
+trials, use `kensa-diagnose` with that run ID before giving iteration guidance, then include its
+verdict in the verification report. Diagnosis is read-only and must not rerun evals or implement
+its recommendations. Do not invoke diagnosis when every trial passed.
+
 ## 7. Iterate
 
 Route failures:

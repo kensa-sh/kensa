@@ -101,7 +101,13 @@ _CHOICE_ENTER_KEYS = ("\r", "\n")
 _CHOICE_UP_KEYS = ("\x1b[A", "\x1bOA", "k")
 _KENSA_WORKFLOW_FILENAMES = ("kensa.yml", "kensa.yaml")
 _SKILL_TEMPLATE_ROOT = ("skill_templates",)
-_PACKAGED_SKILLS = ("kensa-evals", "kensa-setup", "kensa-inspect", "kensa-generate")
+_PACKAGED_SKILLS = (
+    "kensa-evals",
+    "kensa-setup",
+    "kensa-inspect",
+    "kensa-generate",
+    "kensa-diagnose",
+)
 _AGENT_SKILL_HELP_TEXT = (
     f"Kensa will install {len(_PACKAGED_SKILLS)} skill files for your local coding agent."
 )
