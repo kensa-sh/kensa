@@ -23,17 +23,20 @@ tests/evals/
 ├── test_kensa_smoke.py         # scaffolded smoke eval
 └── test_<id>.py                # your evals (hand-written or materialized)
 
+pyproject.toml
+└── [tool.kensa]                # trace source + redaction model (kensa init)
+
 .kensa/
 ├── connections/                # non-secret provider metadata (kensa connect)
 ├── inspect/                    # YAML eval-idea review queue (kensa inspect)
 ├── traces/
 │   ├── imports/                # imported trace evidence (kensa import)
 │   └── runs/                   # per-run trial traces (kensa eval)
-├── results/                    # eval results (kensa eval)
-└── settings.json               # trace source + harness readiness (kensa init / doctor)
+└── results/                    # eval results (kensa eval)
 ```
 
-You write evals and the `kensa_run` harness. Kensa generates everything under `.kensa/`.
+You write evals and the `kensa_run` harness. Kensa generates ignored runtime artifacts under
+`.kensa/`; `kensa doctor` derives readiness live without persisting it.
 
 ## Cases
 
