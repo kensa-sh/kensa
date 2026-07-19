@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -25,9 +24,9 @@ from urllib.parse import urlparse
 
 import click
 from dotenv import load_dotenv
-from pydantic import ValidationError
 
 from kensa import cli_inspect, cli_output, cli_traces, redact
+from kensa import config as kensa_config
 from kensa.artifacts import write_run_artifacts
 from kensa.constants import (
     CLI_EPILOG,
@@ -36,8 +35,6 @@ from kensa.constants import (
     DEFAULT_EVAL_PATHS,
     ENDPOINT_ENV_KEY_FRAGMENTS,
     KENSA_DIR,
-    KENSA_SETTINGS_PATH,
-    KENSA_SETTINGS_SCHEMA_VERSION,
     LOCAL_ENDPOINT_HOSTS,
     SETUP_HANDOFF_PROMPT,
     SMOKE_CASE_ID,
@@ -53,7 +50,8 @@ from kensa.models import (
     AgentInstruction,
     EvidenceSource,
     InspectStatus,
-    KensaSettings,
+    KensaProjectConfig,
+    RedactionModelChoice,
 )
 from kensa.traces import (
     ImportResult,
@@ -84,7 +82,6 @@ AgentInstructionChoice = Literal[
     "all",
 ]
 LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
-RedactionModelChoice = Literal["small", "large"]
 _AGENT_INSTRUCTION_CHOICES = ("claude", "codex", "cursor", "other")
 _AGENT_INSTRUCTION_FLAG_CHOICES = ("auto", *_AGENT_INSTRUCTION_CHOICES, "all")
 _INTERACTIVE_CHOICE_LABELS = {
@@ -331,26 +328,11 @@ def _startup_dotenv_path() -> Path | None:
 
 
 def _find_pyproject(start: Path) -> Path | None:
-    current = start.resolve()
-    for candidate in (current, *current.parents):
-        pyproject = candidate / "pyproject.toml"
-        if pyproject.exists():
-            return pyproject
-    return None
+    return kensa_config.find_pyproject(start)
 
 
 def _pyproject_dotenv_path(pyproject: Path) -> Path | None:
-    data = tomllib.loads(pyproject.read_text())
-    tool = data.get("tool")
-    if not isinstance(tool, dict):
-        return None
-    kensa = tool.get("kensa")
-    if not isinstance(kensa, dict):
-        return None
-    declared = kensa.get("dotenv")
-    if not isinstance(declared, str) or not declared:
-        return None
-    return Path(declared).expanduser()
+    return kensa_config.read_dotenv_path(pyproject)
 
 
 @click.group(
@@ -1120,7 +1102,6 @@ def _cmd_doctor(args: Any) -> int:
                 "redaction": result["redaction"],
                 "non_local_endpoint_markers": result["non_local_endpoint_markers"],
                 "misplaced_workflows": result["misplaced_workflows"],
-                "readiness_recorded": result["readiness_recorded"],
                 "harness_authenticity_warnings": result["harness_authenticity_warnings"],
                 "harness_readiness": result["harness_readiness"],
                 "evals_readiness": result["evals_readiness"],
@@ -1149,8 +1130,6 @@ def _cmd_doctor(args: Any) -> int:
     else:
         cli_output.item("Evals readiness: missing", ok=False)
     cli_output.item("Kensa doctor: ready")
-    if result["readiness_recorded"]:
-        cli_output.item("Readiness recorded locally.")
     cli_output.print_next_steps(next_steps)
     return int(result["exit_code"])
 
@@ -1450,24 +1429,20 @@ def _name_tokens(name: str) -> tuple[str, ...]:
 
 def _doctor_redaction_report() -> dict[str, Any]:
     missing = redact.missing_redaction_dependencies()
-    settings = _read_settings()
+    project_config = _read_project_config()
     readiness: redact.RedactionReadiness | None = None
     readiness_error: str | None = None
     try:
-        readiness = redact.assert_redaction_ready()
+        readiness = redact.Redactor().readiness
     except redact.RedactionError as exc:
         readiness_error = str(exc)
-        try:
-            readiness = redact.read_redaction_readiness()
-        except redact.RedactionError:
-            readiness = None
     unsafe_artifacts = _unsafe_import_artifacts()
     return {
         "dependencies": {name: name not in missing for name in redact.REDACTION_EXTRA_MODULES},
         "ready": readiness_error is None and readiness is not None,
         "readiness": readiness.to_dict() if readiness is not None else None,
         "readiness_error": readiness_error,
-        "evidence_source": settings.init.evidence_source,
+        "evidence_source": project_config.evidence_source,
         "unsafe_artifacts": unsafe_artifacts,
     }
 
@@ -1613,9 +1588,6 @@ def _doctor_result(args: Any) -> dict[str, Any]:
 
     exit_code = 1 if problems else 0
     harness_ready = smoke.returncode == 0 and not problems
-    readiness_recorded = False
-    if harness_ready or _settings_path().exists():
-        readiness_recorded = _record_harness_readiness(ready=harness_ready, warnings=warnings)
 
     return {
         "exit_code": exit_code,
@@ -1626,7 +1598,6 @@ def _doctor_result(args: Any) -> dict[str, Any]:
         "redaction": redaction_report,
         "non_local_endpoint_markers": sorted(endpoints),
         "misplaced_workflows": [str(cli_output.display_path(path)) for path in misplaced_workflows],
-        "readiness_recorded": readiness_recorded,
         "harness_authenticity_warnings": authenticity_warnings,
         "harness_readiness": {
             "ready": harness_ready,
@@ -1682,91 +1653,48 @@ def _run_persistent_smoke() -> subprocess.CompletedProcess[str]:
     )
 
 
-def _settings_path() -> Path:
-    return Path.cwd() / KENSA_SETTINGS_PATH
-
-
-def _legacy_readiness_path() -> Path:
-    return Path.cwd() / KENSA_DIR / "readiness.json"
-
-
-def _read_settings() -> KensaSettings:
-    path = _settings_path()
-    if not path.exists():
-        return KensaSettings()
+def _read_project_config() -> KensaProjectConfig:
     try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise click.ClickException(
-            f"invalid Kensa settings JSON: {cli_output.display_path(path)}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise click.ClickException(
-            f"Kensa settings must be a JSON object: {cli_output.display_path(path)}"
-        )
-    if payload.get("schema_version") != KENSA_SETTINGS_SCHEMA_VERSION:
-        raise click.ClickException(f"invalid Kensa settings: {cli_output.display_path(path)}")
-    try:
-        return KensaSettings.model_validate(payload)
-    except ValidationError as exc:
-        raise click.ClickException(
-            f"invalid Kensa settings: {cli_output.display_path(path)}"
-        ) from exc
-
-
-def _write_settings(settings: KensaSettings) -> list[Path]:
-    path = _settings_path()
-    created: list[Path] = []
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if _ensure_kensa_gitignore(path.parent):
-        created.append(KENSA_DIR / ".gitignore")
-    if not path.exists():
-        created.append(KENSA_SETTINGS_PATH)
-    path.write_text(settings.model_dump_json(indent=2, exclude_none=True) + "\n")
-    legacy_readiness = _legacy_readiness_path()
-    if legacy_readiness.exists():
-        legacy_readiness.unlink()
-    return created
+        return kensa_config.read_project_config()
+    except kensa_config.KensaConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _ensure_kensa_gitignore(kensa_dir: Path) -> bool:
     gitignore = kensa_dir / ".gitignore"
     created = not gitignore.exists()
-    desired = ["*", "!.gitignore", "!settings.json"]
-    legacy = {"readiness.json", "results/", "traces/"}
+    desired = ["*", "!.gitignore"]
+    managed = {"*", "!.gitignore", "!settings.json", "readiness.json", "results/", "traces/"}
     existing = gitignore.read_text().splitlines() if gitignore.exists() else []
-    preserved = [line for line in existing if line and line not in legacy and line not in desired]
+    preserved = [line for line in existing if line and line not in managed]
     gitignore.write_text("\n".join([*desired, *preserved]) + "\n")
     return created
 
 
-def _record_init_choices(
+def _record_project_choices(
     evidence_source: EvidenceSource | None,
-    agent_keys: tuple[AgentInstruction, ...],
-    *,
-    settings: KensaSettings,
-) -> list[Path]:
-    payload = settings.model_dump(mode="python", exclude_none=True)
-    init = cast(dict[str, Any], payload.get("init", {}))
+    redaction_model: RedactionModelChoice | None,
+) -> tuple[list[Path], list[Path]]:
+    created: list[Path] = []
+    updated: list[Path] = []
+    kensa_dir = Path.cwd() / KENSA_DIR
+    kensa_dir.mkdir(parents=True, exist_ok=True)
+    if _ensure_kensa_gitignore(kensa_dir):
+        created.append(KENSA_DIR / ".gitignore")
+    updates: dict[str, str] = {}
     if evidence_source is not None:
-        init["evidence_source"] = evidence_source
-    init["agents"] = list(agent_keys)
-    payload["init"] = init
-    payload["schema_version"] = KENSA_SETTINGS_SCHEMA_VERSION
-    return _write_settings(KensaSettings.model_validate(payload))
-
-
-def _record_harness_readiness(*, ready: bool, warnings: list[str]) -> bool:
-    settings = _read_settings()
-    payload = settings.model_dump(mode="python", exclude_none=True)
-    payload["harness"] = {
-        "ready": ready,
-        "checked_at": datetime.now(UTC),
-        "warnings": warnings,
-    }
-    payload["schema_version"] = KENSA_SETTINGS_SCHEMA_VERSION
-    _write_settings(KensaSettings.model_validate(payload))
-    return True
+        updates["evidence_source"] = evidence_source
+    if redaction_model is not None:
+        updates["redaction_model"] = redaction_model
+    try:
+        result = kensa_config.update_project_config(updates)
+    except kensa_config.KensaConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result.created:
+        created.append(cli_output.display_path(result.path))
+    elif result.changed:
+        updated.append(cli_output.display_path(result.path))
+    return created, updated
 
 
 def _cmd_init(
@@ -1801,26 +1729,30 @@ def _cmd_init_inner(
     *,
     redaction_model: RedactionModelChoice | None = None,
 ) -> int:
-    settings = _read_settings()
+    project_config = _read_project_config()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
         raise _auto_agent_detection_error()
-    added_files, notices, instruction_key, agent_keys = _scaffold_init_files(
+    added_files, notices, instruction_key = _scaffold_init_files(
         steps,
         agent_choice=explicit_agent_choice,
     )
     evidence_source = explicit_evidence_source or _select_trace_source(steps)
-    added_files.extend(_record_init_choices(evidence_source, agent_keys, settings=settings))
     redaction_source = evidence_source
     if redaction_model is not None and redaction_source is None:
-        redaction_source = settings.init.evidence_source
+        redaction_source = project_config.evidence_source
+    configured_model = project_config.redaction_model or "small"
+    effective_model = redaction_model or configured_model
+    persisted_model = effective_model if redaction_source is not None or redaction_model else None
+    project_files, updated_files = _record_project_choices(evidence_source, persisted_model)
+    added_files.extend(project_files)
     redaction_status = _configure_redaction_readiness(
         steps,
         redaction_source,
-        model=redaction_model or _configured_redaction_model(settings),
+        model=effective_model,
         required=redaction_model is not None,
     )
     connection_status = _configure_trace_source_connection(steps, evidence_source)
-    _print_init_added_files(added_files, steps=steps)
+    _print_init_added_files(added_files, updated_paths=updated_files, steps=steps)
     for notice in notices:
         _init_notice(steps, notice)
     if steps is None:
@@ -1832,12 +1764,6 @@ def _cmd_init_inner(
     if steps is not None:
         steps.end("Setup files ready" if not failed else "[red]Setup incomplete[/red]")
     return 1 if failed else 0
-
-
-def _configured_redaction_model(settings: KensaSettings) -> RedactionModelChoice:
-    if settings.redaction is not None and settings.redaction.model == "en_core_web_lg":
-        return "large"
-    return "small"
 
 
 def _redaction_init_failed(
@@ -1914,16 +1840,34 @@ def _configure_redaction_readiness(
     return "ready"
 
 
-def _print_init_added_files(paths: list[Path], *, steps: _Steps | None = None) -> None:
-    if steps is None:
-        cli_output.step("Added files")
-    else:
-        steps.step("Created")
-    if not paths:
+def _print_init_added_files(
+    paths: list[Path],
+    *,
+    updated_paths: list[Path] | None = None,
+    steps: _Steps | None = None,
+) -> None:
+    updated = updated_paths or []
+    if not paths and not updated:
+        if steps is None:
+            cli_output.step("Added files")
+        else:
+            steps.step("Created")
         _init_item(steps, "No new files added.")
         return
-    for summary in _summarize_init_added_paths(paths):
-        _init_item(steps, summary)
+    if paths:
+        if steps is None:
+            cli_output.step("Added files")
+        else:
+            steps.step("Created")
+        for summary in _summarize_init_added_paths(paths):
+            _init_item(steps, summary)
+    if updated:
+        if steps is None:
+            cli_output.step("Updated files")
+        else:
+            steps.step("Updated")
+        for summary in _summarize_init_added_paths(updated):
+            _init_item(steps, f"{summary} (updated)")
 
 
 def _summarize_init_added_paths(paths: list[Path]) -> list[str]:
@@ -1965,7 +1909,7 @@ def _scaffold_init_files(
     steps: _Steps | None = None,
     *,
     agent_choice: AgentInstructionChoice | None = None,
-) -> tuple[list[Path], list[str], str | None, tuple[AgentInstruction, ...]]:
+) -> tuple[list[Path], list[str], str | None]:
     added: list[Path] = []
     notices: list[str] = []
     workflow_path, workflow_working_directory = _init_workflow_target()
@@ -1980,26 +1924,26 @@ def _scaffold_init_files(
     smoke = eval_dir / "test_kensa_smoke.py"
     if _write_if_missing_or_kensa_generated(smoke, _smoke_template(), _is_kensa_smoke):
         added.append(smoke)
-    agent_files, agent_notice, instruction_key, agent_keys = _scaffold_agent_files(
+    agent_files, agent_notice, instruction_key = _scaffold_agent_files(
         steps,
         agent_choice=agent_choice,
     )
     added.extend(agent_files)
     if agent_notice is not None:
         notices.append(agent_notice)
-    return added, notices, instruction_key, agent_keys
+    return added, notices, instruction_key
 
 
 def _scaffold_agent_files(
     steps: _Steps | None = None,
     *,
     agent_choice: AgentInstructionChoice | None = None,
-) -> tuple[list[Path], str | None, str | None, tuple[AgentInstruction, ...]]:
+) -> tuple[list[Path], str | None, str | None]:
     choice, targets = _select_agent_instruction(steps, explicit_choice=agent_choice)
     if not targets:
         if agent_choice == "auto":
             raise _auto_agent_detection_error()
-        return [], _agent_instruction_skip_notice(choice), None, ()
+        return [], _agent_instruction_skip_notice(choice), None
     written: list[Path] = []
     agent_keys: list[AgentInstruction] = []
     for target_key, path in targets:
@@ -2008,7 +1952,7 @@ def _scaffold_agent_files(
     instruction_key = choice if choice in {"all", "other"} else agent_keys[0]
     if steps is not None:
         steps.item(_agent_instruction_choice_summary(instruction_key))
-    return written, None, instruction_key, tuple(agent_keys)
+    return written, None, instruction_key
 
 
 def _configure_trace_source_connection(
@@ -2482,36 +2426,11 @@ def _record_pyproject_dotenv(path: Path, *, replace: bool = False) -> None:
     existing = _pyproject_dotenv_path(pyproject) if pyproject.exists() else None
     if existing is not None and not replace:
         return
-    rendered_path = _toml_string(str(_path_relative_to(path, pyproject.parent)))
-    section = f"[tool.kensa]\ndotenv = {rendered_path}\n"
-    if not pyproject.exists():
-        pyproject.write_text(section)
-        return
-    text = pyproject.read_text()
-    lines = text.splitlines()
-    in_kensa_section = False
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if in_kensa_section:
-                break
-            in_kensa_section = stripped == "[tool.kensa]"
-            continue
-        if in_kensa_section and line.split("=", 1)[0].strip() == "dotenv":
-            lines[index] = f"dotenv = {rendered_path}"
-            pyproject.write_text("\n".join(lines) + "\n")
-            return
-    for index, line in enumerate(lines):
-        if line.strip() == "[tool.kensa]":
-            lines.insert(index + 1, f"dotenv = {rendered_path}")
-            pyproject.write_text("\n".join(lines) + "\n")
-            return
-    suffix = "" if text.endswith("\n") else "\n"
-    pyproject.write_text(f"{text}{suffix}\n{section}")
-
-
-def _toml_string(value: str) -> str:
-    return json.dumps(value)
+    rendered_path = str(_path_relative_to(path, pyproject.parent))
+    try:
+        kensa_config.update_project_config({"dotenv": rendered_path}, start=root)
+    except kensa_config.KensaConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _project_config_root() -> Path:
@@ -3415,7 +3334,7 @@ def _print_setup_handoff(
         prompt = _setup_handoff_prompt()
         cli_output.CONSOLE.print()
         cli_output.CONSOLE.print("[bold]Copyable setup prompt[/bold]")
-        cli_output.CONSOLE.print(prompt, soft_wrap=True)
+        cli_output.CONSOLE.print(cli_output.rich_escape(prompt), soft_wrap=True)
         cli_output.CONSOLE.print()
         cli_output.CONSOLE.print("[bold]Next steps[/bold]")
         for index, step in enumerate(_setup_handoff_next_steps(), start=1):
@@ -3443,7 +3362,7 @@ def _setup_handoff_next_steps() -> list[str]:
     return [
         *common_steps,
         "Follow the lifecycle: setup -> evidence -> inspect -> approval -> generate -> verify.",
-        "Let kensa-evals read .kensa/settings.json for the selected trace source.",
+        "Let kensa-evals read [tool.kensa] for the selected trace source.",
         _setup_pr_step(),
     ]
 

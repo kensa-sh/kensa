@@ -31,10 +31,7 @@ from re import Match
 from typing import Any, Literal, cast
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
-from pydantic import ValidationError
-
-from kensa.constants import KENSA_SETTINGS_PATH
-from kensa.models import KensaRedactionSettings, KensaSettings
+from kensa.config import KensaConfigError, read_project_config
 
 REDACTOR_MANIFEST_VERSION = "kensa.redactor.v2"
 REDACTION_EXTRA_MODULES = ("spacy", "presidio_analyzer", "detect_secrets", "phonenumbers")
@@ -434,11 +431,6 @@ def models_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".kensa" / "models"
-
-
-def settings_path(root: Path | str | None = None) -> Path:
-    base = Path(root) if root is not None else Path.cwd()
-    return base / KENSA_SETTINGS_PATH
 
 
 def _package_version(package: str) -> str:
@@ -1339,33 +1331,6 @@ def assert_safe_manifest(manifest: Any) -> None:
 # --- readiness -----------------------------------------------------------------------
 
 
-def read_redaction_readiness(root: Path | str | None = None) -> RedactionReadiness | None:
-    """Read redaction readiness from `.kensa/settings.json`."""
-
-    path = settings_path(root)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RedactionNotReadyError(
-            f"Kensa settings are unreadable: {path}. Re-run kensa init."
-        ) from exc
-    try:
-        settings = KensaSettings.model_validate(payload)
-    except ValidationError as exc:
-        raise RedactionNotReadyError(
-            f"Kensa settings are invalid: {path}. Re-run kensa init."
-        ) from exc
-    if settings.redaction is None:
-        return None
-    return RedactionReadiness(
-        model=settings.redaction.model,
-        model_version=settings.redaction.model_version,
-        checksum_verified=settings.redaction.checksum_verified,
-    )
-
-
 def _pinned_model_spec(readiness: RedactionReadiness) -> SpacyModelSpec:
     for spec in _SPACY_MODELS.values():
         if readiness.model == spec.name and readiness.model_version == spec.version:
@@ -1389,19 +1354,22 @@ def assert_redaction_ready(
             + ", ".join(missing)
             + ". Install kensa[redaction] and re-run kensa init."
         )
-    readiness = read_redaction_readiness(root)
-    if readiness is None:
+    try:
+        configured = read_project_config(root)
+    except KensaConfigError as exc:
+        raise RedactionNotReadyError(str(exc)) from exc
+    if configured.redaction_model is None:
         raise RedactionNotReadyError(
-            "mandatory trace redaction is not bootstrapped: "
-            f"{settings_path(root)} has no redaction readiness. Run kensa init."
+            "mandatory trace redaction is not configured: "
+            "[tool.kensa].redaction_model is missing. Run kensa init."
         )
-    if not readiness.checksum_verified:
-        raise RedactionNotReadyError(
-            "the cached spaCy model was never checksum-verified. Re-run kensa init."
-        )
-    spec = _pinned_model_spec(readiness)
+    spec = _SPACY_MODELS[configured.redaction_model]
     _validate_model_dir(models_root() / spec.label, spec)
-    return readiness
+    return RedactionReadiness(
+        model=spec.name,
+        model_version=spec.version,
+        checksum_verified=True,
+    )
 
 
 # --- model bootstrap (kensa init only) -----------------------------------------------
@@ -1527,11 +1495,10 @@ def _prepare_model(spec: SpacyModelSpec) -> Path:
 
 
 def ensure_redaction_ready(
-    root: Path | str | None = None,
     *,
     model: Literal["small", "large"] = "small",
 ) -> RedactionReadiness:
-    """Prepare the pinned model and record readiness in `.kensa/settings.json`."""
+    """Prepare a pinned redaction model in the trusted local cache."""
 
     missing = missing_redaction_dependencies()
     if missing:
@@ -1547,24 +1514,8 @@ def ensure_redaction_ready(
         model_version=spec.version,
         checksum_verified=True,
     )
-    path = settings_path(root)
-    settings = KensaSettings() if not path.exists() else _read_settings_for_write(path)
-    payload = settings.model_dump(mode="python", exclude_none=True)
-    payload["redaction"] = KensaRedactionSettings.model_validate(readiness.to_dict()).model_dump()
-    rendered = KensaSettings.model_validate(payload).model_dump_json(indent=2, exclude_none=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(rendered + "\n")
+    _load_engine(readiness)
     return readiness
-
-
-def _read_settings_for_write(path: Path) -> KensaSettings:
-    try:
-        payload = json.loads(path.read_text())
-        return KensaSettings.model_validate(payload)
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
-        raise RedactionNotReadyError(
-            f"Kensa settings are invalid: {path}. Fix or remove them before running kensa init."
-        ) from exc
 
 
 __all__ = [
@@ -1593,9 +1544,7 @@ __all__ = [
     "ensure_redaction_ready",
     "missing_redaction_dependencies",
     "models_root",
-    "read_redaction_readiness",
     "redact_trace_view",
     "redact_value",
     "safe_manifest",
-    "settings_path",
 ]

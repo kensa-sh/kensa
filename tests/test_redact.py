@@ -14,6 +14,7 @@ import pytest
 from conftest import FakeRecognizerResult, FakeRedactionEnv, write_fake_model_dir
 
 from kensa import redact
+from kensa.config import update_project_config
 from kensa.redact import (
     DEFAULT_SPACY_MODEL,
     DetectorKind,
@@ -28,11 +29,9 @@ from kensa.redact import (
     ensure_redaction_ready,
     missing_redaction_dependencies,
     models_root,
-    read_redaction_readiness,
     redact_trace_view,
     redact_value,
     safe_manifest,
-    settings_path,
 )
 
 
@@ -70,7 +69,7 @@ def test_module_availability_and_missing_dependencies() -> None:
     assert missing_redaction_dependencies() == expected
 
 
-def test_models_root_and_readiness_path(
+def test_models_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -78,9 +77,6 @@ def test_models_root_and_readiness_path(
     assert models_root() == tmp_path / "models"
     monkeypatch.delenv("KENSA_MODELS_DIR")
     assert models_root() == Path.home() / ".kensa" / "models"
-    assert settings_path(tmp_path) == tmp_path / ".kensa" / "settings.json"
-    monkeypatch.chdir(tmp_path)
-    assert settings_path() == tmp_path / ".kensa" / "settings.json"
 
 
 def test_package_version_lookup() -> None:
@@ -252,15 +248,14 @@ def test_load_engine_reports_missing_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     fake_redaction: FakeRedactionEnv,
 ) -> None:
-    fake_redaction.make_ready(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
+    fake_redaction.make_ready(tmp_path, monkeypatch)
 
     def missing_import(name: str) -> Any:
         raise ImportError(f"missing {name}")
 
     monkeypatch.setattr(redact, "_import_module", missing_import)
-    readiness = read_redaction_readiness()
-    assert readiness is not None
+    readiness = assert_redaction_ready()
     with pytest.raises(RedactionNotReadyError, match="dependencies unavailable"):
         redact._load_engine(readiness)
 
@@ -272,8 +267,7 @@ def test_load_engine_reports_analyzer_setup_failures(
 ) -> None:
     fake_redaction.make_ready(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
-    readiness = read_redaction_readiness()
-    assert readiness is not None
+    readiness = assert_redaction_ready()
 
     broken = SimpleNamespace(
         NlpEngineProvider=lambda nlp_configuration: (_ for _ in ()).throw(ValueError("bad model"))
@@ -298,8 +292,7 @@ def test_load_engine_rejects_empty_entity_sets(
     fake_redaction.make_ready(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     fake_redaction.supported_entities = []
-    readiness = read_redaction_readiness()
-    assert readiness is not None
+    readiness = assert_redaction_ready()
     with pytest.raises(RedactionNotReadyError, match="no supported English entities"):
         redact._load_engine(readiness)
 
@@ -901,8 +894,7 @@ def test_load_engine_reports_secret_plugin_failures(
 ) -> None:
     fake_redaction.make_ready(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
-    readiness = read_redaction_readiness()
-    assert readiness is not None
+    readiness = assert_redaction_ready()
     original = redact._import_module
 
     def broken_import(name: str) -> Any:
@@ -1011,34 +1003,6 @@ def test_safe_manifest_rejects_unsafe_conditions(manifest: Any, match: str) -> N
 # --- readiness -----------------------------------------------------------------------
 
 
-def test_read_redaction_readiness_states(tmp_path: Path) -> None:
-    assert read_redaction_readiness(tmp_path) is None
-    path = settings_path(tmp_path)
-    path.parent.mkdir(parents=True)
-    path.write_text("{")
-    with pytest.raises(RedactionNotReadyError, match="unreadable"):
-        read_redaction_readiness(tmp_path)
-    path.write_text(json.dumps({"schema_version": "other"}))
-    with pytest.raises(RedactionNotReadyError, match="invalid"):
-        read_redaction_readiness(tmp_path)
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "redaction": {
-                    "model": "en_core_web_sm",
-                    "model_version": "3.8.0",
-                    "checksum_verified": True,
-                },
-            }
-        )
-    )
-    readiness = read_redaction_readiness(tmp_path)
-    assert readiness is not None
-    assert readiness.model == "en_core_web_sm"
-    assert readiness.to_dict()["model_version"] == "3.8.0"
-
-
 def test_assert_redaction_ready_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1053,7 +1017,7 @@ def test_assert_redaction_ready_fails_closed(
         assert_redaction_ready()
 
 
-def test_assert_redaction_ready_validates_readiness_content(
+def test_assert_redaction_ready_uses_configured_pinned_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_redaction: FakeRedactionEnv,
@@ -1063,20 +1027,37 @@ def test_assert_redaction_ready_validates_readiness_content(
         assert_redaction_ready()
 
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    assert assert_redaction_ready().model == "en_core_web_sm"
+    readiness = assert_redaction_ready()
+    assert readiness.model == "en_core_web_sm"
+    assert readiness.to_dict()["model_version"] == "3.8.0"
 
-    path = settings_path(tmp_path)
-    payload = json.loads(path.read_text())
-    payload["redaction"]["checksum_verified"] = False
-    path.write_text(json.dumps(payload))
-    with pytest.raises(RedactionNotReadyError, match="never checksum-verified"):
+    update_project_config({"redaction_model": "large"}, start=tmp_path)
+    with pytest.raises(RedactionNotReadyError, match="missing or corrupt"):
         assert_redaction_ready()
 
-    payload["redaction"]["checksum_verified"] = True
-    payload["redaction"]["model_version"] = "9.9.9"
-    path.write_text(json.dumps(payload))
+
+def test_assert_redaction_ready_reports_invalid_project_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_redaction.make_ready(tmp_path, monkeypatch)
+    (tmp_path / "pyproject.toml").write_text("{")
+
+    with pytest.raises(RedactionNotReadyError, match="invalid TOML"):
+        assert_redaction_ready()
+
+
+def test_pinned_model_spec_rejects_unknown_readiness() -> None:
+    readiness = redact.RedactionReadiness(
+        model="unknown",
+        model_version="1.0.0",
+        checksum_verified=True,
+    )
+
     with pytest.raises(RedactionNotReadyError, match="unpinned spaCy model"):
-        assert_redaction_ready()
+        redact._pinned_model_spec(readiness)
 
 
 def test_assert_redaction_ready_detects_corrupt_model_dirs(
@@ -1283,16 +1264,10 @@ def test_ensure_redaction_ready_prepares_default_model(
         destination.write_bytes(_model_wheel_bytes(spec))
 
     monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
-    readiness = ensure_redaction_ready(tmp_path)
+    readiness = ensure_redaction_ready()
     assert readiness.model == "en_core_web_sm"
     assert readiness.checksum_verified is True
-    payload = json.loads(settings_path(tmp_path).read_text())
-    assert payload["schema_version"] == "kensa.settings.v1"
-    assert payload["redaction"] == {
-        "model": "en_core_web_sm",
-        "model_version": "3.8.0",
-        "checksum_verified": True,
-    }
+    assert not (tmp_path / ".kensa").exists()
 
 
 def test_ensure_redaction_ready_prepares_large_model_override(
@@ -1306,13 +1281,12 @@ def test_ensure_redaction_ready_prepares_large_model_override(
         destination.write_bytes(_model_wheel_bytes(spec))
 
     monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
-    readiness = ensure_redaction_ready(tmp_path, model="large")
+    update_project_config({"redaction_model": "large"}, start=tmp_path)
+    readiness = ensure_redaction_ready(model="large")
 
     assert readiness.model == "en_core_web_lg"
     assert readiness.model_version == "3.8.0"
     assert assert_redaction_ready(root=tmp_path) == readiness
-    payload = json.loads(settings_path(tmp_path).read_text())
-    assert payload["redaction"]["model"] == "en_core_web_lg"
 
 
 def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(
@@ -1327,20 +1301,44 @@ def test_ensure_redaction_ready_writes_nothing_when_no_model_prepared(
 
     monkeypatch.setattr(redact, "_download_model_wheel", fail_download)
     with pytest.raises(RedactionBootstrapError, match="unavailable"):
-        ensure_redaction_ready(tmp_path)
-    assert not settings_path(tmp_path).exists()
+        ensure_redaction_ready()
+    assert not (tmp_path / ".kensa").exists()
 
 
-def test_ensure_redaction_ready_rejects_invalid_settings(
+def test_ensure_redaction_ready_rejects_an_unloadable_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_redaction: FakeRedactionEnv,
 ) -> None:
-    fake_redaction.make_ready(tmp_path, monkeypatch)
-    settings_path(tmp_path).write_text("{")
+    models_dir = tmp_path / "models"
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(models_dir))
+    write_fake_model_dir(models_dir / DEFAULT_SPACY_MODEL.label, DEFAULT_SPACY_MODEL)
 
-    with pytest.raises(RedactionNotReadyError, match="Kensa settings are invalid"):
-        ensure_redaction_ready(tmp_path)
+    def fail_load(readiness: redact.RedactionReadiness) -> None:
+        del readiness
+        raise RedactionNotReadyError("model cannot load")
+
+    monkeypatch.setattr(redact, "_load_engine", fail_load)
+
+    with pytest.raises(RedactionNotReadyError, match="model cannot load"):
+        ensure_redaction_ready()
+
+
+def test_ensure_redaction_ready_does_not_read_project_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_redaction: FakeRedactionEnv,
+) -> None:
+    path = tmp_path / "pyproject.toml"
+    path.write_text("{")
+    monkeypatch.setenv("KENSA_MODELS_DIR", str(tmp_path / "models"))
+
+    def fake_download(spec: redact.SpacyModelSpec, destination: Path) -> None:
+        destination.write_bytes(_model_wheel_bytes(spec))
+
+    monkeypatch.setattr(redact, "_download_model_wheel", fake_download)
+    assert ensure_redaction_ready().model == "en_core_web_sm"
+    assert path.read_text() == "{"
 
 
 # --- packaging boundary --------------------------------------------------------------

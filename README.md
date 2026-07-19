@@ -102,8 +102,8 @@ kensa init
 
 For projects that track dependencies with `requirements.txt`, add `kensa`, then run `kensa init`.
 
-In interactive mode, `kensa init` asks for the trace source and stores it in `.kensa/settings.json`.
-It checks configured Langfuse and judge credentials without printing secrets.
+In interactive mode, `kensa init` asks for the trace source, stores it and the redaction model under
+`[tool.kensa]` in `pyproject.toml`, and checks credentials without printing secrets.
 
 ### CLI-only
 
@@ -135,7 +135,7 @@ with `kensa.instrument()` and import the JSONL.
 | `kensa eval` | Run Kensa evals with four pytest workers by default (`--workers 1` for sequential). |
 
 Recommended agent flow: `kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify.
-`kensa-evals` reads `.kensa/settings.json` to choose the evidence path.
+`kensa-evals` reads `[tool.kensa].evidence_source`; `kensa doctor` checks readiness.
 
 Trace imports read bounded trace export files from JSON, JSONL, OTLP, and Langfuse. Connected
 Langfuse imports use metadata from `kensa connect langfuse`. By default, `connect` verifies

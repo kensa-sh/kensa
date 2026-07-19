@@ -31,7 +31,7 @@ Do:
 6. Wrap model calls with Kensa tracing helpers when needed so the persistent smoke eval records
    at least one LLM span.
 7. Run `kensa doctor` and fix harness blockers until it passes. If redaction is not ready, rerun
-   `kensa init`; do not edit readiness settings manually. When blocked on a missing credential,
+   `kensa init`; do not create or edit readiness files manually. When blocked on a missing credential,
    name the exact variable and the dotenv file options in a single ask, then wait.
 
 This skill is complete when `kensa doctor` passes; hand back to `kensa-evals`, which continues

@@ -67,6 +67,9 @@ Redaction is mandatory and fails closed. Missing dependencies or model readiness
 kensa init --redaction-model large
 ```
 
+`[tool.kensa].redaction_model` selects the model. Kensa verifies the wheel checksum on download
+and validates the cache before use. It writes no readiness file.
+
 ## Capturing traces locally
 
 If you do not have an observability provider, instrument your agent and let Kensa record spans directly. The recording helpers are exported from the top-level package:

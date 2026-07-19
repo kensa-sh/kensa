@@ -7,8 +7,6 @@ from pathlib import Path
 DEFAULT_EVAL_PATHS = ("tests/evals",)
 KENSA_DIR = Path(".kensa")
 INSPECT_DIR = KENSA_DIR / "inspect"
-KENSA_SETTINGS_SCHEMA_VERSION = "kensa.settings.v1"
-KENSA_SETTINGS_PATH = KENSA_DIR / "settings.json"
 SMOKE_CASE_ID = "kensa_smoke"
 SMOKE_NODEID_FRAGMENT = "test_kensa_smoke.py::test_kensa_smoke"
 TRACE_IMPORT_LATEST_SCHEMA_VERSION = "kensa.trace_import_latest.v1"
@@ -20,7 +18,8 @@ LOCAL_ENDPOINT_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 SETUP_HANDOFF_PROMPT = (
     "Use the generated kensa-evals skill to continue the Kensa lifecycle for this repo: "
     "setup -> evidence -> inspect -> approval -> generate -> verify. Start with state detection. "
-    "Read .kensa/settings.json for the selected trace source. Detect credentials by name only; "
+    "Read [tool.kensa] in pyproject.toml for the selected trace source. "
+    "Detect credentials by name only; "
     "never read or print API keys or .env files."
 )
 

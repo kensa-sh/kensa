@@ -19,6 +19,7 @@ from rich.console import Console
 
 from kensa import cli, cli_output, cli_traces
 from kensa.cli import main
+from kensa.config import update_project_config
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
 from kensa.traces import ImportResult
@@ -36,8 +37,19 @@ class _FakeLangfuseProviderError(ValueError):
         self.status_code = status_code
 
 
-def _read_settings(root: Path) -> dict[str, Any]:
-    return json.loads((root / ".kensa" / "settings.json").read_text())
+def _read_kensa_config(root: Path) -> dict[str, Any]:
+    data = tomllib.loads((root / "pyproject.toml").read_text())
+    return cast(dict[str, Any], data["tool"]["kensa"])
+
+
+def _git_status(root: Path) -> str:
+    return subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 def test_cli_import_does_not_load_langfuse_sdk() -> None:
@@ -716,7 +728,7 @@ def test_doctor_fails_without_persistent_smoke(
     assert not (tmp_path / ".kensa" / ".doctor_tmp").exists()
 
 
-def test_doctor_passes_and_records_readiness(
+def test_doctor_passes_without_recording_readiness(
     tmp_path: Path,
     monkeypatch,
     fake_redaction,
@@ -725,53 +737,52 @@ def test_doctor_passes_and_records_readiness(
     fake_redaction.make_ready(tmp_path, monkeypatch)
     _write_ready_harness(tmp_path / "tests" / "evals")
     (tmp_path / ".kensa").mkdir(exist_ok=True)
-    settings = _read_settings(tmp_path)
-    settings["init"] = {"evidence_source": "trace_export"}
-    (tmp_path / ".kensa" / "settings.json").write_text(json.dumps(settings))
+    cli._ensure_kensa_gitignore(tmp_path / ".kensa")
+    update_project_config({"evidence_source": "trace_export"}, start=tmp_path)
     (tmp_path / ".kensa" / "readiness.json").write_text("{}")
+    (tmp_path / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    status_before = _git_status(tmp_path)
+    project_before = (tmp_path / "pyproject.toml").read_bytes()
 
     code = main(["doctor"])
 
     assert code == 0
-    settings = _read_settings(tmp_path)
-    assert settings["schema_version"] == "kensa.settings.v1"
-    assert settings["init"]["evidence_source"] == "trace_export"
-    assert settings["harness"]["ready"] is True
-    assert "checked_at" in settings["harness"]
-    assert any("Kensa evals execute" in warning for warning in settings["harness"]["warnings"])
-    assert not (tmp_path / ".kensa" / "readiness.json").exists()
+    assert _read_kensa_config(tmp_path)["evidence_source"] == "trace_export"
+    assert (tmp_path / "pyproject.toml").read_bytes() == project_before
+    assert (tmp_path / ".kensa" / "readiness.json").read_text() == "{}"
+    assert not (tmp_path / ".kensa" / "settings.json").exists()
     assert (tmp_path / "tests" / "evals" / "test_kensa_smoke.py").exists()
     assert not (tmp_path / "tests" / "evals" / ".kensa_doctor_tmp").exists()
+    assert _git_status(tmp_path) == status_before
 
 
-def test_doctor_failure_marks_existing_harness_settings_not_ready(
+def test_doctor_failure_does_not_mutate_legacy_settings_or_project_config(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "local"},
-                "harness": {
-                    "ready": True,
-                    "checked_at": "2026-07-02T00:00:00Z",
-                    "warnings": [],
-                },
-            }
-        )
-    )
+    cli._ensure_kensa_gitignore(tmp_path / ".kensa")
+    legacy = tmp_path / ".kensa" / "settings.json"
+    legacy.write_text('{"legacy":true}\n')
+    update_project_config({"evidence_source": "local"}, start=tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    status_before = _git_status(tmp_path)
+    project_before = (tmp_path / "pyproject.toml").read_bytes()
 
     assert main(["doctor"]) == 1
 
-    settings = _read_settings(tmp_path)
-    assert settings["init"]["evidence_source"] == "local"
-    assert settings["harness"]["ready"] is False
-    assert settings["harness"]["checked_at"] != "2026-07-02T00:00:00Z"
-    assert any(
-        "Missing persistent smoke eval" in warning for warning in settings["harness"]["warnings"]
+    assert _read_kensa_config(tmp_path)["evidence_source"] == "local"
+    assert (tmp_path / "pyproject.toml").read_bytes() == project_before
+    assert legacy.read_text() == '{"legacy":true}\n'
+    assert _git_status(tmp_path) == status_before
+    subprocess.run(
+        ["git", "check-ignore", "--quiet", ".kensa/settings.json"],
+        cwd=tmp_path,
+        check=True,
     )
 
 
@@ -941,7 +952,7 @@ def test_doctor_json_emits_agent_envelope(
     assert payload["schema_version"] == "kensa.cli.v1"
     assert payload["command"] == "doctor"
     assert payload["ok"] is True
-    assert payload["data"]["readiness_recorded"] is True
+    assert "readiness_recorded" not in payload["data"]
     assert payload["data"]["smoke"]["returncode"] == 0
     assert "stdout" in payload["data"]["smoke"]
     assert "stderr" in payload["data"]["smoke"]
@@ -2516,17 +2527,15 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "✓ tests/evals/conftest.py" in output
     assert "✓ tests/evals/test_kensa_smoke.py" in output
     assert "✓ .kensa/.gitignore" in output
-    assert "✓ .kensa/settings.json" in output
+    assert "✓ pyproject.toml" not in output
+    assert ".kensa/settings.json" not in output
     for skill_name in PACKAGED_SKILLS:
         assert f"✓ .agents/skills/{skill_name}/ (1 file)" in output
     assert (tmp_path / ".github" / "workflows" / "kensa.yml").exists()
-    settings = _read_settings(tmp_path)
-    assert settings["schema_version"] == "kensa.settings.v1"
-    assert "evidence_source" not in settings["init"]
-    assert settings["init"]["agents"] == ["codex"]
-    assert settings["harness"]["ready"] is False
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert not (tmp_path / ".kensa" / "settings.json").exists()
     assert not (tmp_path / ".kensa" / "readiness.json").exists()
-    assert (tmp_path / ".kensa" / ".gitignore").read_text() == "*\n!.gitignore\n!settings.json\n"
+    assert (tmp_path / ".kensa" / ".gitignore").read_text() == "*\n!.gitignore\n"
     for skill_name in PACKAGED_SKILLS:
         assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
     assert not (tmp_path / ".claude" / "skills" / "kensa-evals" / "SKILL.md").exists()
@@ -2578,34 +2587,43 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "Kensa lifecycle" in output
 
 
-def test_init_settings_write_preserves_harness_section(tmp_path: Path, monkeypatch) -> None:
+def test_init_without_new_choices_preserves_project_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "local"},
-                "harness": {
-                    "ready": True,
-                    "checked_at": "2026-07-02T00:00:00Z",
-                    "warnings": ["keep me"],
-                },
-            }
-        )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '# keep\n[tool.kensa]\nevidence_source = "local"\nredaction_model = "large"\n'
     )
+    before = pyproject.read_bytes()
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
 
     assert main(["init"]) == 0
 
-    settings = _read_settings(tmp_path)
-    assert settings["init"]["evidence_source"] == "local"
-    assert settings["harness"] == {
-        "ready": True,
-        "checked_at": "2026-07-02T00:00:00Z",
-        "warnings": ["keep me"],
-    }
+    assert pyproject.read_bytes() == before
     assert not (tmp_path / ".kensa" / "readiness.json").exists()
+
+
+def test_init_reports_existing_pyproject_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    monkeypatch.setattr(
+        cli,
+        "_configure_redaction_readiness",
+        lambda steps, source, **kwargs: "ready",
+    )
+
+    assert main(["init", "--trace-source", "local"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Updated files" in output
+    assert "pyproject.toml (updated)" in output
 
 
 @pytest.mark.parametrize("source", ["langfuse", "trace_export", "local"])
@@ -2619,10 +2637,6 @@ def test_init_trace_source_flag_installs_redaction_noninteractively(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings = json.loads(settings_path.read_text())
-    del settings["redaction"]
-    settings_path.write_text(json.dumps(settings))
     dependencies_missing = True
 
     def missing_redaction_dependencies() -> tuple[str, ...]:
@@ -2661,13 +2675,10 @@ def test_init_trace_source_flag_installs_redaction_noninteractively(
             },
         )
     ]
-    settings = _read_settings(tmp_path)
-    assert settings["init"]["evidence_source"] == source
-    assert settings["redaction"] == {
-        "model": "en_core_web_sm",
-        "model_version": "3.8.0",
-        "checksum_verified": True,
-    }
+    project_config = _read_kensa_config(tmp_path)
+    assert project_config["evidence_source"] == source
+    assert project_config["redaction_model"] == "small"
+    assert not (tmp_path / ".kensa" / "settings.json").exists()
 
 
 @pytest.mark.parametrize("source", ["langfuse", "trace_export", "local"])
@@ -2681,10 +2692,6 @@ def test_init_bootstraps_redaction_readiness_when_deps_present(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings = json.loads(settings_path.read_text())
-    del settings["redaction"]
-    settings_path.write_text(json.dumps(settings))
 
     assert main(["init", "--trace-source", source]) == 0
 
@@ -2693,12 +2700,9 @@ def test_init_bootstraps_redaction_readiness_when_deps_present(
     assert "redaction dependencies present" not in output
     assert "redaction model ready" not in output
     assert "readiness recorded" not in output
-    settings = _read_settings(tmp_path)
-    assert settings["redaction"] == {
-        "model": "en_core_web_sm",
-        "model_version": "3.8.0",
-        "checksum_verified": True,
-    }
+    project_config = _read_kensa_config(tmp_path)
+    assert project_config["evidence_source"] == source
+    assert project_config["redaction_model"] == "small"
 
 
 def test_init_agent_all_flag_scaffolds_all_agent_instructions(
@@ -2740,9 +2744,9 @@ def test_init_agent_all_flag_scaffolds_all_agent_instructions(
         assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
         assert (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
         assert (tmp_path / ".cursor" / "skills" / skill_name / "SKILL.md").exists()
-    assert _read_settings(tmp_path)["init"] == {
+    assert _read_kensa_config(tmp_path) == {
         "evidence_source": "local",
-        "agents": ["codex", "claude", "cursor"],
+        "redaction_model": "large",
     }
 
 
@@ -2760,6 +2764,7 @@ def test_init_explicit_auto_agent_requires_supported_detection(
     assert "Could not detect a supported coding agent for --agent auto" in captured.err
     assert not (tmp_path / "tests" / "evals" / "conftest.py").exists()
     assert not (tmp_path / ".kensa" / "settings.json").exists()
+    assert not (tmp_path / "pyproject.toml").exists()
 
 
 def test_init_agent_none_flag_is_rejected(
@@ -2790,73 +2795,70 @@ def test_scaffold_agent_files_explicit_auto_requires_supported_detection(
 @pytest.mark.parametrize(
     ("source", "message"),
     [
-        ("{", "invalid Kensa settings JSON"),
-        ("[]", "Kensa settings must be a JSON object"),
-        (
-            json.dumps(
-                {
-                    "schema_version": "kensa.settings.v1",
-                    "init": {"evidence_source": "bad"},
-                }
-            ),
-            "invalid Kensa settings",
-        ),
-        (
-            json.dumps({"init": {"evidence_source": "langfuse"}}),
-            "invalid Kensa settings",
-        ),
-        (
-            json.dumps(
-                {
-                    "schema_version": "kensa.settings.v1",
-                    "init": {"evidence_source": "langfuse"},
-                    "extra": True,
-                }
-            ),
-            "invalid Kensa settings",
-        ),
-        (
-            json.dumps(
-                {
-                    "schema_version": "kensa.settings.v1",
-                    "init": {"evidence_source": "langfuse", "extra": True},
-                }
-            ),
-            "invalid Kensa settings",
-        ),
+        ("{", "invalid TOML"),
+        ('tool = "not-a-table"\n', "must be a table"),
+        ('[tool]\nkensa = "not-a-table"\n', "must be a table"),
+        ('[tool.kensa]\nevidence_source = "bad"\n', "invalid Kensa configuration"),
+        ('[tool.kensa]\nredaction_model = "medium"\n', "invalid Kensa configuration"),
     ],
 )
-def test_read_settings_rejects_invalid_settings(
+def test_read_project_config_rejects_invalid_configuration(
     source: str,
     message: str,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text(source)
+    (tmp_path / "pyproject.toml").write_text(source)
 
     with pytest.raises(cli.click.ClickException, match=message):
-        cli._read_settings()
+        cli._read_project_config()
 
 
 @pytest.mark.parametrize("command", [["init"], ["doctor"]])
-def test_commands_report_invalid_settings_without_traceback(
+def test_commands_report_invalid_project_config_without_traceback(
     command: list[str],
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text("{")
+    (tmp_path / "pyproject.toml").write_text("{")
 
     assert main(command) == 1
 
     captured = capsys.readouterr()
     combined_output = captured.out + captured.err
-    assert "invalid Kensa settings JSON" in combined_output
+    assert "invalid TOML" in combined_output
     assert "Traceback" not in combined_output
+
+
+def test_record_project_choices_reports_config_write_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_update(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise cli.kensa_config.KensaConfigError("could not update project config")
+
+    monkeypatch.setattr(cli.kensa_config, "update_project_config", fail_update)
+
+    with pytest.raises(click.ClickException, match="could not update project config"):
+        cli._record_project_choices("local", "small")
+
+
+def test_ensure_kensa_gitignore_removes_legacy_exceptions(tmp_path: Path) -> None:
+    kensa_dir = tmp_path / ".kensa"
+    kensa_dir.mkdir()
+    gitignore = kensa_dir / ".gitignore"
+    gitignore.write_text(
+        "*\n!.gitignore\n!settings.json\n!custom.json\nreadiness.json\nresults/\ntraces/\n# keep\n"
+    )
+
+    assert cli._ensure_kensa_gitignore(kensa_dir) is False
+    assert gitignore.read_text() == "*\n!.gitignore\n!custom.json\n# keep\n"
 
 
 def test_init_overwrites_stale_generated_smoke_and_conftest(
@@ -2920,7 +2922,7 @@ def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
     assert "Do not write pytest files" in skill_texts["kensa-inspect"]
     assert "Normally invoked by `kensa-evals`" in skill_texts["kensa-inspect"]
     assert "state-aware Kensa lifecycle" in skill_texts["kensa-evals"]
-    assert ".kensa/settings.json" in skill_texts["kensa-evals"]
+    assert "[tool.kensa]" in skill_texts["kensa-evals"]
     assert "`langfuse`, `trace_export`, and `local`" in skill_texts["kensa-evals"]
     assert "source-specific instruction" not in skill_texts["kensa-evals"]
     assert "kensa import --from langfuse\n" in skill_texts["kensa-evals"]
@@ -3231,7 +3233,7 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     assert "Prefer to do it yourself?" not in output
     assert "Copyable setup prompt" not in output
     assert "└  Setup files ready" in output
-    assert _read_settings(tmp_path)["init"]["evidence_source"] == "langfuse"
+    assert _read_kensa_config(tmp_path)["evidence_source"] == "langfuse"
     for skill_name in PACKAGED_SKILLS:
         assert (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
         assert not (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
@@ -3257,7 +3259,7 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
 
     output = capsys.readouterr().out
     assert "installed Other instructions" in output
-    assert _read_settings(tmp_path)["init"]["evidence_source"] == "langfuse"
+    assert _read_kensa_config(tmp_path)["evidence_source"] == "langfuse"
     for skill_name in PACKAGED_SKILLS:
         assert (tmp_path / ".agents" / "skills" / skill_name / "SKILL.md").exists()
         assert not (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
@@ -3295,7 +3297,7 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     )
     assert "Copyable setup prompt" not in output
     assert "Prefer to do it yourself?" not in output
-    assert _read_settings(tmp_path)["init"]["evidence_source"] == "langfuse"
+    assert _read_kensa_config(tmp_path)["evidence_source"] == "langfuse"
     for skill_name in PACKAGED_SKILLS:
         assert (tmp_path / ".claude" / "skills" / skill_name / "SKILL.md").exists()
 
@@ -3324,7 +3326,7 @@ def test_init_explicit_auto_agent_summary_uses_resolved_agent(
     output = capsys.readouterr().out
     assert "installed Codex instructions" in output
     assert "installed auto instructions" not in output
-    assert _read_settings(tmp_path)["init"]["agents"] == ["codex"]
+    assert "agents" not in _read_kensa_config(tmp_path)
 
 
 def test_select_agent_instruction_interactive_without_steps_uses_label_menu(
@@ -4284,6 +4286,22 @@ def test_record_pyproject_dotenv_updates_existing_pyproject(
     }
 
 
+def test_record_pyproject_dotenv_reports_config_write_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_update(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise cli.kensa_config.KensaConfigError("could not update project config")
+
+    monkeypatch.setattr(cli.kensa_config, "update_project_config", fail_update)
+
+    with pytest.raises(click.ClickException, match="could not update project config"):
+        cli._record_pyproject_dotenv(tmp_path / ".env.local")
+
+
 def test_dotenv_has_key_ignores_non_key_lines(tmp_path: Path) -> None:
     dotenv = tmp_path / ".env.local"
     dotenv.write_text("\n# comment\nnot-a-key\nOTHER='yes'\n")
@@ -4403,12 +4421,35 @@ def test_print_init_added_files_empty(capsys) -> None:
     assert "No new files added." in capsys.readouterr().out
 
 
+def test_print_init_file_changes_with_interactive_steps() -> None:
+    class FakeSteps:
+        def __init__(self) -> None:
+            self.steps: list[str] = []
+            self.items: list[str] = []
+
+        def step(self, text: str) -> None:
+            self.steps.append(text)
+
+        def item(self, text: str, *, ok: bool = True) -> None:
+            assert ok is True
+            self.items.append(text)
+
+    fake_steps = FakeSteps()
+    steps = cast(cli._Steps, fake_steps)
+
+    cli._print_init_added_files([], steps=steps)
+    cli._print_init_added_files([], updated_paths=[Path("pyproject.toml")], steps=steps)
+
+    assert fake_steps.steps == ["Created", "Updated"]
+    assert fake_steps.items == ["No new files added.", "pyproject.toml (updated)"]
+
+
 def test_setup_pr_step_uses_gh_when_available(monkeypatch) -> None:
     monkeypatch.setattr(cli.shutil, "which", lambda command: "/bin/gh" if command == "gh" else None)
 
     assert cli._setup_pr_step() == "Open the setup PR with gh pr create --fill."
     steps = cli._setup_handoff_next_steps()
-    assert steps[3] == "Let kensa-evals read .kensa/settings.json for the selected trace source."
+    assert steps[3] == "Let kensa-evals read [tool.kensa] for the selected trace source."
     assert steps[-1] == "Open the setup PR with gh pr create --fill."
 
 
@@ -4457,7 +4498,7 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
     assert "Selected trace source:" not in output
     assert "Copyable setup prompt" not in output
     assert "Setup is complete when" not in output
-    assert _read_settings(tmp_path)["init"]["evidence_source"] == expected_source
+    assert _read_kensa_config(tmp_path)["evidence_source"] == expected_source
 
 
 def test_setup_handoff_prompt_is_generic_and_settings_driven() -> None:
@@ -4467,7 +4508,7 @@ def test_setup_handoff_prompt_is_generic_and_settings_driven() -> None:
     assert "Use the generated kensa-evals skill" in prompt
     assert "setup -> evidence -> inspect -> approval -> generate -> verify" in prompt
     assert "Start with state detection" in prompt
-    assert "Read .kensa/settings.json for the selected trace source" in prompt
+    assert "Read [tool.kensa] in pyproject.toml for the selected trace source" in prompt
     assert "Detect credentials by name only" in prompt
     assert "never read or print API keys or .env files" in prompt
     assert "kensa-setup" not in prompt
@@ -4493,7 +4534,7 @@ def test_init_noninteractive_prints_generic_trace_source_handoff(
     assert "Where should Kensa get traces from?" not in output
     assert "Copyable setup prompt" in output
     assert "setup -> evidence -> inspect -> approval -> generate -> verify" in output
-    assert ".kensa/settings.json" in output
+    assert "[tool.kensa]" in output
     assert "kensa connect langfuse" not in output
     assert "kensa import --from langfuse --limit 50" not in output
     assert "kensa.instrument()" not in output
@@ -4506,7 +4547,8 @@ def test_init_noninteractive_prints_generic_trace_source_handoff(
     assert "kensa eval" not in output
     assert "Use the generated kensa-evals skill" in cli.SETUP_HANDOFF_PROMPT
     assert "source-specific instruction" not in cli.SETUP_HANDOFF_PROMPT
-    assert "evidence_source" not in _read_settings(tmp_path)["init"]
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert "Read [tool.kensa] in pyproject.toml for the selected trace source." in output
     assert (
         "kensa-evals`: setup -> evidence -> inspect -> approval -> generate -> verify"
         in (REPO_ROOT / "README.md").read_text()
@@ -4520,7 +4562,7 @@ def test_init_noninteractive_prints_generic_trace_source_handoff(
         "3. Follow the lifecycle: setup -> evidence -> inspect -> approval -> generate -> verify."
         in output
     )
-    assert "4. Let kensa-evals read .kensa/settings.json" in output
+    assert "4. Let kensa-evals read [tool.kensa]" in output
     assert "5. Commit the harness changes; run gh pr create --fill" in output
     assert "when gh auth is" in output
     assert "gh pr create" in output
@@ -4798,9 +4840,7 @@ def test_doctor_reports_redaction_readiness_and_unsafe_artifacts(
         lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
     )
     fake_redaction.make_ready(tmp_path, monkeypatch)
-    settings_payload = json.loads((tmp_path / ".kensa" / "settings.json").read_text())
-    settings_payload["init"] = {"evidence_source": "langfuse"}
-    (tmp_path / ".kensa" / "settings.json").write_text(json.dumps(settings_payload))
+    update_project_config({"evidence_source": "langfuse"}, start=tmp_path)
     unsafe_artifact = tmp_path / ".kensa" / "traces" / "imports" / "old.jsonl"
     unsafe_artifact.parent.mkdir(parents=True)
     unsafe_artifact.write_text("{}\n")
@@ -4856,11 +4896,7 @@ def test_doctor_reports_missing_redaction_readiness_first(
         "_run_persistent_smoke",
         lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
     )
-    settings_path = tmp_path / ".kensa" / "settings.json"
-    settings_path.parent.mkdir(parents=True)
-    settings_path.write_text(
-        json.dumps({"schema_version": "kensa.settings.v1", "init": {"evidence_source": "local"}})
-    )
+    update_project_config({"evidence_source": "local"}, start=tmp_path)
     monkeypatch.setattr(
         cli.redact,
         "missing_redaction_dependencies",
@@ -4885,18 +4921,16 @@ def test_doctor_reports_missing_redaction_readiness_first(
     )
 
 
-def test_doctor_handles_unreadable_redaction_settings(
+def test_doctor_handles_redaction_validation_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    def fail_readiness(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+    def fail_redactor() -> None:
         raise cli.redact.RedactionNotReadyError("invalid readiness")
 
-    monkeypatch.setattr(cli.redact, "assert_redaction_ready", fail_readiness)
-    monkeypatch.setattr(cli.redact, "read_redaction_readiness", fail_readiness)
+    monkeypatch.setattr(cli.redact, "Redactor", fail_redactor)
 
     report = cli._doctor_redaction_report()
 
@@ -5056,15 +5090,7 @@ def test_init_large_redaction_model_uses_persisted_evidence_source(
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "local"},
-            }
-        )
-    )
+    update_project_config({"evidence_source": "local"}, start=tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     calls: list[tuple[Any, str, bool]] = []
 
@@ -5101,19 +5127,9 @@ def test_init_trace_source_rerun_preserves_configured_large_model(
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".kensa").mkdir()
-    (tmp_path / ".kensa" / "settings.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "kensa.settings.v1",
-                "init": {"evidence_source": "local"},
-                "redaction": {
-                    "model": "en_core_web_lg",
-                    "model_version": "3.8.0",
-                    "checksum_verified": True,
-                },
-            }
-        )
+    update_project_config(
+        {"evidence_source": "local", "redaction_model": "large"},
+        start=tmp_path,
     )
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
     calls: list[tuple[Any, str, bool]] = []
