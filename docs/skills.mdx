@@ -38,7 +38,7 @@ setup  →  evidence  →  inspect  →  approval  →  generate  →  verify
 
 Its checklist:
 
-1. **Wire the harness** - connect `tests/evals/conftest.py::kensa_run(case)` to the real agent, then run `kensa doctor` and resolve any warnings.
+1. **Wire the harness** - make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent`, then run `kensa doctor` and resolve any warnings.
 2. **Import evidence** - `kensa import --from <provider>` to pull bounded trace evidence.
 3. **Inspect** - mine imports into a YAML eval-idea queue under `.kensa/inspect/`, read with `kensa inspect list`.
 4. **Approve** - mark the ideas worth keeping `status: approved`, then validate with `kensa inspect lint`.

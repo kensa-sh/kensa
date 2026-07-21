@@ -7,42 +7,85 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from kensa import KensaTimeoutError, record_span
+from kensa.conversation import ConversationResult, Termination
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
+
+
+def test_judge_receives_conversation_result_as_json() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Provider:
+        def judge(self, **kwargs: Any) -> JudgeResult:
+            calls.append(kwargs)
+            return JudgeResult(True, "structured")
+
+    class TypedOutput(BaseModel):
+        status: str
+
+    set_judge_provider(Provider())
+    try:
+        result = judge(
+            ConversationResult(
+                messages=(
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "done"},
+                ),
+                output=TypedOutput(status="resolved"),
+                termination=Termination(source="agent", reason="resolved"),
+            ),
+            "must resolve",
+        )
+    finally:
+        set_judge_provider(None)
+
+    assert result.passed
+    assert calls[0]["output"] == {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "output": {"status": "resolved"},
+        "termination": {"source": "agent", "reason": "resolved"},
+    }
 
 
 def test_trace_spans_are_available_immediately_after_case_run(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
+from kensa.pytest import ConversationResponse
 from kensa.tracing import record_tool_call
 
 
 @pytest.fixture
 def kensa_run():
-    def _run(case):
-        with record_tool_call("lookup_customer"):
-            pass
-        with record_tool_call("lookup_customer"):
-            pass
-        return {"ok": True}
-    return _run
+    class Agent:
+        def respond(self, messages):
+            with record_tool_call("lookup_customer"):
+                pass
+            with record_tool_call("lookup_customer"):
+                pass
+            return ConversationResponse(output={"ok": True})
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
-from kensa.pytest import kensa_case
+from kensa.pytest import ConversationResponse, kensa_case
 
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run, kensa_trace):
     output = case.run(kensa_run)
-    assert output == {"ok": True}
+    assert output.output == {"ok": True}
     assert not hasattr(kensa_trace, "called")
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["missing"])
@@ -63,24 +106,28 @@ def test_force_flush_failure_exposes_incomplete_trace_state(pytester: pytest.Pyt
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
+from kensa.pytest import ConversationResponse
 from opentelemetry import trace
 from kensa.tracing import record_tool_call
 
 
 @pytest.fixture
 def kensa_run(monkeypatch):
-    def _run(case):
-        provider = trace.get_tracer_provider()
-        monkeypatch.setattr(provider, "force_flush", lambda timeout_millis=None: False)
-        with record_tool_call("lookup_customer"):
-            pass
-        return "ok"
-    return _run
+    class Agent:
+        def respond(self, messages):
+            provider = trace.get_tracer_provider()
+            monkeypatch.setattr(provider, "force_flush", lambda timeout_millis=None: False)
+            with record_tool_call("lookup_customer"):
+                pass
+            return ConversationResponse(content="ok")
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
+from kensa.pytest import ConversationResponse
 from kensa.pytest import kensa_case
 
 
@@ -102,23 +149,27 @@ def test_direct_kensa_run_does_not_record_output_artifact(pytester: pytest.Pytes
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: {"ok": True}
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
-from kensa.pytest import kensa_case
+from kensa.pytest import ConversationResponse, kensa_case
 
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run):
-    assert kensa_run(case) == {"ok": True}
+    assert kensa_run.respond(()) == ConversationResponse(output={"ok": True})
 """
     )
 
@@ -138,16 +189,21 @@ def test_judge_result_can_be_asserted_and_is_recorded(
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: "safe"
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(content="safe")
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
+from kensa.pytest import ConversationResponse
 from kensa.pytest import judge, kensa_case
 
 
@@ -176,16 +232,21 @@ def test_judge_failure_reasoning_appears_in_assertion_output(
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: "unsafe"
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(content="unsafe")
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
+from kensa.pytest import ConversationResponse
 from kensa.pytest import judge, kensa_case
 
 
@@ -207,16 +268,21 @@ def test_no_judge_returns_explicit_error_result(pytester: pytest.Pytester) -> No
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: "safe"
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(content="safe")
+    return Agent()
 """
     )
     pytester.makepyfile(
         test_eval="""
 import pytest
+from kensa.pytest import ConversationResponse
 from kensa.pytest import judge, kensa_case
 
 
@@ -243,11 +309,15 @@ def test_judge_provider_errors_are_explicit_results(
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: "safe"
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(content="safe")
+    return Agent()
 """
     )
     pytester.makepyfile(

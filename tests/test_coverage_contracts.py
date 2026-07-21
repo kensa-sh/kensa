@@ -15,6 +15,7 @@ import pytest
 
 from kensa import cli, cli_output, cli_traces
 from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
+from kensa.conversation import ConversationError, ConversationResponse
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import DEFAULT_LLM_MODEL, LLMResult
 from kensa.pytest_plugin import (
@@ -74,20 +75,31 @@ def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
 
     case = kensa_case(id="run", input="hello")
     assert repr(case) == "run"
-    assert case.run(lambda c: {"seen": c.input}) == {"seen": "hello"}
-    with pytest.raises(KensaCaseError, match="JSON-serializable"):
-        case.run(lambda c: {c.id})
+
+    class Agent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse(output={"seen": case.input})
+
+    assert case.run(Agent()).output == {"seen": "hello"}
+
+    class InvalidAgent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse(output={case.id})
+
+    with pytest.raises(ConversationError, match="JSON-serializable"):
+        case.run(InvalidAgent())
 
 
 def test_case_uninstrumented_async_run_paths() -> None:
     async def _run() -> str:
         case = kensa_case(id="async", input="hello")
 
-        async def _agent(c):
-            return {"seen": c.input}
+        class Agent:
+            async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+                return ConversationResponse(output={"seen": case.input})
 
-        result = await case.run(_agent)
-        return cast(dict[str, str], result)["seen"]
+        result = await case.run(Agent())
+        return cast(dict[str, str], result.output)["seen"]
 
     assert asyncio.run(_run()) == "hello"
 
@@ -127,13 +139,19 @@ def test_record_llm_call_counts_toward_kensa_trace_llm_turns() -> None:
         no_judge=False,
     )
 
-    def kensa_run(case: KensaCase) -> dict[str, str]:
-        with record_llm_call(provider="test-provider", model="test-model"):
-            return {"seen": str(case.input)}
+    case = kensa_case(id="llm_case", input="hello")
 
-    assert runtime.run_case(kensa_case(id="llm_case", input="hello"), kensa_run) == {
-        "seen": "hello"
-    }
+    class Agent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            with record_llm_call(provider="test-provider", model="test-model"):
+                return ConversationResponse(output={"seen": str(case.input)})
+
+    token = set_current_runtime(runtime)
+    try:
+        result = case.run(Agent())
+    finally:
+        reset_current_runtime(token)
+    assert result.output == {"seen": "hello"}
     assert runtime.trace.llm_turns == 1
     llm_spans = [span for span in runtime.trace.spans if span.kind == "llm"]
     assert len(llm_spans) == 1
@@ -753,7 +771,7 @@ def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -
     assert current_runtime() is None
 
     with pytest.raises(RuntimeError, match="sync"):
-        runtime.run_case(case, lambda c: (_ for _ in ()).throw(RuntimeError("sync")))
+        runtime.run_case(case, lambda: (_ for _ in ()).throw(RuntimeError("sync")))
     runtime2 = KensaTrialRuntime(
         trial=KensaTrial(1, 1),
         nodeid="n",
@@ -762,7 +780,7 @@ def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -
         no_judge=False,
     )
 
-    async def _bad(c):
+    async def _bad():
         raise RuntimeError("async")
 
     with pytest.raises(RuntimeError, match="async"):

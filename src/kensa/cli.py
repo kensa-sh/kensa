@@ -114,8 +114,9 @@ _AGENT_SKILL_HELP_TEXT = (
     f"Kensa will install {len(_PACKAGED_SKILLS)} skill files for your local coding agent."
 )
 _ENV_SAFETY_WARNING = (
-    "Kensa evals execute your repository's tests/evals/conftest.py::kensa_run(case) "
-    "code. Use local, staging, mocked, or sandboxed dependencies."
+    "Kensa evals execute the case-aware agent from "
+    "tests/evals/conftest.py::kensa_run(case). Use local, staging, mocked, or "
+    "sandboxed dependencies."
 )
 _CONTROL_PATH_OPTION = "--kensa-control-path"
 _CONTROL_PATH_OVERRIDE_UNSUPPORTED = (
@@ -1091,7 +1092,8 @@ def _eval_problem(exit_code: int, paths: list[str]) -> _EvalProblem:
             summary="Kensa eval found no eval tests.",
             errors=[f"No Kensa eval tests were collected from {path_text}."],
             next_steps=[
-                "Run kensa doctor to verify tests/evals/conftest.py::kensa_run(case).",
+                "Run kensa doctor to verify the case-aware agent from "
+                "tests/evals/conftest.py::kensa_run(case).",
                 _EVALS_NEXT_STEP,
             ],
         )
@@ -1591,8 +1593,9 @@ def _doctor_result(args: Any) -> dict[str, Any]:
                 "Persistent smoke test failed; tests/evals/test_kensa_smoke.py did not pass."
             )
             next_steps.append(
-                "Implement tests/evals/conftest.py::kensa_run, wrap the real model/provider "
-                "call with kensa.record_llm_call(...), and rerun kensa doctor."
+                "Implement the case-aware agent returned by "
+                "tests/evals/conftest.py::kensa_run, wrap the real model/provider call "
+                "with kensa.record_llm_call(...), and rerun kensa doctor."
             )
         if smoke.stdout:
             warnings.append(smoke.stdout.strip())

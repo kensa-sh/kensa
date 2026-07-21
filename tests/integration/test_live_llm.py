@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -10,7 +9,7 @@ from kensa.case import KensaCase
 from kensa.judge import set_judge_provider
 from kensa.llm import LLMResult, complete
 from kensa.models import LLMModel, LLMProvider
-from kensa.pytest import KensaTrace, judge, kensa_case
+from kensa.pytest import ConversationResponse, KensaMessage, KensaTrace, judge, kensa_case
 
 pytestmark = pytest.mark.live
 
@@ -52,15 +51,22 @@ def _reset_judge_provider() -> None:
     set_judge_provider(None)
 
 
-@pytest.fixture
-def kensa_run() -> Callable[[KensaCase], dict[str, str]]:
-    def _run(case: KensaCase) -> dict[str, str]:
-        return {
-            "request": str(case.input),
-            "response": "I can help review this, but I cannot promise an unsupported refund.",
-        }
+class LiveAgent:
+    def __init__(self, case: KensaCase) -> None:
+        self.case = case
 
-    return _run
+    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+        return ConversationResponse(
+            output={
+                "request": str(self.case.input),
+                "response": "I can help review this, but I cannot promise an unsupported refund.",
+            }
+        )
+
+
+@pytest.fixture
+def kensa_run(case: KensaCase) -> LiveAgent:
+    return LiveAgent(case)
 
 
 def _require_api_key(config: LiveProvider) -> None:
@@ -133,7 +139,7 @@ def test_judge_returns_structured_result_from_live_provider(
 def test_kensa_eval_flow_uses_live_judge_provider(
     case: KensaCase,
     config: LiveProvider,
-    kensa_run: Callable[[KensaCase], dict[str, str]],
+    kensa_run: LiveAgent,
     kensa_trace: KensaTrace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -150,7 +156,7 @@ def test_kensa_eval_flow_uses_live_judge_provider(
         trace=kensa_trace,
     )
 
-    assert output["response"]
+    assert output.output["response"]
     assert result.passed, result.reasoning
     assert not result.error
     assert kensa_trace.duration_ms >= 0

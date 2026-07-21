@@ -58,7 +58,52 @@ def complete(
 ) -> LLMResult:
     """Run a single chat-style LLM completion through Any LLM."""
 
-    response_format = _validated_response_format(response_format)
+    response_format, config, kwargs = _completion_args(
+        messages,
+        model=model,
+        provider=provider,
+        temperature=temperature,
+        response_format=response_format,
+        timeout_s=timeout_s,
+    )
+    response = _completion(**kwargs)
+    return _completion_result(response, config, response_format, metadata)
+
+
+async def acomplete(
+    messages: list[dict[str, Any]],
+    *,
+    model: LLMModelInput = None,
+    provider: LLMProviderInput = None,
+    temperature: float | None = 0.0,
+    response_format: StructuredResponseFormat | None = None,
+    metadata: dict[str, Any] | None = None,
+    timeout_s: float | None = None,
+) -> LLMResult:
+    """Run one chat completion through Any LLM's native async API."""
+
+    response_format, config, kwargs = _completion_args(
+        messages,
+        model=model,
+        provider=provider,
+        temperature=temperature,
+        response_format=response_format,
+        timeout_s=timeout_s,
+    )
+    response = await _acompletion(**kwargs)
+    return _completion_result(response, config, response_format, metadata)
+
+
+def _completion_args(
+    messages: list[dict[str, Any]],
+    *,
+    model: LLMModelInput,
+    provider: LLMProviderInput,
+    temperature: float | None,
+    response_format: StructuredResponseFormat | None,
+    timeout_s: float | None,
+) -> tuple[StructuredResponseFormat | None, LLMConfig, dict[str, Any]]:
+    validated_format = _validated_response_format(response_format)
     config = resolve_llm_config(model=model, provider=provider)
     kwargs: dict[str, Any] = {
         "model": config.model.value,
@@ -67,12 +112,19 @@ def complete(
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
-    if response_format is not None:
-        kwargs["response_format"] = response_format
+    if validated_format is not None:
+        kwargs["response_format"] = validated_format
     if timeout_s is not None:
         kwargs["client_args"] = {"timeout": timeout_s, "max_retries": 0}
+    return validated_format, config, kwargs
 
-    response = _completion(**kwargs)
+
+def _completion_result(
+    response: Any,
+    config: LLMConfig,
+    response_format: StructuredResponseFormat | None,
+    metadata: dict[str, Any] | None,
+) -> LLMResult:
     message = _chat_message(response)
     input_tokens, output_tokens, total_tokens = _extract_usage(response)
     return LLMResult(
@@ -134,6 +186,21 @@ def _completion(**kwargs: Any) -> Any:
         ) from exc
     try:
         return completion(**kwargs)
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise KensaTimeoutError(str(exc) or "LLM completion timed out") from exc
+        raise
+
+
+async def _acompletion(**kwargs: Any) -> Any:
+    try:
+        from any_llm import acompletion
+    except ImportError as exc:
+        raise LLMProviderError(
+            "Any LLM is not installed. Install Kensa with its runtime dependencies."
+        ) from exc
+    try:
+        return await acompletion(**kwargs)
     except Exception as exc:
         if _is_timeout_error(exc):
             raise KensaTimeoutError(str(exc) or "LLM completion timed out") from exc
@@ -240,6 +307,7 @@ __all__ = [
     "LLMProviderError",
     "LLMProviderInput",
     "LLMResult",
+    "acomplete",
     "complete",
     "resolve_llm_config",
     "validate_structured_result",

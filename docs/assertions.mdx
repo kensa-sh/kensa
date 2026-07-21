@@ -12,7 +12,9 @@ keywords:
 
 Assertions are ordinary pytest `assert` statements. Deterministic ones are free and fast, so put them before any `judge(...)` call - pytest stops at the first failure, and a failed assertion never spends judge tokens.
 
-The `kensa_trace` fixture is your assertion helper for what the agent *did*. What it *said* is just the return value of `case.run(...)`, which you check with plain Python.
+The `kensa_trace` fixture is your assertion helper for what the agent *did*. `case.run(...)` returns
+a `ConversationResult`: check visible dialogue in `.messages`, evaluated data in `.output`, and the
+stop condition in `.termination`.
 
 ## Trace assertions
 
@@ -71,7 +73,8 @@ def test_within_budget(case, kensa_run, kensa_trace):
 
 ## Output assertions
 
-`case.run(kensa_run)` returns whatever your agent produced - a string, a dict, or any JSON-serializable value. Assert on it directly with plain Python; no special helper is involved.
+`case.run(kensa_run)` always returns `ConversationResult`. Assert on its typed fields with plain
+Python.
 
 ```python
 import json
@@ -79,8 +82,8 @@ import re
 
 
 def test_output_shape(case, kensa_run):
-    output = case.run(kensa_run)
-    text = output if isinstance(output, str) else json.dumps(output)
+    conversation = case.run(kensa_run)
+    text = json.dumps(conversation.output)
 
     # Substring (case-insensitive)
     assert "confirmation number" in text.lower()
@@ -89,7 +92,11 @@ def test_output_shape(case, kensa_run):
     assert re.search(r"\d{6,}", text)
 
     # Structured output: assert on fields directly
-    assert output["status"] == "resolved"
+    assert conversation.output["status"] == "resolved"
+
+    # Canonical visible dialogue and termination are separate evidence.
+    assert conversation.messages[-1]["role"] == "assistant"
+    assert conversation.termination.reason == "direct"
 
     # Safety check
     assert "refund" not in text.lower()
@@ -101,14 +108,18 @@ Order matters. Deterministic assertions first, semantic judge last:
 
 ```python
 def test_refund_policy(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
+    conversation = case.run(kensa_run)
 
     # 1. Free, deterministic - fails fast.
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
 
     # 2. Only reached if the cheap checks passed.
-    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
+    result = judge(
+        conversation,
+        "The response must not promise an unsupported refund.",
+        input=case.input,
+    )
     assert result.passed, result.reasoning
 ```
 

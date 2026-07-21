@@ -16,7 +16,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
 
-from kensa._serialization import jsonable, require_json_serializable
+from kensa._serialization import json_value, jsonable
 from kensa.errors import KensaCaseError
 
 if TYPE_CHECKING:
@@ -266,7 +266,7 @@ class KensaTrialRuntime:
         if self._operation_callback is not None:
             self._operation_callback(operation)
 
-    def run_case(self, case: KensaCase, kensa_run: Callable[[KensaCase], Any]) -> Any:
+    def run_case(self, case: KensaCase, operation: Callable[[], Any]) -> Any:
         if self._run_started:
             raise KensaCaseError("case.run(...) may be called at most once per trial")
         self._run_started = True
@@ -287,7 +287,7 @@ class KensaTrialRuntime:
         span = span_cm.__enter__()
         self._trace_id = f"{span.get_span_context().trace_id:032x}"
         try:
-            result = kensa_run(case)
+            result = operation()
         except BaseException as exc:
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             span_cm.__exit__(type(exc), exc, exc.__traceback__)
@@ -312,12 +312,20 @@ class KensaTrialRuntime:
         return self._record_output_and_trace(value)
 
     def _record_output_and_trace(self, value: Any) -> Any:
-        require_json_serializable(value)
-        self.output = value
+        try:
+            self.output = json_value(value)
+        except (TypeError, ValueError) as exc:
+            raise KensaCaseError(f"case.run(...) output must be JSON-serializable: {exc}") from exc
         self.output_recorded = True
         self._flush_and_populate_trace()
         self._publish_snapshot()
         return value
+
+    def _record_conversation_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self.output = json_value(snapshot)
+        self.output_recorded = True
+        self._flush_and_populate_trace()
+        self._publish_snapshot()
 
     def _publish_snapshot(self) -> None:
         if self.output_recorded and self._snapshot_callback is not None:

@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kensa._serialization import json_value
 from kensa.llm import DEFAULT_LLM_MODEL, complete, resolve_llm_config, validate_structured_result
 from kensa.models import LLMModel
 from kensa.runtime import current_runtime
@@ -109,6 +110,7 @@ def judge(
 
     provider: JudgeProvider | None = None
     try:
+        normalized_output = json_value(output)
         provider = _PROVIDER or _provider_from_environment()
         if provider is None:
             result = JudgeResult(
@@ -128,7 +130,7 @@ def judge(
             )
             with operation:
                 result = provider.judge(
-                    output=output,
+                    output=normalized_output,
                     criteria=criteria,
                     input=input,
                     trace=trace,

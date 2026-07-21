@@ -29,13 +29,17 @@ from kensa.pytest import judge, kensa_case
     ],
 )
 def test_refund_policy(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
+    conversation = case.run(kensa_run)
 
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
 
-    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
-    assert result.passed, result.reasoning
+    verdict = judge(
+        conversation,
+        "The response must not promise an unsupported refund.",
+        input=case.input,
+    )
+    assert verdict.passed, verdict.reasoning
 ```
 
 Nothing in this file is special: it is a pytest test that any CI already running your Python suite can run.

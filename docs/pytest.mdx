@@ -30,12 +30,16 @@ from kensa.pytest import judge, kensa_case
     [kensa_case(id="refund_without_order_history", input="Refund my last charge. No order ID.")],
 )
 def test_refund_policy(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
+    conversation = case.run(kensa_run)
 
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
 
-    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
+    result = judge(
+        conversation,
+        "The response must not promise an unsupported refund.",
+        input=case.input,
+    )
     assert result.passed, result.reasoning
 ```
 
@@ -48,31 +52,43 @@ Three pieces do the work: the `kensa` marker sets trials, the `case` parameter c
 ```python
 import pytest
 
+from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
 from kensa.tracing import record_tool_call
 
 
-@pytest.fixture
-def kensa_run():
-    def _run(case):
+class RefundAgent:
+    def __init__(self, case: KensaCase) -> None:
+        self.case = case
+
+    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
         with record_tool_call("lookup_customer"):
-            text = str(case.input).lower()
+            text = str(self.case.input).lower()
             found_order = "order #" in text or "order id:" in text
         if found_order:
             with record_tool_call("issue_refund"):
-                return {"message": "Refund issued."}
-        return {"message": "I need order history before issuing a refund."}
+                return ConversationResponse(
+                    content="Refund issued.",
+                    output={"status": "refunded"},
+                )
+        return ConversationResponse(content="I need order history before issuing a refund.")
 
-    return _run
+
+@pytest.fixture
+def kensa_run(case: KensaCase) -> RefundAgent:
+    return RefundAgent(case)
 ```
 
-`case.run(kensa_run)` invokes this with the current case, records a trace, and returns the output. `kensa doctor` inspects `conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
+The fixture creates one case-aware agent instance per trial. `case.run(kensa_run)` invokes
+`respond(messages)` once in direct mode and returns `ConversationResult`. Visible `content` becomes
+an assistant message; `output` is the separately evaluated value. `kensa doctor` inspects
+`conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
 
 ## Fixtures and marker
 
 | Name | Provided by | Description |
 |---|---|---|
 | `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
-| `kensa_run` | you (`conftest.py`) | Callable that runs a case through your agent |
+| `kensa_run` | you (`conftest.py`) | One case-aware `ConversationAgent` instance per trial |
 | `kensa_trace` | Kensa | The trace collected for the current trial |
 | `@pytest.mark.kensa(trials=N, timeout_s=SECONDS)` | Kensa | Run each case `N` times with an optional hard timeout under `kensa eval` |
 
@@ -88,9 +104,36 @@ import pytest
 @pytest.mark.kensa(trials=3)
 @pytest.mark.parametrize("case", [kensa_case(id="draft_no_send", input="...")])
 async def test_sdr_draft(case, kensa_run, async_client):
-    output = await case.run(kensa_run)
+    conversation = await case.run(kensa_run)
     ...
 ```
+
+Direct synchronous agents return immediately. Coroutine or dynamically awaitable agents return an
+awaitable with identical result semantics.
+
+## Simulated conversations
+
+Supplying a simulator runs bounded sequential alternation on the same agent instance. Simulated
+runs are always awaitable:
+
+```python
+from kensa.pytest import LLMSimulator
+
+
+async def test_refund_dialogue(case, kensa_run):
+    conversation = await case.run(
+        kensa_run,
+        simulator=LLMSimulator(
+            "You were charged twice. End once the issue is clearly resolved."
+        ),
+        max_turns=6,
+    )
+    assert conversation.termination.reason in {"resolved", "max_turns"}
+```
+
+Any object with `respond(messages)` returning `ConversationResponse` can be a custom `Simulator`.
+Kensa assigns generated roles, keeps agent `output` separate from visible `content`, excludes private
+system and tool context from simulator history, and never retries a responder.
 
 ## Trials and verdicts
 

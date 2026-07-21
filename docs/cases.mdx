@@ -47,7 +47,7 @@ Inside a test, the `case` fixture is a `KensaCase`:
 | `case.input` | The resolved input (from `input`, `messages`, or the first field) |
 | `case.messages` | The conversation list when `messages=` was provided |
 | `case.row` | The immutable mapping of everything passed to `kensa_case` |
-| `case.run(kensa_run)` | Runs the case through your harness fixture and returns the output |
+| `case.run(kensa_run)` | Runs the case through its agent and returns a `ConversationResult` |
 
 ## Literal input vs messages
 
@@ -90,8 +90,12 @@ from kensa.pytest import judge, kensa_case
     ],
 )
 def test_severity(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
-    result = judge(output, "Severity must reflect business impact, not tone.", input=case.input)
+    conversation = case.run(kensa_run)
+    result = judge(
+        conversation,
+        "Severity must reflect business impact, not tone.",
+        input=case.input,
+    )
     assert result.passed, result.reasoning
 ```
 

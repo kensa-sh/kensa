@@ -436,11 +436,15 @@ def test_teardown_errors_replace_pass_metadata_and_aggregate_error(
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: {"ok": True}
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
 
 
 @pytest.fixture
@@ -458,7 +462,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run, bad_teardown):
-    assert case.run(kensa_run) == {"ok": True}
+    assert case.run(kensa_run).output == {"ok": True}
 """
     )
 
@@ -477,11 +481,15 @@ def test_case_run_records_output_artifact(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 """
     )
     pytester.makepyfile(
@@ -497,7 +505,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run):
     output = case.run(kensa_run)
-    assert output["input"] == "hello"
+    assert output.output["input"] == "hello"
     artifact = next(Path(".kensa/results").glob("*.json"))
     snapshot = json.loads(artifact.read_text())
     assert snapshot["trials"][0]["status"] == "provisional"
@@ -511,7 +519,7 @@ def test_agent(case, kensa_run):
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
     assert payload["trials"][0]["status"] == "pass"
-    assert payload["trials"][0]["output"] == {"input": "hello"}
+    assert payload["trials"][0]["output"]["output"] == {"input": "hello"}
     assert "type" not in payload["trials"][0]
     assert "type" not in payload["aggregates"][0]
     trace_artifact = next(
@@ -525,11 +533,15 @@ def test_setup_error_replaces_provisional_case_snapshot(pytester: pytest.Pyteste
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 
 
 @pytest.fixture
@@ -560,7 +572,7 @@ def test_agent(case, failing_setup):
     assert trial["error_kind"] == "setup"
     assert trial["error"] == "setup failed after case run"
     assert trial["case"] == {"id": "case_a", "input": "hello"}
-    assert trial["output"] == {"input": "hello"}
+    assert trial["output"]["output"] == {"input": "hello"}
 
 
 def test_teardown_judge_preserves_finalized_trial_outcomes(
@@ -574,12 +586,15 @@ import json
 from pathlib import Path
 
 import pytest
-from kensa.pytest import judge
+from kensa.pytest import ConversationResponse, judge
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 
 
 @pytest.fixture
@@ -612,7 +627,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="pass_case", input="hello")])
 def test_pass(case, kensa_run, judge_in_teardown):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
 
 
 @pytest.mark.kensa(trials=1)
@@ -646,12 +661,15 @@ def test_xdist_transports_successful_teardown_judge_metadata(
     pytester.makeconftest(
         """
 import pytest
-from kensa.pytest import judge
+from kensa.pytest import ConversationResponse, judge
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 
 
 @pytest.fixture
@@ -670,7 +688,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="pass_case", input="hello")])
 def test_pass(case, kensa_run, judge_in_teardown):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
 """,
     )
 
@@ -694,11 +712,15 @@ def test_failed_assertions_still_write_trial_metadata(pytester: pytest.Pytester)
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 """
     )
     pytester.makepyfile(
@@ -710,7 +732,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
     assert False, "regression still present"
 """
     )
@@ -721,7 +743,7 @@ def test_agent(case, kensa_run):
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
     assert payload["trials"][0]["status"] == "fail"
-    assert payload["trials"][0]["output"] == {"input": "hello"}
+    assert payload["trials"][0]["output"]["output"] == {"input": "hello"}
     assert payload["trials"][0]["error_kind"] == "assertion"
 
 
@@ -729,11 +751,15 @@ def test_case_run_rejects_second_call(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
 def kensa_run():
-    return lambda case: "ok"
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output="ok")
+    return Agent()
 """
     )
     pytester.makepyfile(
@@ -760,13 +786,15 @@ def test_async_kensa_run_is_supported(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    async def _run(case):
-        return {"value": case.input}
-    return _run
+def kensa_run(case):
+    class Agent:
+        async def respond(self, messages):
+            return ConversationResponse(output={"value": case.input})
+    return Agent()
 """
     )
     pytester.makepyfile(
@@ -780,7 +808,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 async def test_agent(case, kensa_run):
     output = await case.run(kensa_run)
-    assert output == {"value": "hello"}
+    assert output.output == {"value": "hello"}
 """
     )
 
@@ -793,11 +821,15 @@ def test_xdist_merges_trials_into_one_controller_artifact(pytester: pytest.Pytes
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 """
     )
     pytester.makepyfile(
@@ -812,7 +844,7 @@ from kensa.pytest import kensa_case
     kensa_case(id="case_b", input="b"),
 ])
 def test_agent(case, kensa_run):
-    assert case.run(kensa_run) == {"input": case.input}
+    assert case.run(kensa_run).output == {"input": case.input}
 """
     )
 
@@ -858,6 +890,7 @@ def test_xdist_rejects_each_distribution_for_kensa_trials(pytester: pytest.Pytes
     pytester.makepyfile(
         test_eval="""
 import pytest
+from kensa.pytest import ConversationResponse
 from kensa.pytest import kensa_case
 
 
@@ -953,11 +986,15 @@ def test_xdist_transports_setup_and_teardown_error_metadata(
     pytester.makeconftest(
         """
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 
 
 @pytest.fixture
@@ -982,7 +1019,7 @@ from kensa.pytest import kensa_case
     kensa_case(id="case_c", input="c"),
 ])
 def test_agent(case, kensa_run, conditional_lifecycle):
-    assert case.run(kensa_run) == {"input": case.input}
+    assert case.run(kensa_run).output == {"input": case.input}
 """
     )
 
@@ -1017,11 +1054,15 @@ def test_xdist_marks_teardown_worker_crash_incomplete(
         """
 import os
 import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 
 
 @pytest.fixture
@@ -1040,7 +1081,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run, crash_in_teardown):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
 """
     )
 
