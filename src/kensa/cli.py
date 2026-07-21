@@ -3259,12 +3259,7 @@ def _write_text_if_changed(path: Path, text: str) -> bool:
 
 
 def _is_kensa_conftest(source: str) -> bool:
-    return (
-        "Repository-specific Kensa harness connection" in source
-        and "def kensa_run" in source
-        and "raise NotImplementedError(" in source
-        and "Connect this fixture to your agent" in source
-    )
+    return _GENERATED_INIT_MARKER in source
 
 
 def _is_kensa_smoke(source: str) -> bool:

@@ -34,6 +34,10 @@ class LLMProviderError(RuntimeError):
     """Raised when the configured LLM provider cannot be used."""
 
 
+class _LLMStructuredOutputError(LLMProviderError):
+    pass
+
+
 @dataclass(frozen=True)
 class LLMResult:
     content: str
@@ -146,7 +150,7 @@ def validate_structured_result(
     """Validate parsed structured output with Kensa's response schema."""
 
     if result.parsed is None:
-        raise LLMProviderError("LLM response did not include parsed structured output.")
+        raise _LLMStructuredOutputError("LLM response did not include parsed structured output.")
     return response_format.model_validate(result.parsed)
 
 
@@ -268,7 +272,7 @@ def _message_parsed(message: Any, response_format: Any) -> Any:
     parsed = getattr(message, "parsed", None)
     if parsed is not None:
         return parsed
-    raise LLMProviderError("LLM response did not include parsed structured output.")
+    raise _LLMStructuredOutputError("LLM response did not include parsed structured output.")
 
 
 def _extract_usage(response: Any) -> tuple[int | None, int | None, int | None]:

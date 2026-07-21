@@ -17,8 +17,8 @@ from kensa.errors import KensaCaseError
 from kensa.llm import (
     LLMConfigurationError,
     LLMModelInput,
-    LLMProviderError,
     LLMProviderInput,
+    _LLMStructuredOutputError,
     acomplete,
     resolve_llm_config,
     validate_structured_result,
@@ -157,21 +157,24 @@ class LLMSimulator:
             provider=self.config.provider.value,
             model=self.config.model.value,
         ):
-            result = await acomplete(
-                prompt,
-                model=self.config.model,
-                provider=self.config.provider,
-                temperature=self.temperature,
-                response_format=_LLMSimulatorResponse,
-                metadata={"task": "conversation_simulator"},
-            )
+            try:
+                result = await acomplete(
+                    prompt,
+                    model=self.config.model,
+                    provider=self.config.provider,
+                    temperature=self.temperature,
+                    response_format=_LLMSimulatorResponse,
+                    metadata={"task": "conversation_simulator"},
+                )
+            except _LLMStructuredOutputError as exc:
+                raise _ContractViolation(f"invalid structured simulator response: {exc}") from exc
         try:
             parsed = validate_structured_result(result, _LLMSimulatorResponse)
             return ConversationResponse(
                 content=parsed.content,
                 termination_reason=parsed.termination_reason,
             )
-        except (LLMProviderError, ValidationError, ValueError) as exc:
+        except (_LLMStructuredOutputError, ValidationError, ValueError) as exc:
             raise _ContractViolation(f"invalid structured simulator response: {exc}") from exc
 
 
@@ -468,7 +471,9 @@ def _external_history(messages: list[KensaMessage]) -> list[KensaMessage]:
         if role not in {"user", "assistant"}:
             continue
         content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(content, str):
+            continue
+        if role == "assistant" and "tool_calls" in message and not content.strip():
             continue
         projected: dict[str, Any] = {"role": role, "content": content}
         name = message.get("name")

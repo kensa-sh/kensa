@@ -3005,6 +3005,32 @@ def test_kensa_smoke():
     assert main(["init"]) == 0
 
 
+def test_current_conftest_template_is_owned_and_future_refresh_preserves_user_files(
+    tmp_path: Path,
+) -> None:
+    assert cli._is_kensa_conftest(cli.CONFTEST_TEMPLATE)
+
+    generated = tmp_path / "generated.py"
+    generated.write_text(cli.CONFTEST_TEMPLATE)
+    future_template = cli.CONFTEST_TEMPLATE.replace("Case-aware adapter", "Future adapter")
+    assert cli._write_if_missing_or_kensa_generated(
+        generated,
+        future_template,
+        cli._is_kensa_conftest,
+    )
+    assert generated.read_text() == future_template
+
+    user_authored = tmp_path / "user.py"
+    user_source = "def kensa_run(case):\n    return case\n"
+    user_authored.write_text(user_source)
+    assert not cli._write_if_missing_or_kensa_generated(
+        user_authored,
+        future_template,
+        cli._is_kensa_conftest,
+    )
+    assert user_authored.read_text() == user_source
+
+
 def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
     template_root = resource_files("kensa").joinpath("skill_templates")
     skill_texts = {

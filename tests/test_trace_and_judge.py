@@ -7,10 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry import trace
 from pydantic import BaseModel
 
-from kensa import KensaTimeoutError, record_span
-from kensa.conversation import ConversationResult, Termination
+import kensa.conversation as conversation
+from kensa import KensaTimeoutError, record_llm_call, record_span, record_tool_call
+from kensa.case import KensaMessage, kensa_case
+from kensa.conversation import ConversationResponse, ConversationResult, LLMSimulator, Termination
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
@@ -52,6 +55,62 @@ def test_judge_receives_conversation_result_as_json() -> None:
         "output": {"status": "resolved"},
         "termination": {"source": "agent", "reason": "resolved"},
     }
+
+
+@pytest.mark.asyncio
+async def test_response_spans_attribute_sources_without_filtering_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_acomplete(messages: list[dict[str, Any]], **kwargs: Any) -> LLMResult:
+        del messages, kwargs
+        trace.get_current_span().set_attribute("kensa.cost_usd", 0.5)
+        return LLMResult(
+            content="next",
+            parsed={"content": "next", "termination_reason": None},
+        )
+
+    class Agent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            with record_llm_call("agent.llm", attributes={"kensa.cost_usd": 0.25}):
+                pass
+            with record_tool_call("agent.tool"):
+                pass
+            return ConversationResponse(content="done", termination_reason="done")
+
+    monkeypatch.setattr(conversation, "acomplete", fake_acomplete)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_response_spans_attribute_sources_without_filtering_totals",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+    )
+    token = set_current_runtime(runtime)
+    try:
+        await kensa_case(id="trace", input="x").run(
+            Agent(),
+            simulator=LLMSimulator("customer"),
+            max_turns=1,
+        )
+    finally:
+        reset_current_runtime(token)
+
+    response_spans = {
+        span.attributes["kensa.conversation.source"]: span
+        for span in runtime.trace.spans
+        if span.name == "kensa.conversation.respond"
+    }
+    simulator_llm = next(span for span in runtime.trace.spans if span.name == "llm.call")
+    agent_llm = next(span for span in runtime.trace.spans if span.name == "agent.llm")
+    agent_tool = next(span for span in runtime.trace.spans if span.name == "agent.tool")
+
+    assert simulator_llm.parent_span_id == response_spans["simulator"].span_id
+    assert agent_llm.parent_span_id == response_spans["agent"].span_id
+    assert agent_tool.parent_span_id == response_spans["agent"].span_id
+    assert runtime.trace.cost_usd == 0.75
+    assert runtime.trace.llm_turns == 2
+    assert runtime.trace.tools.names == ["agent.tool"]
+    assert runtime.trace.duration_ms >= 0
 
 
 def test_trace_spans_are_available_immediately_after_case_run(pytester: pytest.Pytester) -> None:

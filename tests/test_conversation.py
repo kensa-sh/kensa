@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
+from collections.abc import Awaitable
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -21,7 +22,7 @@ from kensa.conversation import (
     Simulator,
     Termination,
 )
-from kensa.llm import LLMConfigurationError, LLMResult
+from kensa.llm import LLMConfigurationError, LLMProviderError, LLMResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
 
 
@@ -42,6 +43,41 @@ class ScriptedResponder:
         if isinstance(response, BaseException):
             raise response
         return cast(ConversationResponse, response)
+
+
+if TYPE_CHECKING:
+    from typing import assert_type
+
+    class _StaticSyncAgent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse()
+
+    class _StaticAsyncAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse()
+
+    class _StaticUnionAgent:
+        def respond(
+            self,
+            messages: tuple[KensaMessage, ...],
+        ) -> ConversationResponse | Awaitable[ConversationResponse]:
+            return ConversationResponse()
+
+    class _StaticSimulator:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse(termination_reason="done")
+
+    _static_case = kensa_case(id="typing", input="x")
+    assert_type(_static_case.run(_StaticSyncAgent()), ConversationResult)
+    assert_type(_static_case.run(_StaticAsyncAgent()), Awaitable[ConversationResult])
+    assert_type(
+        _static_case.run(_StaticUnionAgent()),
+        ConversationResult | Awaitable[ConversationResult],
+    )
+    assert_type(
+        _static_case.run(_StaticSyncAgent(), simulator=_StaticSimulator()),
+        Awaitable[ConversationResult],
+    )
 
 
 def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
@@ -208,6 +244,8 @@ async def test_each_responder_receives_exact_isolated_history() -> None:
     initial: list[KensaMessage] = [
         {"role": "system", "content": "private system"},
         {"role": "developer", "content": "private developer"},
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": ""},
         {"role": "user", "content": "hello", "name": "customer"},
         {
             "role": "assistant",
@@ -234,6 +272,18 @@ async def test_each_responder_receives_exact_isolated_history() -> None:
             ],
         },
         {"role": "tool", "tool_call_id": "call_2", "content": "more private data"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_3",
+                    "type": "function",
+                    "function": {"name": "silent_lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_3", "content": "silent private data"},
         {"role": "assistant", "content": "found it"},
     ]
     agent = ScriptedResponder(
@@ -255,6 +305,8 @@ async def test_each_responder_receives_exact_isolated_history() -> None:
     ]
     assert simulator.histories == [
         (
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": ""},
             {"role": "user", "content": "hello", "name": "customer"},
             {"role": "assistant", "content": "checking", "name": "support"},
             {"role": "assistant", "content": "found it"},
@@ -267,7 +319,7 @@ async def test_each_responder_receives_exact_isolated_history() -> None:
     )
     assert agent.histories[0] is not result.messages
     cast(dict[str, Any], simulator.histories[0][0])["content"] = "mutated"
-    assert result.messages[2]["content"] == "hello"
+    assert result.messages[4]["content"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -390,13 +442,17 @@ async def test_llm_simulator_uses_native_async_completion_and_inverts_roles(
 
     response = await simulator.respond(
         (
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": ""},
             {"role": "user", "content": "customer said"},
             {"role": "assistant", "content": "agent said"},
         )
     )
 
     assert response == ConversationResponse(content="next", termination_reason=None)
-    assert calls[0]["messages"][-2:] == [
+    assert calls[0]["messages"][-4:] == [
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": ""},
         {"role": "assistant", "content": "customer said"},
         {"role": "user", "content": "agent said"},
     ]
@@ -407,17 +463,63 @@ async def test_llm_simulator_uses_native_async_completion_and_inverts_roles(
 async def test_llm_simulator_missing_structured_result_is_contract_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def fake_completion(**kwargs: Any) -> Any:
+        del kwargs
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="malformed", parsed=None))],
+            usage=None,
+        )
+
+    monkeypatch.setattr("kensa.llm._acompletion", fake_completion)
+    agent = ScriptedResponder(ConversationResponse(content="unused"))
+    with pytest.raises(ConversationError) as raised:
+        await kensa_case(
+            id="malformed",
+            messages=[{"role": "user", "content": "accepted initial"}],
+        ).run(
+            agent,
+            simulator=LLMSimulator("customer"),
+            max_turns=1,
+        )
+    assert raised.value.kind == "contract"
+    assert raised.value.source == "simulator"
+    assert raised.value.messages == ({"role": "user", "content": "accepted initial"},)
+    assert agent.calls == 0
+
+    provider_failure = LLMProviderError("transport failed")
+
+    async def failed_completion(**kwargs: Any) -> Any:
+        del kwargs
+        raise provider_failure
+
+    monkeypatch.setattr("kensa.llm._acompletion", failed_completion)
+    with pytest.raises(ConversationError) as execution:
+        await kensa_case(id="provider_failure", input="x").run(
+            agent,
+            simulator=LLMSimulator("customer"),
+            max_turns=1,
+        )
+    assert execution.value.kind == "execution"
+    assert execution.value.__cause__ is provider_failure
+
+
+@pytest.mark.asyncio
+async def test_llm_simulator_invalid_parsed_result_is_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def fake_acomplete(messages: list[dict[str, Any]], **kwargs: Any) -> LLMResult:
         del messages, kwargs
-        return LLMResult(content="malformed", parsed=None)
+        return LLMResult(content="malformed", parsed={"content": 1})
 
     monkeypatch.setattr(conversation, "acomplete", fake_acomplete)
+
     with pytest.raises(ConversationError) as raised:
-        await kensa_case(id="malformed", input="x").run(
+        await kensa_case(id="invalid_parsed", input="x").run(
             ScriptedResponder(ConversationResponse(content="unused")),
             simulator=LLMSimulator("customer"),
             max_turns=1,
         )
+
     assert raised.value.kind == "contract"
     assert raised.value.source == "simulator"
 
@@ -506,6 +608,47 @@ async def test_responder_failures_preserve_state_without_retry() -> None:
     assert simulator_raised.value.source == "simulator"
     assert simulator_raised.value.__cause__ is simulator_failure
     assert untouched_agent.calls == 0
+
+
+class _ProcessInterruption(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("interruption_type", [SystemExit, GeneratorExit, _ProcessInterruption])
+def test_process_interruptions_propagate_unchanged(
+    interruption_type: type[BaseException],
+) -> None:
+    interruption = interruption_type()
+    agent = ScriptedResponder(interruption)
+
+    with pytest.raises(interruption_type) as propagated:
+        kensa_case(id="process_interruption", input="x").run(agent)
+
+    assert propagated.value is interruption
+    assert agent.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_simulator_cancellation_propagates_without_calling_agent() -> None:
+    class CancelledSimulator:
+        calls = 0
+
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            self.calls += 1
+            raise asyncio.CancelledError
+
+    simulator = CancelledSimulator()
+    agent = ScriptedResponder(ConversationResponse(content="unused"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await kensa_case(id="simulator_cancelled", input="x").run(
+            agent,
+            simulator=simulator,
+            max_turns=1,
+        )
+
+    assert simulator.calls == 1
+    assert agent.calls == 0
 
 
 def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
@@ -612,6 +755,37 @@ async def test_runtime_failure_snapshot_retains_last_accepted_state() -> None:
 
     assert runtime.output == {
         "messages": [{"role": "user", "content": "accepted"}],
+        "output": None,
+        "termination": None,
+    }
+
+
+def test_runtime_first_response_failure_retains_initial_snapshot() -> None:
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_runtime_first_response_failure",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError):
+            kensa_case(
+                id="failed_initial_snapshot",
+                messages=[
+                    {"role": "system", "content": "private"},
+                    {"role": "user", "content": "initial"},
+                ],
+            ).run(ScriptedResponder(RuntimeError("boom")))
+    finally:
+        reset_current_runtime(token)
+
+    assert runtime.output == {
+        "messages": [
+            {"role": "system", "content": "private"},
+            {"role": "user", "content": "initial"},
+        ],
         "output": None,
         "termination": None,
     }
