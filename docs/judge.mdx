@@ -11,7 +11,7 @@ keywords:
 ---
 
 `judge(...)` evaluates a natural-language criterion against a completed agent run and returns a
-pass/fail verdict with reasoning. When given `RunResult`, the judge receives ordered
+pass/fail verdict with reasoning. When given `CaseResult`, the judge receives ordered
 messages, normalized output, and termination as structured JSON. Reach for it only when a check
 cannot be expressed deterministically.
 
@@ -37,7 +37,7 @@ def judge(
 
 | Argument | Description |
 |---|---|
-| `output` | Evidence to evaluate, normally the `RunResult` returned by `case.run(...)` |
+| `output` | Evidence to evaluate, normally the `CaseResult` returned by `case.run(...)` |
 | `criteria` | The natural-language pass condition |
 | `input` | The original case input, for grounding (`input=case.input`) |
 | `trace` | The `kensa_trace`, so the judge can consider tool calls (`trace=kensa_trace`) |

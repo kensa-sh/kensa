@@ -177,7 +177,7 @@ LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 
 Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, use the
 `kensa_run(case)` fixture to build one case-aware conversation agent, and call
-`case.run(kensa_run)`. Every run returns `RunResult(messages, output, termination)`.
+`case.run(kensa_run)`. Every run returns `CaseResult(messages, output, termination)`.
 Assert traces with `kensa_trace` and reserve LLM-as-judge for semantic checks.
 
 </details>

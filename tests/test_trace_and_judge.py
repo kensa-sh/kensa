@@ -16,11 +16,11 @@ from kensa.case import KensaMessage, kensa_case
 from kensa.conversation import ConversationResponse, LLMSimulator, Termination
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
-from kensa.pytest import RunResult
+from kensa.pytest import CaseResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
 
 
-def test_judge_receives_run_result_as_json() -> None:
+def test_judge_receives_case_result_as_json() -> None:
     calls: list[dict[str, Any]] = []
 
     class Provider:
@@ -34,7 +34,7 @@ def test_judge_receives_run_result_as_json() -> None:
     set_judge_provider(Provider())
     try:
         result = judge(
-            RunResult(
+            CaseResult(
                 messages=(
                     {"role": "user", "content": "hello"},
                     {"role": "assistant", "content": "done"},

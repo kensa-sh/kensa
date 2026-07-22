@@ -79,7 +79,7 @@ def kensa_run(case: KensaCase) -> RefundAgent:
 ```
 
 The fixture creates one case-aware agent instance per trial. `case.run(kensa_run)` invokes
-`respond(messages)` once in direct mode and returns `RunResult`. Visible `content` becomes
+`respond(messages)` once in direct mode and returns `CaseResult`. Visible `content` becomes
 an assistant message; `output` is the separately evaluated value. `kensa doctor` inspects
 `conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
 

@@ -15,11 +15,11 @@ from kensa.case import (
     kensa_case,
 )
 from kensa.conversation import (
+    CaseResult,
     ConversationAgent,
     ConversationError,
     ConversationResponse,
     LLMSimulator,
-    RunResult,
     Simulator,
     Termination,
 )
@@ -28,6 +28,7 @@ from kensa.judge import JudgeResult, judge
 from kensa.runtime import KensaTrace
 
 __all__ = [
+    "CaseResult",
     "ConversationAgent",
     "ConversationError",
     "ConversationResponse",
@@ -44,7 +45,6 @@ __all__ = [
     "KensaTrace",
     "KensaUserMessage",
     "LLMSimulator",
-    "RunResult",
     "Simulator",
     "Termination",
     "judge",

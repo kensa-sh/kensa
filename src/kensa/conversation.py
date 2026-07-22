@@ -79,7 +79,7 @@ class Termination(BaseModel):
     _validate_reason = field_validator("reason")(_nonblank)
 
 
-class RunResult(BaseModel):
+class CaseResult(BaseModel):
     """The observable outcome of one completed agent run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -205,7 +205,7 @@ def _run_conversation(
     simulator: Simulator | None,
     max_turns: int | None,
     starts_with: Literal["simulator", "agent"] | None,
-) -> RunResult | Awaitable[RunResult]:
+) -> CaseResult | Awaitable[CaseResult]:
     """Execute direct or simulated conversation semantics for one case."""
 
     state = _State(messages=_initial_messages(case))
@@ -226,7 +226,7 @@ def _run_conversation(
         )
         if inspect.isawaitable(attempt):
 
-            async def _finish() -> RunResult:
+            async def _finish() -> CaseResult:
                 prepared = cast(_PreparedResponse, await attempt)
                 return _accept_and_finish_direct(state, prepared)
 
@@ -258,7 +258,7 @@ async def _run_simulated(
     *,
     max_turns: int,
     starts_with: Literal["simulator", "agent"],
-) -> RunResult:
+) -> CaseResult:
     source = starts_with
     response_index = 0
     agent_responses = 0
@@ -400,7 +400,7 @@ def _prepare_response(
 def _accept_and_finish_direct(
     state: _State,
     prepared: _PreparedResponse,
-) -> RunResult:
+) -> CaseResult:
     _accept(state, "agent", prepared)
     termination = (
         Termination(source="agent", reason=prepared.termination_reason)
@@ -424,9 +424,9 @@ def _accept(
     _publish_snapshot(state)
 
 
-def _result(state: _State, termination: Termination) -> RunResult:
+def _result(state: _State, termination: Termination) -> CaseResult:
     output = None if state.output is _MISSING else _copy_typed(state.output)
-    return RunResult(
+    return CaseResult(
         messages=deepcopy(tuple(state.messages)),
         output=output,
         termination=termination,
@@ -500,11 +500,11 @@ def _copy_typed(value: Any) -> Any:
 
 
 __all__ = [
+    "CaseResult",
     "ConversationAgent",
     "ConversationError",
     "ConversationResponse",
     "LLMSimulator",
-    "RunResult",
     "Simulator",
     "Termination",
 ]

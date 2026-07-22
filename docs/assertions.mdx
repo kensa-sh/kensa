@@ -12,7 +12,7 @@ keywords:
 
 Assertions are ordinary pytest `assert` statements. Deterministic ones are free and fast, so put them before any `judge(...)` call - pytest stops at the first failure, and a failed assertion never spends judge tokens.
 
-`case.run(...)` returns a compact `RunResult`: check visible dialogue in `.messages`, evaluated data
+`case.run(...)` returns a compact `CaseResult`: check visible dialogue in `.messages`, evaluated data
 in `.output`, and the stop condition in `.termination`. The `kensa_trace` fixture separately exposes
 what the agent *did*. Pass it to `judge(...)` only when the criterion needs trajectory evidence.
 
@@ -73,7 +73,7 @@ def test_within_budget(case, kensa_run, kensa_trace):
 
 ## Output assertions
 
-`case.run(kensa_run)` always returns `RunResult`. Assert on its typed fields with plain
+`case.run(kensa_run)` always returns `CaseResult`. Assert on its typed fields with plain
 Python.
 
 ```python

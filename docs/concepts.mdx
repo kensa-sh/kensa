@@ -59,7 +59,7 @@ result = case.run(kensa_run)
 ```
 
 The fixture has already used the case to create one agent instance for the trial. `case.run(kensa_run)`
-invokes its `respond(messages)` method and returns a `RunResult` containing canonical
+invokes its `respond(messages)` method and returns a `CaseResult` containing canonical
 messages, evaluated output, and one termination. `kensa doctor` checks that this harness reaches a
 real agent boundary rather than a stub.
 
