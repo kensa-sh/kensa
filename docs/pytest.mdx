@@ -30,17 +30,17 @@ from kensa.pytest import judge, kensa_case
     [kensa_case(id="refund_without_order_history", input="Refund my last charge. No order ID.")],
 )
 def test_refund_policy(case, kensa_run, kensa_trace):
-    conversation = case.run(kensa_run)
+    result = case.run(kensa_run)
 
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
 
-    result = judge(
-        conversation,
+    verdict = judge(
+        result,
         "The response must not promise an unsupported refund.",
         input=case.input,
     )
-    assert result.passed, result.reasoning
+    assert verdict.passed, verdict.reasoning
 ```
 
 Three pieces do the work: the `kensa` marker sets trials, the `case` parameter carries the input, and the `kensa_run` / `kensa_trace` fixtures connect to your agent and its trace.
@@ -79,7 +79,7 @@ def kensa_run(case: KensaCase) -> RefundAgent:
 ```
 
 The fixture creates one case-aware agent instance per trial. `case.run(kensa_run)` invokes
-`respond(messages)` once in direct mode and returns `ConversationResult`. Visible `content` becomes
+`respond(messages)` once in direct mode and returns `RunResult`. Visible `content` becomes
 an assistant message; `output` is the separately evaluated value. `kensa doctor` inspects
 `conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
 
@@ -104,7 +104,7 @@ import pytest
 @pytest.mark.kensa(trials=3)
 @pytest.mark.parametrize("case", [kensa_case(id="draft_no_send", input="...")])
 async def test_sdr_draft(case, kensa_run, async_client):
-    conversation = await case.run(kensa_run)
+    result = await case.run(kensa_run)
     ...
 ```
 
@@ -121,14 +121,14 @@ from kensa.pytest import LLMSimulator
 
 
 async def test_refund_dialogue(case, kensa_run):
-    conversation = await case.run(
+    result = await case.run(
         kensa_run,
         simulator=LLMSimulator(
             "You were charged twice. End once the issue is clearly resolved."
         ),
         max_turns=6,
     )
-    assert conversation.termination.reason in {"resolved", "max_turns"}
+    assert result.termination.reason in {"resolved", "max_turns"}
 ```
 
 Any object with `respond(messages)` returning `ConversationResponse` can be a custom `Simulator`.

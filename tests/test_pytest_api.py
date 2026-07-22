@@ -504,8 +504,8 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run):
-    output = case.run(kensa_run)
-    assert output.output["input"] == "hello"
+    result = case.run(kensa_run)
+    assert result.output["input"] == "hello"
     artifact = next(Path(".kensa/results").glob("*.json"))
     snapshot = json.loads(artifact.read_text())
     assert snapshot["trials"][0]["status"] == "provisional"
@@ -857,8 +857,8 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 async def test_agent(case, kensa_run):
-    output = await case.run(kensa_run)
-    assert output.output == {"value": "hello"}
+    result = await case.run(kensa_run)
+    assert result.output == {"value": "hello"}
 """
     )
 

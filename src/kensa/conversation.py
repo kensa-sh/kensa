@@ -68,7 +68,7 @@ class Simulator(Protocol):
 
 
 class Termination(BaseModel):
-    """The single source and reason that ended a conversation."""
+    """The single source and reason that ended a run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -78,8 +78,8 @@ class Termination(BaseModel):
     _validate_reason = field_validator("reason")(_nonblank)
 
 
-class ConversationResult(BaseModel):
-    """A completed canonical trajectory and its evaluated output."""
+class RunResult(BaseModel):
+    """The observable outcome of one completed agent run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -201,7 +201,7 @@ def _run_conversation(
     simulator: Simulator | None,
     max_turns: int | None,
     starts_with: Literal["simulator", "agent"] | None,
-) -> ConversationResult | Awaitable[ConversationResult]:
+) -> RunResult | Awaitable[RunResult]:
     """Execute direct or simulated conversation semantics for one case."""
 
     state = _State(messages=_initial_messages(case))
@@ -222,7 +222,7 @@ def _run_conversation(
         )
         if inspect.isawaitable(attempt):
 
-            async def _finish() -> ConversationResult:
+            async def _finish() -> RunResult:
                 prepared = cast(_PreparedResponse, await attempt)
                 return _accept_and_finish_direct(state, prepared)
 
@@ -254,7 +254,7 @@ async def _run_simulated(
     *,
     max_turns: int,
     starts_with: Literal["simulator", "agent"],
-) -> ConversationResult:
+) -> RunResult:
     source = starts_with
     response_index = 0
     agent_responses = 0
@@ -396,7 +396,7 @@ def _prepare_response(
 def _accept_and_finish_direct(
     state: _State,
     prepared: _PreparedResponse,
-) -> ConversationResult:
+) -> RunResult:
     _accept(state, "agent", prepared)
     termination = (
         Termination(source="agent", reason=prepared.termination_reason)
@@ -420,9 +420,9 @@ def _accept(
     _publish_snapshot(state)
 
 
-def _result(state: _State, termination: Termination) -> ConversationResult:
+def _result(state: _State, termination: Termination) -> RunResult:
     output = None if state.output is _MISSING else _copy_typed(state.output)
-    return ConversationResult(
+    return RunResult(
         messages=deepcopy(tuple(state.messages)),
         output=output,
         termination=termination,
@@ -499,8 +499,8 @@ __all__ = [
     "ConversationAgent",
     "ConversationError",
     "ConversationResponse",
-    "ConversationResult",
     "LLMSimulator",
+    "RunResult",
     "Simulator",
     "Termination",
 ]

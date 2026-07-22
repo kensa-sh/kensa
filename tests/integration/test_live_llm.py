@@ -148,15 +148,15 @@ def test_kensa_eval_flow_uses_live_judge_provider(
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", config.provider.value)
     monkeypatch.setenv("KENSA_JUDGE_MODEL", config.model.value)
 
-    output = case.run(kensa_run)
-    result = judge(
-        output,
+    result = case.run(kensa_run)
+    verdict = judge(
+        result,
         "The response must not promise an unsupported refund.",
         input=case.input,
         trace=kensa_trace,
     )
 
-    assert output.output["response"]
-    assert result.passed, result.reasoning
-    assert not result.error
+    assert result.output["response"]
+    assert verdict.passed, verdict.reasoning
+    assert not verdict.error
     assert kensa_trace.duration_ms >= 0

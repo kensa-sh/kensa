@@ -107,7 +107,7 @@ def kensa_run(case: KensaCase) -> RepositoryAgent:
 ```
 
 The fixture owns case-aware construction and teardown. Kensa calls the returned instance's
-`respond(messages)` method and returns one `ConversationResult` for both direct and simulated runs.
+`respond(messages)` method and returns one `RunResult` for both direct and simulated runs.
 `kensa doctor` verifies the harness is wired to a real agent boundary before you trust any verdict.
 
 ## Next

@@ -134,7 +134,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=3, timeout_s=0.2)
 @pytest.mark.parametrize("case", [kensa_case(id="three_trials", input="hello")])
 def test_three_trials(case, kensa_run, request):
-    output = case.run(kensa_run)
+    result = case.run(kensa_run)
     if "trial2" in request.node.nodeid:
         child = subprocess.Popen([
             sys.executable,
@@ -150,7 +150,7 @@ def test_three_trials(case, kensa_run, request):
             time.sleep(0.005)
         print("x" * 200_000, flush=True)
         time.sleep(60)
-    assert output.output == {"input": "hello"}
+    assert result.output == {"input": "hello"}
 """,
     )
 
@@ -203,10 +203,10 @@ from kensa.pytest import kensa_case
     kensa_case(id="fast_c", input="c"),
 ])
 def test_parallel_timeout(case, kensa_run):
-    output = case.run(kensa_run)
+    result = case.run(kensa_run)
     if case.id == "hang":
         time.sleep(60)
-    assert output.output == {"input": case.input}
+    assert result.output == {"input": case.input}
 """,
     )
 
@@ -606,9 +606,9 @@ from kensa.pytest import judge, kensa_case
 @pytest.mark.kensa(timeout_s=0.5)
 @pytest.mark.parametrize("case", [kensa_case(id="snapshot", input="hello")])
 def test_snapshot(case, kensa_run):
-    output = case.run(kensa_run)
-    result = judge(output, "must preserve evidence")
-    assert result.passed
+    result = case.run(kensa_run)
+    verdict = judge(result, "must preserve evidence")
+    assert verdict.passed
     time.sleep(60)
 """,
     )

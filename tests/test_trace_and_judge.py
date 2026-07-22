@@ -13,13 +13,14 @@ from pydantic import BaseModel
 import kensa.conversation as conversation
 from kensa import KensaTimeoutError, record_llm_call, record_span, record_tool_call
 from kensa.case import KensaMessage, kensa_case
-from kensa.conversation import ConversationResponse, ConversationResult, LLMSimulator, Termination
+from kensa.conversation import ConversationResponse, LLMSimulator, Termination
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
+from kensa.pytest import RunResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
 
 
-def test_judge_receives_conversation_result_as_json() -> None:
+def test_judge_receives_run_result_as_json() -> None:
     calls: list[dict[str, Any]] = []
 
     class Provider:
@@ -33,7 +34,7 @@ def test_judge_receives_conversation_result_as_json() -> None:
     set_judge_provider(Provider())
     try:
         result = judge(
-            ConversationResult(
+            RunResult(
                 messages=(
                     {"role": "user", "content": "hello"},
                     {"role": "assistant", "content": "done"},
@@ -143,8 +144,8 @@ from kensa.pytest import ConversationResponse, kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
-    assert output.output == {"ok": True}
+    result = case.run(kensa_run)
+    assert result.output == {"ok": True}
     assert not hasattr(kensa_trace, "called")
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["missing"])
@@ -269,9 +270,9 @@ from kensa.pytest import judge, kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
 def test_agent(case, kensa_run):
-    output = case.run(kensa_run)
-    result = judge(output, "must be safe", input=case.input)
-    assert result.passed, result.reasoning
+    result = case.run(kensa_run)
+    verdict = judge(result, "must be safe", input=case.input)
+    assert verdict.passed, verdict.reasoning
 """
     )
 

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from kensa.conversation import (
         ConversationAgent,
         ConversationResponse,
-        ConversationResult,
+        RunResult,
         Simulator,
     )
 
@@ -146,7 +146,7 @@ class KensaCase:
         simulator: Simulator,
         max_turns: int | None = None,
         starts_with: Literal["simulator", "agent"] | None = None,
-    ) -> Awaitable[ConversationResult]: ...
+    ) -> Awaitable[RunResult]: ...
 
     @overload
     def run(
@@ -156,7 +156,7 @@ class KensaCase:
         simulator: None = None,
         max_turns: None = None,
         starts_with: None = None,
-    ) -> ConversationResult: ...
+    ) -> RunResult: ...
 
     @overload
     def run(
@@ -166,7 +166,7 @@ class KensaCase:
         simulator: None = None,
         max_turns: None = None,
         starts_with: None = None,
-    ) -> Awaitable[ConversationResult]: ...
+    ) -> Awaitable[RunResult]: ...
 
     @overload
     def run(
@@ -176,7 +176,7 @@ class KensaCase:
         simulator: None = None,
         max_turns: None = None,
         starts_with: None = None,
-    ) -> ConversationResult | Awaitable[ConversationResult]: ...
+    ) -> RunResult | Awaitable[RunResult]: ...
 
     def run(
         self,
@@ -185,12 +185,12 @@ class KensaCase:
         simulator: Simulator | None = None,
         max_turns: int | None = None,
         starts_with: Literal["simulator", "agent"] | None = None,
-    ) -> ConversationResult | Awaitable[ConversationResult]:
+    ) -> RunResult | Awaitable[RunResult]:
         """Run this case through one conversation agent and optional simulator."""
 
         from kensa.conversation import _run_conversation
 
-        def _run() -> ConversationResult | Awaitable[ConversationResult]:
+        def _run() -> RunResult | Awaitable[RunResult]:
             return _run_conversation(
                 self,
                 agent,

@@ -17,8 +17,8 @@ from kensa.conversation import (
     ConversationAgent,
     ConversationError,
     ConversationResponse,
-    ConversationResult,
     LLMSimulator,
+    RunResult,
     Simulator,
     Termination,
 )
@@ -68,15 +68,15 @@ if TYPE_CHECKING:
             return ConversationResponse(termination_reason="done")
 
     _static_case = kensa_case(id="typing", input="x")
-    assert_type(_static_case.run(_StaticSyncAgent()), ConversationResult)
-    assert_type(_static_case.run(_StaticAsyncAgent()), Awaitable[ConversationResult])
+    assert_type(_static_case.run(_StaticSyncAgent()), RunResult)
+    assert_type(_static_case.run(_StaticAsyncAgent()), Awaitable[RunResult])
     assert_type(
         _static_case.run(_StaticUnionAgent()),
-        ConversationResult | Awaitable[ConversationResult],
+        RunResult | Awaitable[RunResult],
     )
     assert_type(
         _static_case.run(_StaticSyncAgent(), simulator=_StaticSimulator()),
-        Awaitable[ConversationResult],
+        Awaitable[RunResult],
     )
 
 
@@ -85,8 +85,8 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         "ConversationAgent",
         "ConversationError",
         "ConversationResponse",
-        "ConversationResult",
         "LLMSimulator",
+        "RunResult",
         "Simulator",
         "Termination",
     ]
@@ -112,7 +112,7 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         },
         {"role": "tool", "tool_call_id": "call_1", "content": "result"},
     )
-    result = ConversationResult(
+    result = RunResult(
         messages=messages,
         output={"ok": True},
         termination=Termination(source="engine", reason="direct"),
@@ -123,7 +123,7 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         (ConversationResponse, {"extra": True}),
         (Termination, {"source": "engine", "reason": "done", "extra": True}),
         (
-            ConversationResult,
+            RunResult,
             {
                 "messages": (),
                 "termination": Termination(source="engine", reason="done"),
@@ -196,7 +196,7 @@ def test_direct_mode_resolves_output_matrix(
 
     result = kensa_case(id="direct", input="ignored").run(agent)
 
-    assert isinstance(result, ConversationResult)
+    assert isinstance(result, RunResult)
     assert result.messages == expected_messages
     assert result.output == expected_output
     assert result.termination.source == expected_source
@@ -655,7 +655,7 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
     sync = kensa_case(id="sync", input="x").run(
         ScriptedResponder(ConversationResponse(content="ok"))
     )
-    assert isinstance(sync, ConversationResult)
+    assert isinstance(sync, RunResult)
 
     class AsyncAgent:
         async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
@@ -706,7 +706,7 @@ def test_runtime_snapshots_initial_accepted_failure_and_success() -> None:
     finally:
         reset_current_runtime(token)
 
-    assert isinstance(result, ConversationResult)
+    assert isinstance(result, RunResult)
     assert isinstance(result.output, Value)
     assert snapshots[0] == {
         "messages": [{"role": "user", "content": "hello"}],
