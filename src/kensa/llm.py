@@ -129,17 +129,26 @@ def _completion_result(
     response_format: StructuredResponseFormat | None,
     metadata: dict[str, Any] | None,
 ) -> LLMResult:
-    message = _chat_message(response)
+    try:
+        message = _chat_message(response)
+        content = _message_content(message)
+        parsed = _message_parsed(message, response_format)
+    except _LLMStructuredOutputError:
+        raise
+    except LLMProviderError as exc:
+        if response_format is not None:
+            raise _LLMStructuredOutputError(str(exc)) from exc
+        raise
     input_tokens, output_tokens, total_tokens = _extract_usage(response)
     return LLMResult(
-        content=_message_content(message),
+        content=content,
         provider=config.provider.value,
         model=config.model.value,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         metadata=metadata or {},
-        parsed=_message_parsed(message, response_format),
+        parsed=parsed,
     )
 
 

@@ -527,6 +527,38 @@ async def test_llm_simulator_missing_structured_result_is_contract_failure(
     assert execution.value.__cause__ is provider_failure
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(choices=[], usage=None),
+        SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None, parsed=None))],
+            usage=None,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_simulator_malformed_response_shape_is_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    response: Any,
+) -> None:
+    async def fake_completion(**kwargs: Any) -> Any:
+        del kwargs
+        return response
+
+    monkeypatch.setattr("kensa.llm._acompletion", fake_completion)
+
+    with pytest.raises(ConversationError) as raised:
+        await kensa_case(id="malformed_shape", input="x").run(
+            ScriptedResponder(ConversationResponse(content="unused")),
+            simulator=LLMSimulator("customer"),
+            max_turns=1,
+        )
+
+    assert raised.value.kind == "contract"
+    assert raised.value.source == "simulator"
+
+
 @pytest.mark.asyncio
 async def test_llm_simulator_invalid_parsed_result_is_contract_failure(
     monkeypatch: pytest.MonkeyPatch,
