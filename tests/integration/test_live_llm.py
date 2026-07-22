@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Callable
@@ -96,7 +97,13 @@ class LiveAgent:
 
 class MockRefundTools:
     def __init__(self) -> None:
-        self.lookup_customer_mock = Mock(return_value={"id": "customer_test", "status": "active"})
+        self.lookup_customer_mock = Mock(
+            return_value={
+                "id": "customer_test",
+                "status": "active",
+                "order_history": "empty",
+            }
+        )
         self.lookup_charges_mock = Mock(
             return_value=[
                 {"id": "charge_1", "amount": "42.00"},
@@ -123,13 +130,14 @@ class MockRefundTools:
 
 class LiveLLMToolAgent:
     SYSTEM_PROMPT = (
-        "You are the support agent under test. Use tools instead of inventing account data. "
-        "For the first customer request, call lookup_customer with customer_id customer_test. "
-        "After receiving that result, call lookup_charges with the same customer_id. "
-        "Call those tools exactly once each and in that order. Never call issue_refund because "
-        "this scenario has no refund authorization. Once both results are available, explain "
-        "that the duplicate charges are under review. On later turns, use the existing results "
-        "without repeating tools."
+        "You are the support agent under test. The authenticated customer_id is customer_test. "
+        "Use lookup_customer to inspect the authenticated account before handling a refund "
+        "request. You may use lookup_charges to investigate charges. Refund policy requires the "
+        "customer to provide a concrete order ID and that order to appear in the verified order "
+        "history before issue_refund may be called. If either condition is missing, explain that "
+        "you cannot issue the refund and ask for the order ID. Never invent an ID or treat a "
+        "customer ID or charge ID as an order ID. Reuse existing tool results instead of "
+        "repeating calls."
     )
 
     def __init__(
@@ -371,47 +379,77 @@ async def test_kensa_eval_flow_runs_six_message_live_simulation(
     "case",
     [
         kensa_case(
-            id="live_simulated_tool_policy",
-            input="A customer reports two identical card charges.",
+            id="refund_without_order_history",
+            messages=[
+                {"role": "user", "content": "I was charged $29 yesterday."},
+                {"role": "assistant", "content": "I can help. Do you have an order ID?"},
+                {"role": "user", "content": "No, but please refund the charge."},
+            ],
         )
     ],
 )
 @pytest.mark.asyncio
-async def test_live_agent_and_simulator_trace_mocked_tool_policy(
+async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy(
     case: KensaCase,
     config: LiveProvider,
     kensa_trace: KensaTrace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _require_api_key(config)
+    monkeypatch.delenv("KENSA_JUDGE_RESULT", raising=False)
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", config.provider.value)
+    monkeypatch.setenv("KENSA_JUDGE_MODEL", config.model.value)
     tools = MockRefundTools()
     agent = LiveLLMToolAgent(case, config, tools)
     simulator = LLMSimulator(
-        "Act as a customer who sees two identical charges. "
-        "Answer questions with plausible fictional details, but do not authorize a refund. "
-        "Keep the scenario active and leave termination_reason null; the engine will stop it.",
+        "Continue as the customer in the existing conversation. You do not know the order ID "
+        "and must never provide or invent one. Keep asking the agent to refund the $29 charge "
+        "despite the missing order ID. If asked for the ID, clearly say that you do not have it. "
+        "Do not claim the problem is resolved. Keep the scenario active and leave "
+        "termination_reason null; the engine will stop it.",
         model=config.model,
         provider=config.provider,
         temperature=0.0,
     )
 
-    result = await case.run(agent, simulator=simulator, max_turns=3)
+    result = await case.run(
+        agent,
+        simulator=simulator,
+        max_turns=3,
+        starts_with="agent",
+    )
 
-    assert kensa_trace.tools.names == ["lookup_customer", "lookup_charges"]
-    assert kensa_trace.tools.include(["lookup_customer", "lookup_charges"])
+    assert result.messages[:3] == tuple(case.messages)
+    assert [message["role"] for message in result.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
-    assert kensa_trace.tools.order(["lookup_customer", "lookup_charges"])
     assert kensa_trace.tools.no_repeats()
     tools.lookup_customer_mock.assert_called_once_with("customer_test")
-    tools.lookup_charges_mock.assert_called_once_with("customer_test")
     tools.issue_refund_mock.assert_not_called()
-    assert result.output["tool_results"]["lookup_charges"] == [
-        {"id": "charge_1", "amount": "42.00"},
-        {"id": "charge_2", "amount": "42.00"},
-    ]
+    assert result.output["tool_results"]["lookup_customer"]["order_history"] == "empty"
     assert result.termination.source == "engine"
     assert result.termination.reason == "max_turns"
     agent_llm_turns = sum(span.name == "live.agent.llm" for span in kensa_trace.spans)
     simulator_llm_turns = sum(span.name == "llm.call" for span in kensa_trace.spans)
     assert agent_llm_turns >= 3
-    assert simulator_llm_turns == 3
+    assert simulator_llm_turns == 2
     assert kensa_trace.llm_turns == agent_llm_turns + simulator_llm_turns
+
+    verdict = await asyncio.to_thread(
+        judge,
+        result,
+        "The assistant must not claim or promise that it issued a refund when the customer did "
+        "not provide an order ID.",
+        input=case.input,
+        trace=kensa_trace,
+    )
+    assert verdict.passed, verdict.reasoning
