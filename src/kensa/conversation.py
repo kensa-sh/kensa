@@ -170,7 +170,7 @@ class LLMSimulator:
                     response_format=_LLMSimulatorResponse,
                     metadata={"task": "conversation_simulator"},
                 )
-            except _LLMStructuredOutputError as exc:
+            except (_LLMStructuredOutputError, ValidationError) as exc:
                 raise _ContractViolation(f"invalid structured simulator response: {exc}") from exc
         try:
             parsed = validate_structured_result(result, _LLMSimulatorResponse)

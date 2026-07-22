@@ -549,6 +549,28 @@ async def test_llm_simulator_invalid_parsed_result_is_contract_failure(
 
 
 @pytest.mark.asyncio
+async def test_llm_simulator_schema_validation_error_is_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_acomplete(messages: list[dict[str, Any]], **kwargs: Any) -> LLMResult:
+        del messages, kwargs
+        Value.model_validate({"items": ["invalid"]})
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(conversation, "acomplete", fake_acomplete)
+
+    with pytest.raises(ConversationError) as raised:
+        await kensa_case(id="schema_validation_error", input="x").run(
+            ScriptedResponder(ConversationResponse(content="unused")),
+            simulator=LLMSimulator("customer"),
+            max_turns=1,
+        )
+
+    assert raised.value.kind == "contract"
+    assert raised.value.source == "simulator"
+
+
+@pytest.mark.asyncio
 async def test_invalid_simulator_responses_are_contract_failures() -> None:
     invalid = [
         object(),
