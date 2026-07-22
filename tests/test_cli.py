@@ -173,23 +173,7 @@ def _reject_langfuse_trace_read(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _write_persistent_smoke(eval_dir: Path, source: str | None = None) -> None:
     eval_dir.mkdir(parents=True, exist_ok=True)
-    (eval_dir / "test_kensa_smoke.py").write_text(
-        source
-        or """import pytest
-from kensa.pytest import kensa_case
-
-
-@pytest.mark.kensa(trials=1)
-@pytest.mark.parametrize("case", [kensa_case(id="kensa_smoke", input="hello")])
-def test_kensa_smoke(case, kensa_run, kensa_trace):
-    result = case.run(kensa_run)
-    assert result.output is not None
-    assert kensa_trace.llm_turns > 0, (
-        "Expected kensa_run to record at least one LLM span. "
-        "Wrap the real model/provider call with kensa.record_llm_call(...)."
-    )
-"""
-    )
+    (eval_dir / "test_kensa_smoke.py").write_text(source or cli.SMOKE_TEMPLATE)
 
 
 def _write_ready_harness(eval_dir: Path) -> None:
@@ -829,6 +813,33 @@ def test_doctor_passes_without_recording_readiness(
     assert (tmp_path / "tests" / "evals" / "test_kensa_smoke.py").exists()
     assert not (tmp_path / "tests" / "evals" / ".kensa_doctor_tmp").exists()
     assert _git_status(tmp_path) == status_before
+
+
+def test_doctor_accepts_async_agent_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    eval_dir = tmp_path / "tests" / "evals"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "conftest.py").write_text(
+        """import pytest
+from kensa import record_llm_call
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run(case):
+    class Agent:
+        async def respond(self, messages):
+            with record_llm_call(provider="test", model="test-model"):
+                return ConversationResponse(output={"ok": case.input})
+    return Agent()
+"""
+    )
+    _write_persistent_smoke(eval_dir)
+
+    assert main(["doctor"]) == 0
 
 
 def test_doctor_failure_does_not_mutate_legacy_settings_or_project_config(
@@ -2674,11 +2685,13 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "Case-aware adapter" in conftest
     assert "real local agent runtime" in conftest
     smoke = (tmp_path / "tests" / "evals" / "test_kensa_smoke.py").read_text()
-    assert "import pytest\n\nfrom kensa.pytest import kensa_case" in smoke
+    assert "import asyncio\nimport inspect\n\nimport pytest" in smoke
     assert "kensa_case" in smoke
     assert "@pytest.mark.kensa(trials=1)" in smoke
     assert "type=" not in smoke
     assert "case.run(kensa_run)" in smoke
+    assert "inspect.isawaitable(result)" in smoke
+    assert "asyncio.run(_resolve(result))" in smoke
     assert "kensa_trace" in smoke
     assert "assert result.output is not None" in smoke
     assert "assert kensa_trace.llm_turns > 0" in smoke
