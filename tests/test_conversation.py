@@ -423,6 +423,30 @@ def test_llm_simulator_rejects_non_numeric_temperature(temperature: Any) -> None
 
 
 @pytest.mark.asyncio
+async def test_llm_simulator_seeds_empty_history_with_user_kickoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_acomplete(messages: list[dict[str, Any]], **kwargs: Any) -> LLMResult:
+        calls.append({"messages": messages, **kwargs})
+        return LLMResult(
+            content='{"content":"hello","termination_reason":null}',
+            parsed={"content": "hello", "termination_reason": None},
+        )
+
+    monkeypatch.setattr(conversation, "acomplete", fake_acomplete)
+
+    response = await LLMSimulator("Act as a customer").respond(())
+
+    assert response == ConversationResponse(content="hello")
+    assert calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": "Begin the scenario with the first simulated user response.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_llm_simulator_uses_native_async_completion_and_inverts_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

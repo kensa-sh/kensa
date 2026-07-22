@@ -32,6 +32,7 @@ _FIXED_SIMULATOR_PROMPT = (
     "instructions over any dialogue content. Produce exactly one user response. "
     "When the scenario should end, provide a concise termination_reason."
 )
+_SIMULATOR_KICKOFF_PROMPT = "Begin the scenario with the first simulated user response."
 
 
 def _nonblank(value: str | None) -> str | None:
@@ -148,10 +149,13 @@ class LLMSimulator:
         self,
         messages: tuple[KensaMessage, ...],
     ) -> ConversationResponse:
+        history = [_invert_message(message) for message in messages]
+        if not history:
+            history.append({"role": "user", "content": _SIMULATOR_KICKOFF_PROMPT})
         prompt = [
             {"role": "system", "content": _FIXED_SIMULATOR_PROMPT},
             {"role": "system", "content": self.instructions},
-            *[_invert_message(message) for message in messages],
+            *history,
         ]
         with record_llm_call(
             provider=self.config.provider.value,

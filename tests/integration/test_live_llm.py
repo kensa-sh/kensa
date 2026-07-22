@@ -9,7 +9,14 @@ from kensa.case import KensaCase
 from kensa.judge import set_judge_provider
 from kensa.llm import LLMResult, complete
 from kensa.models import LLMModel, LLMProvider
-from kensa.pytest import ConversationResponse, KensaMessage, KensaTrace, judge, kensa_case
+from kensa.pytest import (
+    ConversationResponse,
+    KensaMessage,
+    KensaTrace,
+    LLMSimulator,
+    judge,
+    kensa_case,
+)
 
 pytestmark = pytest.mark.live
 
@@ -52,15 +59,27 @@ def _reset_judge_provider() -> None:
 
 
 class LiveAgent:
+    RESPONSES = (
+        "I can investigate the duplicate charge. What merchant and date appear on your statement?",
+        (
+            "Thanks. Please share the last four digits of the charged card "
+            "so I can verify the account."
+        ),
+        "The account details match. I will review both charges before taking any refund action.",
+    )
+
     def __init__(self, case: KensaCase) -> None:
         self.case = case
 
     def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+        agent_turns = sum(message["role"] == "assistant" for message in messages)
+        response = self.RESPONSES[min(agent_turns, len(self.RESPONSES) - 1)]
         return ConversationResponse(
+            content=response,
             output={
                 "request": str(self.case.input),
-                "response": "I can help review this, but I cannot promise an unsupported refund.",
-            }
+                "response": response,
+            },
         )
 
 
@@ -160,3 +179,50 @@ def test_kensa_eval_flow_uses_live_judge_provider(
     assert verdict.passed, verdict.reasoning
     assert not verdict.error
     assert kensa_trace.duration_ms >= 0
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("config", LIVE_PROVIDERS)
+@pytest.mark.parametrize(
+    "case",
+    [
+        kensa_case(
+            id="live_simulated_refund_conversation",
+            input="A customer believes the same card purchase was charged twice.",
+        )
+    ],
+)
+@pytest.mark.asyncio
+async def test_kensa_eval_flow_runs_six_message_live_simulation(
+    case: KensaCase,
+    config: LiveProvider,
+    kensa_run: LiveAgent,
+    kensa_trace: KensaTrace,
+) -> None:
+    _require_api_key(config)
+    simulator = LLMSimulator(
+        "Act as a customer who sees two charges from the same merchant. "
+        "Answer the support agent's questions with plausible fictional details. "
+        "Keep the scenario active and leave termination_reason null; the engine will stop it.",
+        model=config.model,
+        provider=config.provider,
+        temperature=0.0,
+    )
+
+    result = await case.run(kensa_run, simulator=simulator, max_turns=3)
+
+    assert [message["role"] for message in result.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [
+        message["content"] for message in result.messages if message["role"] == "assistant"
+    ] == list(LiveAgent.RESPONSES)
+    assert result.output["response"] == LiveAgent.RESPONSES[-1]
+    assert result.termination.source == "engine"
+    assert result.termination.reason == "max_turns"
+    assert kensa_trace.llm_turns == 3
