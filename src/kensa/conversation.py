@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Never, Protocol, cast
 
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from kensa._serialization import json_value
@@ -24,7 +26,7 @@ from kensa.llm import (
     validate_structured_result,
 )
 from kensa.runtime import current_runtime
-from kensa.tracing import record_llm_call, record_span
+from kensa.tracing import record_llm_call
 
 _MISSING = object()
 _FIXED_SIMULATOR_PROMPT = (
@@ -198,6 +200,30 @@ class _PreparedResponse:
     output_json: Any = None
 
 
+class _ConversationSpan:
+    def __init__(self, name: str, attributes: dict[str, Any]) -> None:
+        self.name = name
+        self.attributes = attributes
+        self.runtime = current_runtime()
+        self.span = trace.get_tracer("kensa.app").start_span(name, attributes=attributes)
+        self.ended = False
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        operation = (
+            self.runtime.operation(self.name, self.attributes)
+            if self.runtime is not None
+            else nullcontext()
+        )
+        with operation, trace.use_span(self.span, end_on_exit=False):
+            yield
+
+    def end(self) -> None:
+        if not self.ended:
+            self.span.end()
+            self.ended = True
+
+
 def _run_conversation(
     case: KensaCase,
     agent: ConversationAgent,
@@ -303,19 +329,19 @@ def _attempt(
     agent_responses: int,
     simulated: bool,
 ) -> _PreparedResponse | Awaitable[_PreparedResponse]:
-    span = record_span(
+    span = _ConversationSpan(
         "kensa.conversation.respond",
-        **{
+        {
             "kensa.case_id": case_id,
             "kensa.conversation.source": source,
             "kensa.conversation.response_index": response_index,
             "kensa.conversation.agent_responses": agent_responses,
         },
     )
-    span.__enter__()
     messages = _history_for(source, state.messages)
     try:
-        response = respond(messages)
+        with span.activate():
+            response = respond(messages)
     except BaseException as exc:
         _raise_attempt_error(span, exc, source, state)
 
@@ -323,20 +349,22 @@ def _attempt(
 
         async def _await_response() -> _PreparedResponse:
             try:
-                value = await response
-                prepared = _prepare_response(value, source, simulated=simulated)
+                with span.activate():
+                    value = await response
+                    prepared = _prepare_response(value, source, simulated=simulated)
             except BaseException as exc:
                 _raise_attempt_error(span, exc, source, state)
-            span.__exit__(None, None, None)
+            span.end()
             return prepared
 
         return _await_response()
 
     try:
-        prepared = _prepare_response(response, source, simulated=simulated)
+        with span.activate():
+            prepared = _prepare_response(response, source, simulated=simulated)
     except BaseException as exc:
         _raise_attempt_error(span, exc, source, state)
-    span.__exit__(None, None, None)
+    span.end()
     return prepared
 
 
@@ -347,7 +375,7 @@ def _raise_attempt_error(
     state: _State,
 ) -> Never:
     if not isinstance(exc, Exception):
-        span.__exit__(type(exc), exc, exc.__traceback__)
+        span.end()
         raise exc
     kind: Literal["contract", "execution"] = (
         "contract" if isinstance(exc, _ContractViolation) else "execution"
@@ -359,7 +387,7 @@ def _raise_attempt_error(
         messages=tuple(state.messages),
         output=None if state.output is _MISSING else state.output,
     )
-    span.__exit__(type(error), error, error.__traceback__)
+    span.end()
     if kind == "contract":
         raise error from None
     raise error from exc

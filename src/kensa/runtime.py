@@ -274,7 +274,7 @@ class KensaTrialRuntime:
         self.case = _jsonable_mapping(case.row)
         ensure_tracing()
         tracer = trace.get_tracer("kensa.pytest")
-        span_cm = tracer.start_as_current_span(
+        span = tracer.start_span(
             "kensa.pytest.trial",
             context=otel_context.Context(),
             attributes={
@@ -284,31 +284,32 @@ class KensaTrialRuntime:
                 "kensa.pytest_nodeid": self.nodeid,
             },
         )
-        span = span_cm.__enter__()
         self._trace_id = f"{span.get_span_context().trace_id:032x}"
         try:
-            result = operation()
+            with trace.use_span(span, end_on_exit=False):
+                result = operation()
         except BaseException as exc:
             span.set_status(Status(StatusCode.ERROR, str(exc)))
-            span_cm.__exit__(type(exc), exc, exc.__traceback__)
+            span.end()
             self._flush_and_populate_trace()
             raise
 
         if inspect.isawaitable(result):
-            return self._await_result(result, span_cm, span)
+            return self._await_result(result, span)
 
-        span_cm.__exit__(None, None, None)
+        span.end()
         return self._record_output_and_trace(result)
 
-    async def _await_result(self, result: Awaitable[Any], span_cm: Any, span: Any) -> Any:
+    async def _await_result(self, result: Awaitable[Any], span: Any) -> Any:
         try:
-            value = await result
+            with trace.use_span(span, end_on_exit=False):
+                value = await result
         except BaseException as exc:
             span.set_status(Status(StatusCode.ERROR, str(exc)))
-            span_cm.__exit__(type(exc), exc, exc.__traceback__)
+            span.end()
             self._flush_and_populate_trace()
             raise
-        span_cm.__exit__(None, None, None)
+        span.end()
         return self._record_output_and_trace(value)
 
     def _record_output_and_trace(self, value: Any) -> Any:

@@ -732,6 +732,39 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
     asyncio.run(cast(Any, simulated))
 
 
+@pytest.mark.asyncio
+async def test_async_case_run_can_move_to_a_new_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class AsyncAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            await asyncio.sleep(0)
+            return ConversationResponse(content="ok")
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_async_case_run_can_move_to_a_new_task",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+    )
+    token = set_current_runtime(runtime)
+    try:
+        pending = kensa_case(id="new_task", input="x").run(AsyncAgent())
+        await asyncio.sleep(0)
+        result = await asyncio.create_task(cast(Any, pending))
+    finally:
+        reset_current_runtime(token)
+
+    assert result.output == "ok"
+    assert not any("Failed to detach context" in record.getMessage() for record in caplog.records)
+    trial_span = next(span for span in runtime.trace.spans if span.name == "kensa.pytest.trial")
+    response_span = next(
+        span for span in runtime.trace.spans if span.name == "kensa.conversation.respond"
+    )
+    assert response_span.parent_span_id == trial_span.span_id
+
+
 def test_runtime_snapshots_initial_accepted_failure_and_success() -> None:
     snapshots: list[Any] = []
     runtime = KensaTrialRuntime(
