@@ -84,19 +84,23 @@ class Termination(BaseModel):
 class CaseResult(BaseModel):
     """The observable outcome of one completed agent run."""
 
+    __slots__ = ("_kensa_trace",)
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     messages: tuple[KensaMessage, ...]
     output: Any = None
     termination: Termination
 
-    def model_post_init(self, __context: Any) -> None:
-        object.__setattr__(self, "_kensa_trace", KensaTrace())
-
     @property
     def trace(self) -> KensaTrace:
         """Return trace evidence collected for this run."""
-        return cast(KensaTrace, self.__dict__["_kensa_trace"])
+        try:
+            return cast(KensaTrace, object.__getattribute__(self, "_kensa_trace"))
+        except AttributeError:
+            trace = KensaTrace()
+            object.__setattr__(self, "_kensa_trace", trace)
+            return trace
 
 
 class ConversationError(RuntimeError):

@@ -130,6 +130,7 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
     assert unmanaged.trace is unmanaged.trace
     assert unmanaged.trace.spans == []
     assert not unmanaged.trace.incomplete
+    assert "_kensa_trace" not in unmanaged.__dict__
     assert set(CaseResult.model_fields) == {"messages", "output", "termination"}
     assert unmanaged.model_dump() == {
         "messages": (),
@@ -148,8 +149,11 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         "CaseResult(messages=(), output=None, "
         "termination=Termination(source='engine', reason='direct'))"
     )
+    unmanaged_hash = hash(unmanaged)
     unmanaged.trace.replace([], incomplete=True, incomplete_reason="partial")
     assert unmanaged == equivalent
+    assert hash(unmanaged) == unmanaged_hash == hash(equivalent)
+    assert not unmanaged.model_copy().trace.incomplete
     with pytest.raises(ValidationError, match="frozen"):
         cast(Any, unmanaged).trace = equivalent.trace
 
