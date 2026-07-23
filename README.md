@@ -179,8 +179,7 @@ LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, use the
 `kensa_run(case)` fixture to build one case-aware conversation agent, and call
 `case.run(kensa_run)`. Every successful run returns a `CaseResult` with messages, output,
-termination, and a read-only `result.trace` accessor. The `kensa_trace` fixture remains available
-for failures, timeouts, and compatibility. Reserve LLM-as-judge for semantic checks.
+termination, and a read-only `result.trace` accessor. Reserve LLM-as-judge for semantic checks.
 
 </details>
 
@@ -189,7 +188,7 @@ for failures, timeouts, and compatibility. Reserve LLM-as-judge for semantic che
 
 You can. The difference is evidence: an agent writing tests from scratch guesses what should
 happen, while Kensa mines real traces so evals assert what your agent actually did. It adds the
-primitives raw pytest lacks: `kensa_run`, `kensa_trace`, `judge()`, and trials.
+primitives raw pytest lacks: `kensa_run`, `result.trace`, `judge()`, and trials.
 
 </details>
 

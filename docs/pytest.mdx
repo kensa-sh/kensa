@@ -93,12 +93,7 @@ trace. `kensa doctor` inspects
 |---|---|---|
 | `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
 | `kensa_run` | you (`conftest.py`) | One case-aware `ConversationAgent` instance per trial |
-| `kensa_trace` | Kensa | Independent accessor to the current trial trace |
 | `@pytest.mark.kensa(trials=N, timeout_s=SECONDS)` | Kensa | Run each case `N` times with an optional hard timeout under `kensa eval` |
-
-Within a managed trial, a successful run satisfies `result.trace is kensa_trace`. Keep using the
-fixture when a failure or timeout can prevent `CaseResult` from being returned, or for compatibility
-with existing evals.
 
 ## Async agents
 

@@ -81,9 +81,6 @@ redacts retained values before storage.
 | `result.trace.duration_ms` | Total trace duration |
 | `result.trace.spans` | Raw collected spans |
 
-The `kensa_trace` fixture remains available as an independent trial accessor for failures, timeouts,
-and existing evals. On success inside a managed trial, `result.trace is kensa_trace`.
-
 ## Assertions
 
 Assertions answer binary questions about the run. **Deterministic** assertions are free and fast - plain `assert` and `result.trace.*` (tool calls, cost, turns, latency). Because pytest stops at the first failed assertion, ordering them before the judge means obvious regressions never reach an LLM call.

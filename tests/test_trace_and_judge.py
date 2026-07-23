@@ -156,13 +156,13 @@ def test_agent(case, kensa_run, kensa_trace):
     result = case.run(kensa_run)
     assert result.output == {"ok": True}
     assert result.trace is kensa_trace
-    assert not hasattr(kensa_trace, "called")
+    assert not hasattr(result.trace, "called")
     assert result.trace.tools.include(["lookup_customer"])
     assert result.trace.tools.exclude(["missing"])
     assert result.trace.tools.order(["lookup_customer", "lookup_customer"])
     assert not result.trace.tools.order(["missing", "lookup_customer"])
     assert not result.trace.tools.no_repeats()
-    assert kensa_trace.tools.names == ["lookup_customer", "lookup_customer"]
+    assert result.trace.tools.names == ["lookup_customer", "lookup_customer"]
     assert result.trace.duration_ms >= 0
 """
     )
@@ -203,9 +203,8 @@ from kensa.pytest import kensa_case
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
-def test_agent(case, kensa_run, kensa_trace):
+def test_agent(case, kensa_run):
     result = case.run(kensa_run)
-    assert result.trace is kensa_trace
     assert result.trace.incomplete
     assert "force_flush" in result.trace.incomplete_reason
 """

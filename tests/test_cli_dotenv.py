@@ -177,10 +177,11 @@ from kensa.pytest import kensa_case
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="dotenv_secret", input="hello")])
-def test_dotenv_secret(case, kensa_run, kensa_trace):
+def test_dotenv_secret(case, kensa_run):
     assert os.environ.get("OPENAI_API_KEY") is not None
-    assert case.run(kensa_run).output == {"ok": "hello"}
-    assert kensa_trace.llm_turns == 1
+    result = case.run(kensa_run)
+    assert result.output == {"ok": "hello"}
+    assert result.trace.llm_turns == 1
 """
     )
     report = tmp_path / "report.json"

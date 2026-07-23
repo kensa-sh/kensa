@@ -4,7 +4,6 @@ description: Deterministic trace and output assertions. Fast, free, and they gat
 sidebarTitle: Assertions
 keywords:
   - assertions
-  - kensa_trace
   - output
   - tools
   - cost
@@ -70,10 +69,6 @@ def test_within_budget(case, kensa_run):
 | `result.trace.spans` | `list` | Raw collected spans, for custom checks |
 
 <Note>`result.trace.incomplete` is `True` when the trace could not be fully collected. Guard budget assertions on it if your harness can return early.</Note>
-
-The `kensa_trace` fixture remains an independent accessor to the current trial trace. Use it when a
-run can fail or time out before returning `CaseResult`, or to keep existing evals unchanged. Within a
-managed trial, a successful run satisfies `result.trace is kensa_trace`.
 
 ## Output assertions
 
