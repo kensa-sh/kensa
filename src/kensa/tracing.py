@@ -15,7 +15,7 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from kensa._serialization import jsonable
-from kensa.runtime import current_runtime
+from kensa.runtime import OperationKind, current_runtime
 from kensa.traces import write_trace_manifest
 
 
@@ -217,7 +217,12 @@ def _span_links(span: ReadableSpan) -> list[dict[str, Any]]:
 @contextmanager
 def record_span(name: str, **attributes: Any) -> Iterator[None]:
     attrs = _flatten_attributes(attributes)
-    with _record_span(name, span_attributes=attrs, operation_attributes=attrs):
+    with _record_span(
+        name,
+        span_attributes=attrs,
+        operation_attributes=attrs,
+        operation_kind="span",
+    ):
         yield
 
 
@@ -227,11 +232,14 @@ def _record_span(
     *,
     span_attributes: dict[str, Any],
     operation_attributes: dict[str, Any],
+    operation_kind: OperationKind,
 ) -> Iterator[None]:
     tracer = trace.get_tracer("kensa.app")
     runtime = current_runtime()
     operation = (
-        runtime.operation(name, operation_attributes) if runtime is not None else nullcontext()
+        runtime.operation(name, operation_attributes, kind=operation_kind)
+        if runtime is not None
+        else nullcontext()
     )
     with operation, tracer.start_as_current_span(name, attributes=span_attributes):
         yield
@@ -249,6 +257,7 @@ def record_tool_call(name: str, **attributes: Any) -> Iterator[None]:
         name,
         span_attributes=attrs,
         operation_attributes=operation_attributes,
+        operation_kind="tool",
     ):
         yield
 
@@ -276,6 +285,7 @@ def record_llm_call(
         name,
         span_attributes=attrs,
         operation_attributes=operation_attributes,
+        operation_kind="llm",
     ):
         yield
 

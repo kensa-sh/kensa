@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -30,6 +30,23 @@ _CURRENT_RUNTIME: ContextVar[KensaTrialRuntime | None] = ContextVar(
 _EXPORTER: Any | None = None
 _PROVIDER_READY = False
 
+OperationKind = Literal["span", "tool", "llm"]
+_GEN_AI_LLM_OPERATIONS = frozenset({"chat", "embeddings", "generate_content", "text_completion"})
+_GEN_AI_LLM_ATTRIBUTES = frozenset(
+    {
+        "gen_ai.completion",
+        "gen_ai.prompt",
+        "gen_ai.provider.name",
+        "gen_ai.request.model",
+        "gen_ai.response.model",
+        "gen_ai.system",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+    }
+)
+
 
 @dataclass(frozen=True)
 class KensaTrial:
@@ -46,10 +63,12 @@ class KensaTrial:
 class ActiveOperation:
     name: str
     attributes: dict[str, Any] = field(default_factory=dict)
+    kind: OperationKind = "span"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "kind": self.kind,
             "attributes": self.attributes,
         }
 
@@ -160,8 +179,8 @@ class KensaTrace:
         return KensaTraceTools(self)
 
     @property
-    def cost_usd(self) -> float:
-        return round(sum(span.cost_usd for span in self.spans), 8)
+    def cost_usd(self) -> float | None:
+        return self.known_cost_usd if self.cost_available else None
 
     @property
     def known_cost_usd(self) -> float | None:
@@ -205,7 +224,7 @@ class KensaTrace:
         return {
             "spans": [span.to_dict() for span in self.spans],
             "tools": self.tools.names,
-            "cost_usd": known_cost_usd if self.cost_available else None,
+            "cost_usd": self.cost_usd,
             "known_cost_usd": known_cost_usd,
             "cost_available": self.cost_available,
             "llm_turns": self.llm_turns,
@@ -294,9 +313,19 @@ class KensaTrialRuntime:
         self._snapshot_callback = snapshot_callback
 
     @contextmanager
-    def operation(self, name: str, attributes: dict[str, Any]) -> Iterator[None]:
+    def operation(
+        self,
+        name: str,
+        attributes: dict[str, Any],
+        *,
+        kind: OperationKind = "span",
+    ) -> Iterator[None]:
         token = object()
-        operation = ActiveOperation(name=name, attributes=_jsonable_mapping(attributes))
+        operation = ActiveOperation(
+            name=name,
+            attributes=_jsonable_mapping(attributes),
+            kind=kind,
+        )
         self._active_operations[token] = operation
         self._publish_active_operation(operation)
         try:
@@ -305,6 +334,9 @@ class KensaTrialRuntime:
             self._active_operations.pop(token)
             active = next(reversed(self._active_operations.values()), None)
             self._publish_active_operation(active)
+            if kind == "llm" and self._trace_id is not None:
+                self._flush_and_populate_trace()
+                self._publish_snapshot(require_output=False)
 
     def _publish_active_operation(self, operation: ActiveOperation | None) -> None:
         if self._operation_callback is not None:
@@ -372,8 +404,8 @@ class KensaTrialRuntime:
         self._flush_and_populate_trace()
         self._publish_snapshot()
 
-    def _publish_snapshot(self) -> None:
-        if self.output_recorded and self._snapshot_callback is not None:
+    def _publish_snapshot(self, *, require_output: bool = True) -> None:
+        if (self.output_recorded or not require_output) and self._snapshot_callback is not None:
             self._snapshot_callback(self)
 
     def _flush_and_populate_trace(self) -> None:
@@ -471,7 +503,7 @@ def _normalize_span(raw: Any) -> KensaSpan:
         or attrs.get("gen_ai.tool.name")
         or attrs.get("openinference.tool.name")
     )
-    kind = str(attrs.get("kensa.span.kind") or ("tool" if tool_name else "span"))
+    kind = _normalized_span_kind(attrs, tool_name=tool_name)
     parent = getattr(raw, "parent", None)
     status = getattr(getattr(raw, "status", None), "status_code", None)
     status_name = getattr(status, "name", "OK").lower()
@@ -487,6 +519,20 @@ def _normalize_span(raw: Any) -> KensaSpan:
         status="error" if status_name == "error" else "ok",
         attributes={str(k): jsonable(v) for k, v in attrs.items()},
     )
+
+
+def _normalized_span_kind(attrs: dict[str, Any], *, tool_name: Any) -> str:
+    explicit_kind = attrs.get("kensa.span.kind")
+    if explicit_kind:
+        return str(explicit_kind)
+    if tool_name:
+        return "tool"
+    operation = attrs.get("gen_ai.operation.name")
+    if operation is not None:
+        return "llm" if str(operation) in _GEN_AI_LLM_OPERATIONS else "span"
+    if any(attribute in attrs for attribute in _GEN_AI_LLM_ATTRIBUTES):
+        return "llm"
+    return "span"
 
 
 def _jsonable_mapping(value: Any) -> dict[str, Any]:
@@ -513,6 +559,7 @@ __all__ = [
     "KensaTrace",
     "KensaTrial",
     "KensaTrialRuntime",
+    "OperationKind",
     "TrialMetadata",
     "collect_spans",
     "current_runtime",

@@ -139,6 +139,7 @@ def test_kensa_trace_and_span_edge_paths() -> None:
     assert trace.to_dict()["llm_turns"] == 1
     trace.replace([llm_span, KensaSpan(name="unknown", kind="llm")])
     assert trace.cost_available is False
+    assert trace.cost_usd is None
     partial_cost = trace.to_dict()
     assert partial_cost["cost_usd"] is None
     assert partial_cost["known_cost_usd"] == 0.2
@@ -694,13 +695,23 @@ def test_pytest_plugin_watchdog_control_paths(
     active = read_control(control_path).active_trial
     assert active is not None
     assert active.timeout_s == 2
-    operation = ActiveOperation("model.call", {"attempt": 1})
+    assert active.phase == "setup"
+    operation = ActiveOperation("model.call", {"attempt": 1}, kind="llm")
+    assert operation.to_dict()["kind"] == "llm"
+    state.set_active_phase("other", "call")
+    assert read_control(control_path).active_trial == active
     state.set_active_operation("other", operation)
     assert read_control(control_path).active_trial == active
     state.set_active_operation(item.nodeid, operation)
     operation_active = read_control(control_path).active_trial
     assert operation_active is not None
     assert operation_active.active_operation == operation
+    state.set_active_phase(item.nodeid, "call")
+    call_active = read_control(control_path).active_trial
+    assert call_active is not None
+    assert call_active.phase == "call"
+    assert call_active.call_started_monotonic_ns is not None
+    assert call_active.active_operation is None
     state.set_active_operation(item.nodeid, None)
     cleared_active = read_control(control_path).active_trial
     assert cleared_active is not None
@@ -730,6 +741,7 @@ def test_pytest_plugin_watchdog_control_paths(
     plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
     plain_state.set_trial_snapshot(snapshot)
     plain_state.set_active_operation("n", operation)
+    plain_state.set_active_phase("n", "call")
     plain_state.set_active_trial(
         ActiveTrial(
             nodeid="n",
@@ -784,6 +796,23 @@ def test_pytest_plugin_watchdog_control_paths(
     next(skipped_hook)
     with pytest.raises(StopIteration):
         skipped_hook.send(Outcome(skipped_report))
+    assert state.trials[0].status == "skipped"
+    assert state.trials[0].error_kind == "skip"
+
+    state.trials[0] = TrialMetadata(
+        nodeid="n[trial1]",
+        group_id="n",
+        case_id="default",
+        trial_index=1,
+        configured_trials=1,
+        status="fail",
+    )
+    teardown_skip = SimpleNamespace(when="teardown", failed=False, skipped=True)
+    teardown_hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
+    next(teardown_hook)
+    with pytest.raises(StopIteration):
+        teardown_hook.send(Outcome(teardown_skip))
+    assert state.trials[0].status == "fail"
 
 
 def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -36,6 +36,7 @@ from kensa.scoring import run_summary
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     ActiveTrial,
+    TrialPhase,
     read_control,
     validate_timeout_s,
     worker_control_path,
@@ -124,6 +125,27 @@ class KensaSessionState:
         self.control = replace(
             self.control,
             active_trial=replace(active_trial, active_operation=operation),
+        )
+        write_control(self.control_path, self.control)
+
+    def set_active_phase(self, nodeid: str, phase: TrialPhase) -> None:
+        if self.control_path is None or self.control is None:
+            return
+        active_trial = self.control.active_trial
+        if active_trial is None or active_trial.nodeid != nodeid:
+            return
+        self.control = replace(
+            self.control,
+            active_trial=replace(
+                active_trial,
+                phase=phase,
+                call_started_monotonic_ns=(
+                    time.monotonic_ns()
+                    if phase == "call" and active_trial.call_started_monotonic_ns is None
+                    else active_trial.call_started_monotonic_ns
+                ),
+                active_operation=None,
+            ),
         )
         write_control(self.control_path, self.control)
 
@@ -379,6 +401,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
                 configured_trials=runtime.trial.configured_trials,
                 timeout_s=timeout_s,
                 started_monotonic_ns=time.monotonic_ns(),
+                phase="setup",
             )
         )
     try:
@@ -389,13 +412,14 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         reset_current_runtime(token)
 
 
-@pytest.hookimpl(hookwrapper=True)
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_call(item: pytest.Item) -> Any:
     runtime = _runtime_for_item(item)
     if runtime is None:
         yield
         return
 
+    _state(item.config).set_active_phase(item.nodeid, "call")
     start = time.monotonic()
     outcome = yield
     duration_ms = (time.monotonic() - start) * 1000
@@ -406,7 +430,10 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
         return
 
     exc = excinfo[1]
-    if isinstance(exc, AssertionError):
+    if isinstance(exc, pytest.skip.Exception):
+        status = "skipped"
+        error_kind = "skip"
+    elif isinstance(exc, AssertionError):
         status = "fail"
         error_kind = "assertion"
     else:
@@ -423,6 +450,15 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
     )
 
 
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
+    del nextitem
+    runtime = _runtime_for_item(item)
+    if runtime is not None:
+        _state(item.config).set_active_phase(item.nodeid, "teardown")
+    yield
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> Any:
     outcome = yield
@@ -430,7 +466,28 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
     runtime = _runtime_for_item(item)
     if runtime is None:
         return
-    if report.when == "setup" and getattr(report, "skipped", False):
+    if getattr(report, "skipped", False):
+        existing = _trial_metadata(item.config, item.nodeid)
+        preserve_call_failure = (
+            report.when == "teardown"
+            and existing is not None
+            and existing.status in {"fail", "error"}
+        )
+        if not preserve_call_failure and (existing is None or existing.status != "skipped"):
+            _record_trial(
+                item.config,
+                runtime.metadata(
+                    status="skipped",
+                    duration_ms=existing.duration_ms if existing is not None else 0.0,
+                    error=(
+                        str(call.excinfo.value) if call.excinfo else f"pytest {report.when} skipped"
+                    ),
+                    error_kind="skip",
+                ),
+            )
+        metadata = _trial_metadata(item.config, item.nodeid)
+        if metadata is not None:
+            report.__dict__[_TRIAL_METADATA_REPORT_KEY] = metadata.to_dict()
         return
     if report.when in {"setup", "teardown"} and report.failed:
         existing = _trial_metadata(item.config, item.nodeid)
@@ -566,6 +623,8 @@ def pytest_terminal_summary(
     passed = sum(1 for aggregate in state.aggregates if aggregate.verdict == "pass")
     terminalreporter.write_line(f"{passed}/{len(state.aggregates)} aggregate case(s) passed")
     _write_scoring_summary(terminalreporter, summary)
+    if not state.aggregates:
+        return
     terminalreporter.write_line("")
     case_counts = Counter(aggregate.case_id for aggregate in state.aggregates)
     case_labels = [

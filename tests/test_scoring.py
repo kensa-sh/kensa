@@ -8,7 +8,7 @@ import pytest
 
 from kensa import cli
 from kensa._smoke import is_smoke_aggregate, is_smoke_identity, is_smoke_trial
-from kensa.artifacts import write_run_artifacts
+from kensa.artifacts import aggregate_trials, write_run_artifacts
 from kensa.pytest_plugin import _write_scoring_summary
 from kensa.runtime import TrialMetadata
 from kensa.scoring import (
@@ -159,6 +159,35 @@ def test_cost_latency_preserves_partial_cost_within_one_trial() -> None:
     assert cost_latency([trial])["known_cost_usd"] == 0.2
 
 
+def test_cost_latency_treats_active_llm_timeout_as_unknown_cost() -> None:
+    timed_out = _trial(
+        status="error",
+        case_id="timeout",
+        cost_usd=None,
+        llm_turns=0,
+        cost_available=False,
+        error_kind="timeout",
+    )
+    timed_out["active_operation"] = {
+        "name": "llm.call",
+        "kind": "llm",
+        "attributes": {},
+    }
+
+    summary = cost_latency([_trial(status="pass", cost_usd=0.1), timed_out])
+
+    assert summary["total_cost_usd"] is None
+    assert summary["known_cost_usd"] == 0.1
+    assert summary["cost_known_trials"] == 1
+    assert summary["cost_relevant_trials"] == 2
+    assert summary["cost_coverage"] == 0.5
+    assert summary["cost_complete"] is False
+    assert summary["cost_partial"] is True
+
+    timed_out["active_operation"]["kind"] = "tool"
+    assert cost_latency([timed_out])["cost_relevant_trials"] == 0
+
+
 def test_cost_latency_handles_legacy_and_invalid_cost_metadata() -> None:
     legacy_priced = _trial(
         status="pass",
@@ -249,6 +278,38 @@ def test_run_summary_counts_agent_errors_and_timeouts_as_failures() -> None:
     ]
 
 
+def test_aggregate_trials_excludes_skipped_trials() -> None:
+    skipped = TrialMetadata(
+        nodeid="test_eval.py::test_agent[trial1-case-a]",
+        group_id="test_eval.py::test_agent[case-a]",
+        case_id="case-a",
+        trial_index=1,
+        configured_trials=2,
+        status="skipped",
+        error_kind="skip",
+    )
+    passed = TrialMetadata(
+        nodeid="test_eval.py::test_agent[trial2-case-a]",
+        group_id="test_eval.py::test_agent[case-a]",
+        case_id="case-a",
+        trial_index=2,
+        configured_trials=2,
+        status="pass",
+    )
+
+    aggregates = aggregate_trials([skipped, passed])
+
+    assert len(aggregates) == 1
+    assert aggregates[0].configured_trials == 2
+    assert aggregates[0].total == 1
+    assert aggregates[0].skipped == 1
+    assert aggregates[0].partial is False
+    assert aggregates[0].verdict == "pass"
+    assert aggregates[0].trials == [passed]
+    assert aggregates[0].to_dict()["skipped"] == 1
+    assert aggregate_trials([skipped]) == []
+
+
 def test_run_summary_excludes_setup_and_teardown_from_all_metrics() -> None:
     summary = run_summary(
         {
@@ -310,6 +371,21 @@ def test_run_summary_uses_internal_and_legacy_smoke_identity() -> None:
     assert is_smoke_aggregate({"trials": [legacy_id]})
     assert is_smoke_aggregate({"group_id": legacy_node["group_id"]})
     assert not is_smoke_aggregate({"smoke": False, "case_id": "kensa_smoke"})
+
+
+def test_smoke_identity_requires_exact_pytest_node() -> None:
+    assert is_smoke_identity(
+        case_id="",
+        nodeid="tests/evals/test_kensa_smoke.py::test_kensa_smoke[readiness-trial1]",
+    )
+    assert not is_smoke_identity(
+        case_id="refund",
+        nodeid="tests/evals/test_kensa_smoke.py::test_kensa_smoke_refund[refund-trial1]",
+    )
+    assert not is_smoke_identity(
+        case_id="refund",
+        nodeid="tests/evals/test_refund.py::test_kensa_smoke[refund-trial1]",
+    )
 
 
 def test_terminal_reports_cohort_population_and_cost_coverage() -> None:

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from kensa.artifacts import (
     load_trials,
@@ -24,7 +24,7 @@ from kensa.artifacts import (
     write_json_atomic,
     write_run_artifacts,
 )
-from kensa.runtime import ActiveOperation, TrialMetadata
+from kensa.runtime import ActiveOperation, OperationKind, TrialMetadata
 
 DEFAULT_JUDGE_TIMEOUT_S = 30.0
 DEFAULT_TRIAL_TIMEOUT_S = 300.0
@@ -47,6 +47,10 @@ _HEARTBEAT_SECRET = re.compile(
 _HEARTBEAT_AWS_KEY = re.compile(r"^AKIA[0-9A-Z]{16}$")
 _HEARTBEAT_JWT = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
+TrialPhase = Literal["setup", "call", "teardown"]
+_OPERATION_KINDS = frozenset({"span", "tool", "llm"})
+_TRIAL_PHASES = frozenset({"setup", "call", "teardown"})
+
 
 @dataclass(frozen=True)
 class ActiveTrial:
@@ -57,6 +61,8 @@ class ActiveTrial:
     configured_trials: int
     timeout_s: float
     started_monotonic_ns: int
+    call_started_monotonic_ns: int | None = None
+    phase: TrialPhase = "setup"
     active_operation: ActiveOperation | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +74,8 @@ class ActiveTrial:
             "configured_trials": self.configured_trials,
             "timeout_s": timeout_value(self.timeout_s),
             "started_monotonic_ns": self.started_monotonic_ns,
+            "call_started_monotonic_ns": self.call_started_monotonic_ns,
+            "phase": self.phase,
             "active_operation": (
                 self.active_operation.to_dict() if self.active_operation is not None else None
             ),
@@ -84,6 +92,12 @@ class ActiveTrial:
             configured_trials=int(payload["configured_trials"]),
             timeout_s=validate_timeout_s(payload["timeout_s"]),
             started_monotonic_ns=int(payload["started_monotonic_ns"]),
+            call_started_monotonic_ns=(
+                int(payload["call_started_monotonic_ns"])
+                if payload.get("call_started_monotonic_ns") is not None
+                else None
+            ),
+            phase=_trial_phase(payload.get("phase")),
             active_operation=(
                 ActiveOperation(
                     name=str(operation_payload["name"]),
@@ -92,6 +106,7 @@ class ActiveTrial:
                         if isinstance(operation_payload.get("attributes"), dict)
                         else {}
                     ),
+                    kind=_operation_kind(operation_payload.get("kind")),
                 )
                 if isinstance(operation_payload, dict)
                 else None
@@ -153,6 +168,7 @@ class TimeoutResult:
     case_id: str
     trial_index: int
     timeout_s: float
+    phase: TrialPhase
     message: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +176,7 @@ class TimeoutResult:
             "case_id": self.case_id,
             "trial_index": self.trial_index,
             "timeout_s": timeout_value(self.timeout_s),
+            "phase": self.phase,
         }
 
 
@@ -178,6 +195,18 @@ def validate_timeout_s(value: Any) -> float:
     if not math.isfinite(resolved) or resolved <= 0:
         raise ValueError("timeout must be a positive finite number")
     return resolved
+
+
+def _operation_kind(value: Any) -> OperationKind:
+    if not isinstance(value, str) or value not in _OPERATION_KINDS:
+        raise ValueError("Invalid Kensa active operation kind")
+    return cast(OperationKind, value)
+
+
+def _trial_phase(value: Any) -> TrialPhase:
+    if not isinstance(value, str) or value not in _TRIAL_PHASES:
+        raise ValueError("Invalid Kensa active trial phase")
+    return cast(TrialPhase, value)
 
 
 def timeout_value(value: float) -> int | float:
@@ -302,8 +331,12 @@ def _trial_expired(active: ActiveTrial) -> bool:
 
 
 def _trial_elapsed_ms(active: ActiveTrial) -> float:
-    elapsed_ms = (time.monotonic_ns() - active.started_monotonic_ns) / 1_000_000
-    return max(active.timeout_s * 1000, elapsed_ms)
+    started_monotonic_ns = (
+        active.call_started_monotonic_ns
+        if active.phase == "call" and active.call_started_monotonic_ns is not None
+        else active.started_monotonic_ns
+    )
+    return max(0.0, (time.monotonic_ns() - started_monotonic_ns) / 1_000_000)
 
 
 def _emit_heartbeat(
@@ -471,6 +504,7 @@ def _record_timeout(
         f"{format_timeout_s(active.timeout_s)} seconds."
     )
     trials = load_trials(control.result_path)
+    error_kind = active.phase if active.phase != "call" else "timeout"
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
     if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
         existing = control.trial_snapshot
@@ -494,7 +528,7 @@ def _record_timeout(
             configured_trials=active.configured_trials,
             status="error",
             error=message,
-            error_kind="timeout",
+            error_kind=error_kind,
             duration_ms=round(duration_ms, 3),
             trace=trace,
             active_operation=(
@@ -509,7 +543,7 @@ def _record_timeout(
             existing,
             status="error",
             error=message,
-            error_kind="timeout",
+            error_kind=error_kind,
             duration_ms=round(duration_ms, 3),
             trace=trace,
             active_operation=(
@@ -530,12 +564,14 @@ def _record_timeout(
             "nodeid": active.nodeid,
             "case_id": active.case_id,
             "trial_index": active.trial_index,
+            "phase": active.phase,
         },
     )
     return TimeoutResult(
         case_id=active.case_id,
         trial_index=active.trial_index,
         timeout_s=active.timeout_s,
+        phase=active.phase,
         message=message,
     )
 
@@ -546,6 +582,7 @@ __all__ = [
     "ActiveTrial",
     "EvalProcessResult",
     "TimeoutResult",
+    "TrialPhase",
     "WatchdogControl",
     "format_heartbeat",
     "format_timeout_s",

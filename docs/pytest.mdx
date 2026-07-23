@@ -157,6 +157,10 @@ Kensa aggregates the trials per case at session end:
 
 `fail`, `flaky`, and `error` fail the pytest session.
 
+Aggregate objects keep `configured_trials` at the requested trial count. Their `total` field counts
+recorded non-skipped trials, while `skipped` reports recorded skips. A skip does not make an
+aggregate partial by itself.
+
 ### Reliability, cost, and latency
 
 Kensa reports `pass^k`, following the reliability metric introduced by
@@ -171,9 +175,10 @@ The reported value is the average across cohorts with at least `k` trials. Each 
 its own `cohorts` count because fewer cohorts may qualify as `k` increases. Cohorts are keyed by
 pytest `group_id`, so separate parameter configurations of the same case are scored independently.
 
-A passing trial is successful. Assertion failures, agent exceptions, and timeouts are unsuccessful.
-Smoke trials, skipped trials, fixture setup failures, fixture teardown failures, and explicitly
-classified infrastructure failures are excluded from reliability, latency, and cost metrics.
+A passing trial is successful. Assertion failures, agent exceptions, and call-phase timeouts are
+unsuccessful. Smoke trials, skipped trials, fixture setup or teardown failures and timeouts, and
+explicitly classified infrastructure failures are excluded from reliability, latency, and cost
+metrics.
 
 A trial trace has `cost_usd` only when every billable span in that trial is priced. The summary has
 `total_cost_usd` and `cost_per_pass_usd` only when every cost-relevant trial is fully priced.

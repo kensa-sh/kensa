@@ -83,14 +83,23 @@ def _cost_observation(trial: Json) -> tuple[bool, bool, float | None]:
     known_cost = _finite_cost(trace.get("known_cost_usd"))
     turns = _finite_float(trace.get("llm_turns"))
     availability = trace.get("cost_available")
+    operation = trial.get("active_operation")
+    llm_timed_out = (
+        trial.get("error_kind") == "timeout"
+        and isinstance(operation, dict)
+        and operation.get("kind") == "llm"
+    )
     relevant = (
         (turns is not None and turns > 0)
         or availability is True
         or known_cost is not None
         or (cost is not None and cost != 0)
+        or llm_timed_out
     )
     if not relevant:
         return False, False, None
+    if llm_timed_out:
+        return True, False, known_cost if known_cost is not None else cost
     if availability is True:
         return True, cost is not None, known_cost if known_cost is not None else cost
     if availability is False:

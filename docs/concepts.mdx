@@ -72,7 +72,8 @@ While a case runs, Kensa collects OpenTelemetry spans into a **trace** exposed a
 | Accessor | What it returns |
 |---|---|
 | `kensa_trace.tools` | Tool-call assertions (`include`, `exclude`, `order`, `no_repeats`, `names`) |
-| `kensa_trace.cost_usd` | Total trace cost in USD |
+| `kensa_trace.cost_usd` | Complete trace cost, or `None` when any billable span is unpriced |
+| `kensa_trace.known_cost_usd` | Sum of priced spans, including when complete cost is unavailable |
 | `kensa_trace.llm_turns` | Count of LLM spans |
 | `kensa_trace.duration_ms` | Total trace duration |
 | `kensa_trace.spans` | Raw collected spans |

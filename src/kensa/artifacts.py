@@ -26,6 +26,7 @@ class KensaAggregate:
     partial: bool
     verdict: str
     trials: list[TrialMetadata]
+    skipped: int = 0
     smoke: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -37,6 +38,7 @@ class KensaAggregate:
             "passed": self.passed,
             "failed": self.failed,
             "errored": self.errored,
+            "skipped": self.skipped,
             "partial": self.partial,
             "verdict": self.verdict,
             "trials": [trial.to_dict() for trial in self.trials],
@@ -54,13 +56,17 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
         groups.setdefault(trial.group_id, []).append(trial)
     aggregates: list[KensaAggregate] = []
     for group_id, group_trials in sorted(groups.items()):
-        ordered = sorted(group_trials, key=lambda trial: trial.trial_index)
+        all_trials = sorted(group_trials, key=lambda trial: trial.trial_index)
+        ordered = [trial for trial in all_trials if trial.status != "skipped"]
+        if not ordered:
+            continue
         total = len(ordered)
         passed = sum(1 for trial in ordered if trial.status == "pass")
         errored = sum(1 for trial in ordered if trial.status == "error")
         failed = sum(1 for trial in ordered if trial.status == "fail")
-        configured = ordered[0].configured_trials if ordered else 0
-        partial = total < configured
+        skipped = len(all_trials) - total
+        configured = max(trial.configured_trials for trial in all_trials)
+        partial = total + skipped < configured
         timed_out = any(trial.error_kind == "timeout" for trial in ordered)
         if timed_out:
             verdict = "error"
@@ -77,7 +83,7 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
         aggregates.append(
             KensaAggregate(
                 group_id=group_id,
-                case_id=ordered[0].case_id if ordered else "default",
+                case_id=ordered[0].case_id,
                 configured_trials=configured,
                 total=total,
                 passed=passed,
@@ -86,7 +92,8 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
                 partial=partial,
                 verdict=verdict,
                 trials=ordered,
-                smoke=any(trial.is_smoke for trial in ordered),
+                skipped=skipped,
+                smoke=any(trial.is_smoke for trial in all_trials),
             )
         )
     return aggregates

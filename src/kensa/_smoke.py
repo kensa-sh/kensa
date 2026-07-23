@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 from kensa.constants import SMOKE_CASE_ID, SMOKE_NODEID_FRAGMENT
 
+_SMOKE_NODEID = re.compile(rf"(?:.*/)?{re.escape(SMOKE_NODEID_FRAGMENT)}(?:\[.*\])?")
+
 
 def is_smoke_identity(*, case_id: str, group_id: str = "", nodeid: str = "") -> bool:
     return case_id == SMOKE_CASE_ID or any(
-        SMOKE_NODEID_FRAGMENT in value for value in (group_id, nodeid)
+        _SMOKE_NODEID.fullmatch(value) is not None for value in (group_id, nodeid)
     )
 
 

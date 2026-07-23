@@ -484,6 +484,63 @@ def test_agent(case, kensa_run, bad_teardown):
     assert payload["summary"]["cost_latency"]["latency_mean_ms"] == 0.0
 
 
+@pytest.mark.parametrize("phase", ["call", "teardown"])
+def test_skips_are_excluded_from_aggregates_and_scoring(
+    pytester: pytest.Pytester,
+    phase: str,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
+
+
+@pytest.fixture
+def skip_in_teardown():
+    yield
+    pytest.skip("teardown skip")
+"""
+    )
+    fixture = ", skip_in_teardown" if phase == "teardown" else ""
+    body = (
+        'pytest.skip("call skip")'
+        if phase == "call"
+        else 'assert case.run(kensa_run).output == {"ok": True}'
+    )
+    pytester.makepyfile(
+        test_eval=f"""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
+def test_agent(case, kensa_run{fixture}):
+    {body}
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    assert result.ret == 0
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    payload = json.loads(artifact.read_text())
+    assert len(payload["trials"]) == 1
+    assert payload["trials"][0]["status"] == "skipped"
+    assert payload["trials"][0]["error_kind"] == "skip"
+    assert payload["aggregates"] == []
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
+
+
 def test_case_run_records_output_artifact(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
@@ -1374,7 +1431,10 @@ def test_agent(case, skip_during_setup):
     result.assert_outcomes(skipped=1, failed=1)
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
-    assert payload["trials"] == []
+    assert len(payload["trials"]) == 1
+    assert payload["trials"][0]["case_id"] == "case_skip"
+    assert payload["trials"][0]["status"] == "skipped"
+    assert payload["aggregates"] == []
     assert payload["complete"] is False
     assert payload["interruption"]["kind"] == "worker_crash"
 

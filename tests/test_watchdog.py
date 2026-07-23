@@ -99,9 +99,10 @@ def test_bounded(case, kensa_run, hanging_fixture):
         "case_id": "bounded",
         "trial_index": 1,
         "timeout_s": 0.15,
+        "phase": phase,
     }
     assert trial["status"] == "error"
-    assert trial["error_kind"] == "timeout"
+    assert trial["error_kind"] == ("timeout" if phase == "call" else phase)
     assert trial["trace"]["incomplete"] is True
     assert result["complete"] is False
     assert result["interruption"]["kind"] == "timeout"
@@ -109,6 +110,9 @@ def test_bounded(case, kensa_run, hanging_fixture):
     if phase == "teardown":
         assert trial["output"]["output"] == {"input": "hello"}
         assert len(result["trials"]) == 1
+    if phase in {"setup", "teardown"}:
+        assert result["summary"]["eligible_agent_trials"] == 0
+        assert result["summary"]["pass_k_curve"] == []
 
 
 def test_eval_timeout_preserves_prior_trials_and_kills_descendant(
@@ -166,7 +170,7 @@ def test_three_trials(case, kensa_run, request):
     assert len(result["trials"]) == 2
     assert result["trials"][0]["status"] == "pass"
     assert result["trials"][1]["error_kind"] == "timeout"
-    assert 200 <= result["trials"][1]["duration_ms"] < 1000
+    assert 0 < result["trials"][1]["duration_ms"] < 1000
     assert aggregate["verdict"] == "error"
     assert aggregate["partial"] is True
     assert "x" * 1000 in payload["data"]["pytest"]["stdout"]
@@ -227,6 +231,7 @@ def test_parallel_timeout(case, kensa_run):
         "case_id": "hang",
         "trial_index": 1,
         "timeout_s": 0.5,
+        "phase": "call",
     }
     assert "hang" in trials
     assert set(trials) <= {"hang", "fast_a", "fast_b", "fast_c"}
@@ -244,6 +249,7 @@ def test_parallel_timeout(case, kensa_run):
         "nodeid": trials["hang"]["nodeid"],
         "case_id": "hang",
         "trial_index": 1,
+        "phase": "call",
     }
     assert list((tmp_path / ".kensa" / "state").glob("*.json")) == []
 
@@ -579,6 +585,7 @@ def test_active_operation(case):
     artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
     assert artifact["trials"][0]["active_operation"] == {
         "name": "customer_simulator.turn",
+        "kind": "llm",
         "attributes": {
             "attempt": 1,
             "turn": 2,
@@ -586,6 +593,62 @@ def test_active_operation(case):
             "model": "test-model",
         },
     }
+    assert artifact["summary"]["cost_latency"]["cost_relevant_trials"] == 1
+    assert artifact["summary"]["cost_latency"]["cost_complete"] is False
+
+
+def test_eval_timeout_preserves_completed_llm_cost_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa import record_llm_call
+from kensa.pytest import ConversationResponse, kensa_case
+
+
+@pytest.fixture
+def priced_agent(request):
+    class Agent:
+        def respond(self, messages):
+            with record_llm_call(attributes={"kensa.cost_usd": 0.2}):
+                pass
+            if "trial2" in request.node.nodeid:
+                time.sleep(60)
+            return ConversationResponse(output={"ok": True})
+
+    return Agent()
+
+
+@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
+def test_priced(case, priced_agent):
+    case.run(priced_agent)
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trials = artifact["trials"]
+    cost = artifact["summary"]["cost_latency"]
+    assert [trial["status"] for trial in trials] == ["pass", "error"]
+    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["trace"]["llm_turns"] == 1
+    assert trials[1]["trace"]["known_cost_usd"] == 0.2
+    assert trials[1]["trace"]["cost_usd"] == 0.2
+    assert cost["known_cost_usd"] == pytest.approx(0.4)
+    assert cost["total_cost_usd"] == pytest.approx(0.4)
+    assert cost["cost_known_trials"] == 2
+    assert cost["cost_relevant_trials"] == 2
+    assert cost["cost_coverage"] == 1.0
+    assert cost["cost_complete"] is True
 
 
 def test_parallel_timeout_preserves_published_trial_snapshot(
@@ -699,7 +762,8 @@ def pytest_runtest_logreport(report):
     assert (tmp_path / "call.reported").is_file()
     assert (tmp_path / "judge.recorded").is_file()
     assert trial["status"] == "error"
-    assert trial["error_kind"] == "timeout"
+    assert trial["error_kind"] == "teardown"
+    assert artifact["summary"]["eligible_agent_trials"] == 0
     assert trial["judges"] == [
         {
             "passed": True,
@@ -833,6 +897,10 @@ def test_watchdog_rejects_invalid_control_and_artifact(
     control_path.write_text("[]")
     with pytest.raises(ValueError, match="Invalid Kensa watchdog control"):
         read_control(control_path)
+    with pytest.raises(ValueError, match="active trial phase"):
+        watchdog._trial_phase({})
+    with pytest.raises(ValueError, match="active operation kind"):
+        watchdog._operation_kind("invalid")
 
     result_path = tmp_path / "result.json"
     result_path.write_text('{"trials": {}}')
@@ -1074,6 +1142,26 @@ def test_heartbeat_reports_active_operation_once_per_interval(
         "bounded trial 1 | 10s | customer_simulator.turn | attempt=1 model=test-model"
     ]
     assert format_heartbeat(replace(active, active_operation=None), 2) == "bounded trial 1 | 2s"
+
+
+def test_timeout_elapsed_uses_call_phase_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = ActiveTrial(
+        nodeid="test.py::test_case[trial1]",
+        group_id="test.py::test_case",
+        case_id="bounded",
+        trial_index=1,
+        configured_trials=1,
+        timeout_s=1,
+        started_monotonic_ns=1_000_000_000,
+        call_started_monotonic_ns=1_120_000_000,
+        phase="call",
+    )
+    monkeypatch.setattr(watchdog.time, "monotonic_ns", lambda: 1_273_000_000)
+
+    assert watchdog._trial_elapsed_ms(active) == 153
+    assert watchdog._trial_elapsed_ms(replace(active, phase="setup")) == 273
 
 
 def test_heartbeat_redacts_and_limits_attributes() -> None:
