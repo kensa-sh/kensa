@@ -84,6 +84,27 @@ def test_record_llm_call_uses_client_span_kind_by_default(
     assert kinds == [SpanKind.CLIENT, SpanKind.INTERNAL]
 
 
+def test_record_llm_call_uses_requested_genai_operation_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_names: list[str] = []
+
+    class Tracer:
+        def start_as_current_span(self, name: str, **kwargs: Any) -> Any:
+            del name
+            operation_names.append(kwargs["attributes"]["gen_ai.operation.name"])
+            return nullcontext()
+
+    monkeypatch.setattr(tracing.trace, "get_tracer", lambda name: Tracer())
+
+    with record_llm_call(operation_name="embeddings"):
+        pass
+    with record_llm_call(operation_name="text_completion"):
+        pass
+
+    assert operation_names == ["embeddings", "text_completion"]
+
+
 def test_record_span_flattens_explicit_attributes(tmp_path: Path) -> None:
     kensa.instrument(tmp_path)
 

@@ -8,7 +8,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -18,6 +18,8 @@ from opentelemetry.trace import SpanKind
 from kensa._serialization import jsonable
 from kensa.runtime import OperationKind, current_runtime
 from kensa.traces import write_trace_manifest
+
+GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_completion"]
 
 
 class JSONLSpanExporter(SpanExporter):
@@ -277,13 +279,14 @@ def record_llm_call(
     *,
     provider: str | None = None,
     model: str | None = None,
+    operation_name: GenAIOperationName = "chat",
     span_kind: SpanKind = SpanKind.CLIENT,
     **attributes: Any,
 ) -> Iterator[None]:
     operation_attributes = _flatten_attributes(attributes)
     attrs = {
         "kensa.span.kind": "llm",
-        "gen_ai.operation.name": "chat",
+        "gen_ai.operation.name": operation_name,
     }
     if provider is not None:
         attrs["kensa.llm.provider"] = provider

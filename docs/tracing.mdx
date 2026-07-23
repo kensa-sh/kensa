@@ -121,6 +121,8 @@ Approve the ideas worth keeping (change `status: pending` to `status: approved`)
 Spans are standard [OpenTelemetry](https://opentelemetry.io/). Kensa annotates them with
 `kensa.span.kind`, `kensa.tool.name`, and `kensa.llm.provider` / `kensa.llm.model` attributes.
 `record_llm_call` also emits `gen_ai.operation.name`, `gen_ai.provider.name`, and
-`gen_ai.request.model` when available. It uses the `CLIENT` span kind by default; pass
-`span_kind=SpanKind.INTERNAL` for an in-process model. Kensa reads cost and token counts from LLM
-spans. Anything that emits OTLP can be exported and imported with `--from otlp`.
+`gen_ai.request.model` when available. `operation_name` defaults to `chat`; pass `embeddings`,
+`generate_content`, or `text_completion` for those OpenTelemetry GenAI operations. It uses the
+`CLIENT` span kind by default; pass `span_kind=SpanKind.INTERNAL` for an in-process model. Kensa
+reads cost and token counts from LLM spans. Anything that emits OTLP can be exported and imported
+with `--from otlp`.
