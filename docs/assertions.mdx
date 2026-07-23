@@ -94,7 +94,6 @@ def test_output_shape(case, kensa_run):
     # Structured output: assert on fields directly
     assert result.output["status"] == "resolved"
 
-    # Canonical visible dialogue and termination are separate evidence.
     assert result.messages[-1]["role"] == "assistant"
     assert result.termination.reason == "direct"
 
