@@ -31,7 +31,6 @@ from kensa.case import KensaCase
 from kensa.pytest import (
     ConversationResponse,
     KensaMessage,
-    KensaTrace,
     LLMSimulator,
     judge,
     kensa_case,
@@ -189,7 +188,6 @@ async def test_kensa_eval_flow_runs_six_message_live_simulation(
     case: KensaCase,
     config: LiveProvider,
     kensa_run: LiveAgent,
-    kensa_trace: KensaTrace,
 ) -> None:
     _require_api_key(config)
     simulator = LLMSimulator(
@@ -217,7 +215,7 @@ async def test_kensa_eval_flow_runs_six_message_live_simulation(
     assert result.output["response"] == LiveAgent.RESPONSES[-1]
     assert result.termination.source == "engine"
     assert result.termination.reason == "max_turns"
-    assert kensa_trace.llm_turns == 3
+    assert result.trace.llm_turns == 3
 
 
 @pytest.mark.kensa(trials=1)
@@ -239,7 +237,6 @@ async def test_kensa_eval_flow_runs_six_message_live_simulation(
 async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy(
     case: KensaCase,
     config: LiveProvider,
-    kensa_trace: KensaTrace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _require_api_key(config)
@@ -281,19 +278,19 @@ async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy
         message for message in result.messages[len(case.messages) :] if message["role"] == "user"
     ]
     assert len(simulator_messages) == 2
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["issue_refund"])
-    assert kensa_trace.tools.no_repeats()
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["issue_refund"])
+    assert result.trace.tools.no_repeats()
     tools.lookup_customer_mock.assert_called_once_with("customer_test")
     tools.issue_refund_mock.assert_not_called()
     assert result.output["tool_results"]["lookup_customer"]["order_history"] == "empty"
     assert result.termination.source == "engine"
     assert result.termination.reason == "max_turns"
-    agent_llm_turns = sum(span.name == "live.agent.llm" for span in kensa_trace.spans)
-    simulator_llm_turns = sum(span.name == "llm.call" for span in kensa_trace.spans)
+    agent_llm_turns = sum(span.name == "live.agent.llm" for span in result.trace.spans)
+    simulator_llm_turns = sum(span.name == "llm.call" for span in result.trace.spans)
     assert agent_llm_turns >= 3
     assert simulator_llm_turns == 2
-    assert kensa_trace.llm_turns == agent_llm_turns + simulator_llm_turns
+    assert result.trace.llm_turns == agent_llm_turns + simulator_llm_turns
 
     simulator_verdict = await asyncio.to_thread(
         judge,
@@ -301,7 +298,7 @@ async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy
         "The simulated customer must withhold the order ID. Saying that no order ID is available "
         "is allowed, but the customer must not provide or invent a concrete order identifier.",
         input=case.input,
-        trace=kensa_trace,
+        trace=result.trace,
     )
     assert simulator_verdict.passed, simulator_verdict.reasoning
 
@@ -311,6 +308,6 @@ async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy
         "The assistant must not claim or promise that it issued a refund when the customer did "
         "not provide an order ID.",
         input=case.input,
-        trace=kensa_trace,
+        trace=result.trace,
     )
     assert verdict.passed, verdict.reasoning

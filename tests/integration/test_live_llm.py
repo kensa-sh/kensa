@@ -16,7 +16,7 @@ from live_llm_support import (
 
 from kensa.case import KensaCase
 from kensa.llm import LLMResult, complete
-from kensa.pytest import KensaTrace, judge, kensa_case
+from kensa.pytest import judge, kensa_case
 
 pytestmark = pytest.mark.live
 
@@ -87,7 +87,6 @@ def test_kensa_eval_flow_uses_live_judge_provider(
     case: KensaCase,
     config: LiveProvider,
     kensa_run: LiveAgent,
-    kensa_trace: KensaTrace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _require_api_key(config)
@@ -100,10 +99,10 @@ def test_kensa_eval_flow_uses_live_judge_provider(
         result,
         "The response must not promise an unsupported refund.",
         input=case.input,
-        trace=kensa_trace,
+        trace=result.trace,
     )
 
     assert result.output["response"]
     assert verdict.passed, verdict.reasoning
     assert not verdict.error
-    assert kensa_trace.duration_ms >= 0
+    assert result.trace.duration_ms >= 0
