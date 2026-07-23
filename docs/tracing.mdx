@@ -118,4 +118,9 @@ Approve the ideas worth keeping (change `status: pending` to `status: approved`)
 
 ## OpenTelemetry compatibility
 
-Spans are standard [OpenTelemetry](https://opentelemetry.io/). Kensa annotates them with `kensa.span.kind`, `kensa.tool.name`, and `kensa.llm.provider` / `kensa.llm.model` attributes, and reads cost and token counts from LLM spans. Anything that emits OTLP can be exported and imported with `--from otlp`.
+Spans are standard [OpenTelemetry](https://opentelemetry.io/). Kensa annotates them with
+`kensa.span.kind`, `kensa.tool.name`, and `kensa.llm.provider` / `kensa.llm.model` attributes.
+`record_llm_call` also emits `gen_ai.operation.name`, `gen_ai.provider.name`, and
+`gen_ai.request.model` when available. It uses the `CLIENT` span kind by default; pass
+`span_kind=SpanKind.INTERNAL` for an in-process model. Kensa reads cost and token counts from LLM
+spans. Anything that emits OTLP can be exported and imported with `--from otlp`.

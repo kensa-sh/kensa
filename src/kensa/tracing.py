@@ -13,6 +13,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.trace import SpanKind
 
 from kensa._serialization import jsonable
 from kensa.runtime import OperationKind, current_runtime
@@ -233,6 +234,7 @@ def _record_span(
     span_attributes: dict[str, Any],
     operation_attributes: dict[str, Any],
     operation_kind: OperationKind,
+    span_kind: SpanKind = SpanKind.INTERNAL,
 ) -> Iterator[None]:
     tracer = trace.get_tracer("kensa.app")
     runtime = current_runtime()
@@ -241,7 +243,14 @@ def _record_span(
         if runtime is not None
         else nullcontext()
     )
-    with operation, tracer.start_as_current_span(name, attributes=span_attributes):
+    with (
+        operation,
+        tracer.start_as_current_span(
+            name,
+            kind=span_kind,
+            attributes=span_attributes,
+        ),
+    ):
         yield
 
 
@@ -268,13 +277,17 @@ def record_llm_call(
     *,
     provider: str | None = None,
     model: str | None = None,
+    span_kind: SpanKind = SpanKind.CLIENT,
     **attributes: Any,
 ) -> Iterator[None]:
     operation_attributes = _flatten_attributes(attributes)
-    attrs = {"kensa.span.kind": "llm"}
+    attrs = {
+        "kensa.span.kind": "llm",
+        "gen_ai.operation.name": "chat",
+    }
     if provider is not None:
         attrs["kensa.llm.provider"] = provider
-        attrs["gen_ai.system"] = provider
+        attrs["gen_ai.provider.name"] = provider
         operation_attributes["provider"] = provider
     if model is not None:
         attrs["kensa.llm.model"] = model
@@ -286,6 +299,7 @@ def record_llm_call(
         span_attributes=attrs,
         operation_attributes=operation_attributes,
         operation_kind="llm",
+        span_kind=span_kind,
     ):
         yield
 
