@@ -4,7 +4,6 @@ description: Deterministic trace and output assertions. Fast, free, and they gat
 sidebarTitle: Assertions
 keywords:
   - assertions
-  - kensa_trace
   - output
   - tools
   - cost
@@ -13,32 +12,32 @@ keywords:
 Assertions are ordinary pytest `assert` statements. Deterministic ones are free and fast, so put them before any `judge(...)` call - pytest stops at the first failure, and a failed assertion never spends judge tokens.
 
 `case.run(...)` returns a compact `CaseResult`: check visible dialogue in `.messages`, evaluated data
-in `.output`, and the stop condition in `.termination`. The `kensa_trace` fixture separately exposes
-what the agent *did*. Pass it to `judge(...)` only when the criterion needs trajectory evidence.
+in `.output`, the stop condition in `.termination`, and what the agent did in `.trace`. Pass
+`trace=result.trace` to `judge(...)` only when the criterion needs trajectory evidence.
 
 ## Trace assertions
 
-The `kensa_trace` fixture exposes the trace collected during the run.
+Successful runs expose the collected trace as `result.trace`.
 
 ### Tool calls
 
-`kensa_trace.tools` answers questions about which tools were invoked:
+`result.trace.tools` answers questions about which tools were invoked:
 
 ```python
-def test_refund(case, kensa_run, kensa_trace):
-    case.run(kensa_run)
+def test_refund(case, kensa_run):
+    result = case.run(kensa_run)
 
     # All listed tools were called (set membership, order-free)
-    assert kensa_trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.include(["lookup_customer"])
 
     # None of these tools were called (safety check)
-    assert kensa_trace.tools.exclude(["issue_refund", "delete_account"])
+    assert result.trace.tools.exclude(["issue_refund", "delete_account"])
 
     # Called in this relative order (other tools may interleave)
-    assert kensa_trace.tools.order(["search_flights", "book_flight"])
+    assert result.trace.tools.order(["search_flights", "book_flight"])
 
     # No tool was called twice
-    assert kensa_trace.tools.no_repeats()
+    assert result.trace.tools.no_repeats()
 ```
 
 | Member | Returns | Checks |
@@ -51,28 +50,28 @@ def test_refund(case, kensa_run, kensa_trace):
 
 ### Resource bounds
 
-`kensa_trace` also reports cost, turns, and latency for budget assertions:
+`result.trace` also reports cost, turns, and latency for budget assertions:
 
 ```python
-def test_within_budget(case, kensa_run, kensa_trace):
-    case.run(kensa_run)
+def test_within_budget(case, kensa_run):
+    result = case.run(kensa_run)
 
-    cost_usd = kensa_trace.cost_usd
+    cost_usd = result.trace.cost_usd
     assert cost_usd is not None              # every billable span has a known cost
     assert cost_usd < 0.10                    # under 10 cents
-    assert kensa_trace.llm_turns <= 5         # at most five model calls
-    assert kensa_trace.duration_ms < 30_000   # under 30 seconds
+    assert result.trace.llm_turns <= 5         # at most five model calls
+    assert result.trace.duration_ms < 30_000   # under 30 seconds
 ```
 
 | Accessor | Type | Meaning |
 |---|---|---|
-| `kensa_trace.cost_usd` | `float \| None` | Total cost, or `None` when any billable span is unpriced |
-| `kensa_trace.known_cost_usd` | `float \| None` | Sum of priced spans, even when total cost is incomplete |
-| `kensa_trace.llm_turns` | `int` | Number of LLM spans |
-| `kensa_trace.duration_ms` | `float` | Total trace duration |
-| `kensa_trace.spans` | `list` | Raw collected spans, for custom checks |
+| `result.trace.cost_usd` | `float \| None` | Total cost, or `None` when any billable span is unpriced |
+| `result.trace.known_cost_usd` | `float \| None` | Sum of priced spans, even when total cost is incomplete |
+| `result.trace.llm_turns` | `int` | Number of LLM spans |
+| `result.trace.duration_ms` | `float` | Total trace duration |
+| `result.trace.spans` | `list` | Raw collected spans, for custom checks |
 
-<Note>`kensa_trace.incomplete` is `True` when the trace could not be fully collected. Guard budget assertions on it if your harness can return early.</Note>
+<Note>`result.trace.incomplete` is `True` when the trace could not be fully collected. Guard budget assertions on it if your harness can return early.</Note>
 
 ## Output assertions
 
@@ -109,18 +108,19 @@ def test_output_shape(case, kensa_run):
 Order matters. Deterministic assertions first, semantic judge last:
 
 ```python
-def test_refund_policy(case, kensa_run, kensa_trace):
+def test_refund_policy(case, kensa_run):
     result = case.run(kensa_run)
 
     # 1. Free, deterministic - fails fast.
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["issue_refund"])
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["issue_refund"])
 
     # 2. Only reached if the cheap checks passed.
     verdict = judge(
         result,
         "The response must not promise an unsupported refund.",
         input=case.input,
+        trace=result.trace,
     )
     assert verdict.passed, verdict.reasoning
 ```

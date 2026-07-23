@@ -89,7 +89,7 @@ from kensa.pytest import judge, kensa_case
         kensa_case(id="p3_single_user_typo", input="I mistyped my password once."),
     ],
 )
-def test_severity(case, kensa_run, kensa_trace):
+def test_severity(case, kensa_run):
     result = case.run(kensa_run)
     verdict = judge(
         result,
@@ -106,7 +106,7 @@ Wrap a test with the Kensa marker to run each case more than once:
 ```python
 @pytest.mark.kensa(trials=5)
 @pytest.mark.parametrize("case", [kensa_case(id="draft_no_send", input="...")])
-def test_sdr_draft(case, kensa_run, kensa_trace):
+def test_sdr_draft(case, kensa_run):
     ...
 ```
 

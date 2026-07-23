@@ -12,13 +12,18 @@ keywords:
 
 `judge(...)` evaluates a natural-language criterion against a completed agent run and returns a
 pass/fail verdict with reasoning. When given `CaseResult`, the judge receives ordered
-messages, normalized output, and termination as structured JSON. Reach for it only when a check
-cannot be expressed deterministically.
+messages, normalized output, and termination as structured JSON. The result trace is excluded unless
+you pass it explicitly. Reach for a judge only when a check cannot be expressed deterministically.
 
 ```python
 from kensa.pytest import judge
 
-verdict = judge(result, "The response must not promise an unsupported refund.", input=case.input)
+verdict = judge(
+    result,
+    "The response must not promise an unsupported refund.",
+    input=case.input,
+    trace=result.trace,
+)
 assert verdict.passed, verdict.reasoning
 ```
 
@@ -40,8 +45,11 @@ def judge(
 | `output` | Evidence to evaluate, normally the `CaseResult` returned by `case.run(...)` |
 | `criteria` | The natural-language pass condition |
 | `input` | The original case input, for grounding (`input=case.input`) |
-| `trace` | The `kensa_trace`, so the judge can consider tool calls (`trace=kensa_trace`) |
+| `trace` | Trace evidence, normally `result.trace` (`trace=result.trace`) |
 | `context` | Any extra reference material the judge should weigh |
+
+`judge(result, ...)` does not infer trace evidence from `CaseResult`. Pass
+`trace=result.trace` only when the criterion should consider spans or tool calls.
 
 ## JudgeResult
 

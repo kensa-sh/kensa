@@ -2707,9 +2707,9 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "case.run(kensa_run)" in smoke
     assert "inspect.isawaitable(result)" in smoke
     assert "asyncio.run(_resolve(result))" in smoke
-    assert "kensa_trace" in smoke
+    assert "result.trace" in smoke
     assert "assert result.output is not None" in smoke
-    assert "assert kensa_trace.llm_turns > 0" in smoke
+    assert "assert result.trace.llm_turns > 0" in smoke
     assert "record_llm_call(...)" in smoke
     assert "Copyable setup prompt" in output
     assert "kensa-evals" in output
@@ -3014,7 +3014,7 @@ def test_kensa_smoke():
     assert code == 0
     assert "Case-aware adapter" in conftest.read_text()
     assert "assert False" not in smoke.read_text()
-    assert "assert kensa_trace.llm_turns > 0" in smoke.read_text()
+    assert "assert result.trace.llm_turns > 0" in smoke.read_text()
     assert main(["init"]) == 0
 
 

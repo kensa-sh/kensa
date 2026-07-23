@@ -145,12 +145,12 @@ async def _resolve(awaitable):
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="{SMOKE_CASE_ID}", input="hello")])
-def test_kensa_smoke(case, kensa_run, kensa_trace):
+def test_kensa_smoke(case, kensa_run):
     result = case.run(kensa_run)
     if inspect.isawaitable(result):
         result = asyncio.run(_resolve(result))
     assert result.output is not None
-    assert kensa_trace.llm_turns > 0, (
+    assert result.trace.llm_turns > 0, (
         "Expected kensa_run to record at least one LLM span. "
         "Wrap the real model/provider call with kensa.record_llm_call(...)."
     )

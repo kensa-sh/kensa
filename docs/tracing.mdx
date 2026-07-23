@@ -97,11 +97,11 @@ kensa import --from jsonl --source .kensa/traces/spans.jsonl
 
 <Warning>Local capture files are raw telemetry and can contain sensitive payloads. Treat only successfully imported artifacts with valid redaction manifests as safe evidence.</Warning>
 
-Inside an eval, the same helpers feed the live `kensa_trace` fixture. The case-aware agent returned
-by `kensa_run(case)` wraps real tool and model calls with `record_tool_call` /
-`record_llm_call`. Kensa adds one source-attributed outer response span for every attempted agent or
-simulator response, while the existing trace totals include activity from both sources. See
-[Pytest plugin](/pytest).
+Inside an eval, the same helpers feed the live `result.trace` accessor on successful runs. The
+case-aware agent returned by `kensa_run(case)` wraps real tool and model calls with
+`record_tool_call` / `record_llm_call`. Kensa adds one source-attributed outer response span for every
+attempted agent or simulator response, while the existing trace totals include activity from both
+sources. See [Pytest plugin](/pytest).
 
 ## From traces to evals
 

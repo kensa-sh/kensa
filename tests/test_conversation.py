@@ -119,6 +119,44 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
     )
     assert result.messages == messages
 
+    unmanaged = CaseResult(
+        messages=(),
+        termination=Termination(source="engine", reason="direct"),
+    )
+    equivalent = CaseResult(
+        messages=(),
+        termination=Termination(source="engine", reason="direct"),
+    )
+    assert unmanaged.trace is unmanaged.trace
+    assert unmanaged.trace.spans == []
+    assert not unmanaged.trace.incomplete
+    assert "_kensa_trace" not in unmanaged.__dict__
+    assert set(CaseResult.model_fields) == {"messages", "output", "termination"}
+    assert unmanaged.model_dump() == {
+        "messages": (),
+        "output": None,
+        "termination": {"source": "engine", "reason": "direct"},
+    }
+    assert unmanaged.model_dump_json() == (
+        '{"messages":[],"output":null,"termination":{"source":"engine","reason":"direct"}}'
+    )
+    assert set(CaseResult.model_json_schema()["properties"]) == {
+        "messages",
+        "output",
+        "termination",
+    }
+    assert repr(unmanaged) == (
+        "CaseResult(messages=(), output=None, "
+        "termination=Termination(source='engine', reason='direct'))"
+    )
+    unmanaged_hash = hash(unmanaged)
+    unmanaged.trace.replace([], incomplete=True, incomplete_reason="partial")
+    assert unmanaged == equivalent
+    assert hash(unmanaged) == unmanaged_hash == hash(equivalent)
+    assert not unmanaged.model_copy().trace.incomplete
+    with pytest.raises(ValidationError, match="frozen"):
+        cast(Any, unmanaged).trace = equivalent.trace
+
     for model, field in (
         (ConversationResponse, {"extra": True}),
         (Termination, {"source": "engine", "reason": "done", "extra": True}),
@@ -742,7 +780,8 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
 
     async_result = kensa_case(id="async", input="x").run(AsyncAgent())
     assert inspect.isawaitable(async_result)
-    assert asyncio.run(cast(Any, async_result)) == sync
+    async_value = asyncio.run(cast(Any, async_result))
+    assert async_value == sync
 
     class DynamicAgent:
         def respond(self, messages: tuple[KensaMessage, ...]) -> Any:
@@ -753,7 +792,8 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
 
     dynamic = kensa_case(id="dynamic", input="x").run(DynamicAgent())
     assert inspect.isawaitable(dynamic)
-    assert asyncio.run(cast(Any, dynamic)) == sync
+    dynamic_value = asyncio.run(cast(Any, dynamic))
+    assert dynamic_value == sync
 
     simulated = kensa_case(id="simulated", input="x").run(
         ScriptedResponder(ConversationResponse(content="done", termination_reason="done")),
@@ -761,7 +801,11 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
         max_turns=1,
     )
     assert inspect.isawaitable(simulated)
-    asyncio.run(cast(Any, simulated))
+    simulated_value = asyncio.run(cast(Any, simulated))
+
+    for result in (sync, async_value, dynamic_value, simulated_value):
+        assert result.trace.spans == []
+        assert not result.trace.incomplete
 
 
 @pytest.mark.asyncio
@@ -789,6 +833,8 @@ async def test_async_case_run_can_move_to_a_new_task(
         reset_current_runtime(token)
 
     assert result.output == "ok"
+    assert result.trace is runtime.trace
+    assert result.trace.spans
     assert not any("Failed to detach context" in record.getMessage() for record in caplog.records)
     trial_span = next(span for span in runtime.trace.spans if span.name == "kensa.pytest.trial")
     response_span = next(
