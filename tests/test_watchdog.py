@@ -651,6 +651,69 @@ def test_priced(case, priced_agent):
     assert cost["cost_complete"] is True
 
 
+def test_eval_timeout_preserves_instrumented_genai_cost_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from opentelemetry import trace
+from kensa.pytest import ConversationResponse, kensa_case
+
+
+@pytest.fixture
+def priced_agent(request):
+    class Agent:
+        def respond(self, messages):
+            tracer = trace.get_tracer("instrumented-genai")
+            with tracer.start_as_current_span(
+                "chat test-model",
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": "test",
+                    "gen_ai.request.model": "test-model",
+                    "kensa.cost_usd": 0.2,
+                },
+            ):
+                pass
+            if "trial2" in request.node.nodeid:
+                time.sleep(60)
+            return ConversationResponse(output={"ok": True})
+
+    return Agent()
+
+
+@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
+def test_priced(case, priced_agent):
+    case.run(priced_agent)
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trials = artifact["trials"]
+    cost = artifact["summary"]["cost_latency"]
+    assert [trial["status"] for trial in trials] == ["pass", "error"]
+    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["trace"]["llm_turns"] == 1
+    assert trials[1]["trace"]["known_cost_usd"] == 0.2
+    assert trials[1]["trace"]["cost_usd"] == 0.2
+    assert cost["known_cost_usd"] == pytest.approx(0.4)
+    assert cost["total_cost_usd"] == pytest.approx(0.4)
+    assert cost["cost_known_trials"] == 2
+    assert cost["cost_relevant_trials"] == 2
+    assert cost["cost_coverage"] == 1.0
+    assert cost["cost_complete"] is True
+
+
 def test_parallel_timeout_preserves_published_trial_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

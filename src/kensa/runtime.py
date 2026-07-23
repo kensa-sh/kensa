@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
 
@@ -408,6 +408,17 @@ class KensaTrialRuntime:
         if (self.output_recorded or not require_output) and self._snapshot_callback is not None:
             self._snapshot_callback(self)
 
+    def _record_finished_spans(self, spans: Sequence[ReadableSpan]) -> None:
+        if self._trace_id is not None and any(
+            _is_instrumented_genai_llm_span(span, trace_id=self._trace_id) for span in spans
+        ):
+            self.trace.replace(
+                collect_spans(self._trace_id),
+                incomplete=self.trace.incomplete,
+                incomplete_reason=self.trace.incomplete_reason,
+            )
+            self._publish_snapshot(require_output=False)
+
     def _flush_and_populate_trace(self) -> None:
         incomplete = False
         reason: str | None = None
@@ -459,12 +470,21 @@ class KensaTrialRuntime:
         )
 
 
+class _SnapshottingSpanExporter(InMemorySpanExporter):
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        result = super().export(spans)
+        runtime = _CURRENT_RUNTIME.get()
+        if result is SpanExportResult.SUCCESS and runtime is not None:
+            runtime._record_finished_spans(spans)
+        return result
+
+
 def ensure_tracing() -> None:
     global _EXPORTER, _PROVIDER_READY
     if _PROVIDER_READY:
         return
     _PROVIDER_READY = True
-    exporter = InMemorySpanExporter()
+    exporter = _SnapshottingSpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     provider_for_exporter: Any = provider
@@ -518,6 +538,23 @@ def _normalize_span(raw: Any) -> KensaSpan:
         end_time_unix_nano=getattr(raw, "end_time", None),
         status="error" if status_name == "error" else "ok",
         attributes={str(k): jsonable(v) for k, v in attrs.items()},
+    )
+
+
+def _is_instrumented_genai_llm_span(raw: ReadableSpan, *, trace_id: str) -> bool:
+    attrs = dict(raw.attributes or {})
+    context = raw.get_span_context()
+    span_trace_id = f"{context.trace_id:032x}" if context is not None else None
+    tool_name = (
+        attrs.get("kensa.tool.name")
+        or attrs.get("tool.name")
+        or attrs.get("gen_ai.tool.name")
+        or attrs.get("openinference.tool.name")
+    )
+    return (
+        span_trace_id == trace_id
+        and "kensa.span.kind" not in attrs
+        and _normalized_span_kind(attrs, tool_name=tool_name) == "llm"
     )
 
 
