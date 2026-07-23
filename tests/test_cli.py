@@ -173,23 +173,7 @@ def _reject_langfuse_trace_read(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _write_persistent_smoke(eval_dir: Path, source: str | None = None) -> None:
     eval_dir.mkdir(parents=True, exist_ok=True)
-    (eval_dir / "test_kensa_smoke.py").write_text(
-        source
-        or """import pytest
-from kensa.pytest import kensa_case
-
-
-@pytest.mark.kensa(trials=1)
-@pytest.mark.parametrize("case", [kensa_case(id="kensa_smoke", input="hello")])
-def test_kensa_smoke(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
-    assert output is not None
-    assert kensa_trace.llm_turns > 0, (
-        "Expected kensa_run to record at least one LLM span. "
-        "Wrap the real model/provider call with kensa.record_llm_call(...)."
-    )
-"""
-    )
+    (eval_dir / "test_kensa_smoke.py").write_text(source or cli.SMOKE_TEMPLATE)
 
 
 def _write_ready_harness(eval_dir: Path) -> None:
@@ -197,15 +181,16 @@ def _write_ready_harness(eval_dir: Path) -> None:
     (eval_dir / "conftest.py").write_text(
         """import pytest
 from kensa import record_llm_call
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    def _run(case):
-        with record_llm_call(provider="test", model="test-model"):
-            return {"ok": case.input}
-
-    return _run
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            with record_llm_call(provider="test", model="test-model"):
+                return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     _write_persistent_smoke(eval_dir)
@@ -314,11 +299,15 @@ def test_eval_runs_tests_evals_by_default(tmp_path: Path, monkeypatch) -> None:
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     (eval_dir / "test_eval.py").write_text(
@@ -329,7 +318,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="c1", input="hello")])
 def test_agent(case, kensa_run):
-    assert case.run(kensa_run) == {"ok": "hello"}
+    assert case.run(kensa_run).output == {"ok": "hello"}
 """
     )
 
@@ -341,7 +330,7 @@ def test_agent(case, kensa_run):
     assert len(trace_files) == 1
     trace_row = json.loads(trace_files[0].read_text().splitlines()[0])
     assert trace_row["case"] == {"id": "c1", "input": "hello"}
-    assert trace_row["output"] == {"ok": "hello"}
+    assert trace_row["output"]["output"] == {"ok": "hello"}
     assert "type" not in trace_row
 
 
@@ -676,7 +665,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="answers_domain_question", input="hello")])
 def test_answers_domain_question(case, kensa_run):
-    assert case.run(kensa_run) == {"ok": "hello"}
+    assert case.run(kensa_run).output == {"ok": "hello"}
 """
     )
 
@@ -704,11 +693,15 @@ def test_eval_json_reports_no_tests_as_specific_setup_problem(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
 
@@ -719,7 +712,8 @@ def kensa_run():
     assert payload["summary"] == "Kensa eval found no eval tests."
     assert payload["errors"] == ["No Kensa eval tests were collected from tests/evals."]
     assert payload["next_steps"] == [
-        "Run kensa doctor to verify tests/evals/conftest.py::kensa_run(case).",
+        "Run kensa doctor to verify the case-aware agent from "
+        "tests/evals/conftest.py::kensa_run(case).",
         cli._EVALS_NEXT_STEP,
     ]
     assert payload["data"]["pytest"]["returncode"] == 5
@@ -819,6 +813,33 @@ def test_doctor_passes_without_recording_readiness(
     assert (tmp_path / "tests" / "evals" / "test_kensa_smoke.py").exists()
     assert not (tmp_path / "tests" / "evals" / ".kensa_doctor_tmp").exists()
     assert _git_status(tmp_path) == status_before
+
+
+def test_doctor_accepts_async_agent_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    eval_dir = tmp_path / "tests" / "evals"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "conftest.py").write_text(
+        """import pytest
+from kensa import record_llm_call
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run(case):
+    class Agent:
+        async def respond(self, messages):
+            with record_llm_call(provider="test", model="test-model"):
+                return ConversationResponse(output={"ok": case.input})
+    return Agent()
+"""
+    )
+    _write_persistent_smoke(eval_dir)
+
+    assert main(["doctor"]) == 0
 
 
 def test_doctor_failure_does_not_mutate_legacy_settings_or_project_config(
@@ -946,11 +967,15 @@ def test_doctor_json_reports_missing_persistent_smoke(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
 
@@ -1032,6 +1057,7 @@ def test_doctor_allows_suspicious_harness_with_explicit_opt_out(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 class _FallbackPrimarySdrAgent:
@@ -1039,8 +1065,11 @@ class _FallbackPrimarySdrAgent:
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     monkeypatch.setattr(
@@ -1068,6 +1097,7 @@ def test_doctor_fails_on_suspicious_harness_by_default(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 class FakeAgent:
@@ -1075,8 +1105,11 @@ class FakeAgent:
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     monkeypatch.setattr(
@@ -1103,6 +1136,7 @@ def test_run_doctor_check_uses_strict_authenticity(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 class StubAgent:
@@ -1110,8 +1144,11 @@ class StubAgent:
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     monkeypatch.setattr(
@@ -1136,6 +1173,7 @@ def test_doctor_json_reports_suspicious_harness_failure_by_default(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 class FakeAgent:
@@ -1143,8 +1181,11 @@ class FakeAgent:
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     monkeypatch.setattr(
@@ -1178,11 +1219,15 @@ def test_doctor_fails_on_nested_kensa_workflow_in_subproject(
     yaml_workflow.write_text("name: stale yaml\n")
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     monkeypatch.setattr(
@@ -1435,11 +1480,15 @@ def test_eval_json_captures_pytest_output(
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"ok": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     (eval_dir / "test_eval.py").write_text(
@@ -1450,7 +1499,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="c1", input="hello")])
 def test_agent(case, kensa_run):
-    assert case.run(kensa_run) == {"ok": "hello"}
+    assert case.run(kensa_run).output == {"ok": "hello"}
 """
     )
 
@@ -2633,16 +2682,18 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "tests/evals/test_*.py" in generate_skill
     assert "explicitly approved by the user" in generate_skill
     conftest = (tmp_path / "tests" / "evals" / "conftest.py").read_text()
-    assert "Adapter from a Kensa case" in conftest
+    assert "Case-aware adapter" in conftest
     assert "real local agent runtime" in conftest
     smoke = (tmp_path / "tests" / "evals" / "test_kensa_smoke.py").read_text()
-    assert "import pytest\n\nfrom kensa.pytest import kensa_case" in smoke
+    assert "import asyncio\nimport inspect\n\nimport pytest" in smoke
     assert "kensa_case" in smoke
     assert "@pytest.mark.kensa(trials=1)" in smoke
     assert "type=" not in smoke
     assert "case.run(kensa_run)" in smoke
+    assert "inspect.isawaitable(result)" in smoke
+    assert "asyncio.run(_resolve(result))" in smoke
     assert "kensa_trace" in smoke
-    assert "assert output is not None" in smoke
+    assert "assert result.output is not None" in smoke
     assert "assert kensa_trace.llm_turns > 0" in smoke
     assert "record_llm_call(...)" in smoke
     assert "Copyable setup prompt" in output
@@ -2924,7 +2975,7 @@ def test_ensure_kensa_gitignore_removes_legacy_exceptions(tmp_path: Path) -> Non
     assert gitignore.read_text() == "*\n!.gitignore\n!custom.json\n# keep\n"
 
 
-def test_init_overwrites_stale_generated_smoke_and_conftest(
+def test_init_refreshes_unmodified_legacy_smoke_and_conftest(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2934,20 +2985,7 @@ def test_init_overwrites_stale_generated_smoke_and_conftest(
     eval_dir.mkdir(parents=True)
     conftest = eval_dir / "conftest.py"
     smoke = eval_dir / "test_kensa_smoke.py"
-    conftest.write_text(
-        '''"""Repository-specific Kensa harness connection."""
-
-# Generated by kensa init.
-
-stale = True
-
-def kensa_run():
-    def _run(case):
-        raise NotImplementedError("Connect this fixture to your agent.")
-
-    return _run
-'''
-    )
+    conftest.write_text(cli._LEGACY_CONFTEST_TEMPLATES[0])
     smoke.write_text(
         """# Generated by kensa init.
 
@@ -2959,11 +2997,58 @@ def test_kensa_smoke():
     code = main(["init"])
 
     assert code == 0
-    assert "stale = True" not in conftest.read_text()
-    assert "Adapter from a Kensa case" in conftest.read_text()
+    assert "Case-aware adapter" in conftest.read_text()
     assert "assert False" not in smoke.read_text()
     assert "assert kensa_trace.llm_turns > 0" in smoke.read_text()
     assert main(["init"]) == 0
+
+
+def test_current_conftest_template_is_owned_and_future_refresh_preserves_user_files(
+    tmp_path: Path,
+) -> None:
+    assert cli._is_kensa_conftest(cli.CONFTEST_TEMPLATE)
+
+    generated = tmp_path / "generated.py"
+    generated.write_text(cli.CONFTEST_TEMPLATE)
+    future_template = cli.CONFTEST_TEMPLATE.replace("Case-aware adapter", "Future adapter")
+    assert cli._write_if_missing_or_kensa_generated(
+        generated,
+        future_template,
+        cli._is_kensa_conftest,
+    )
+    assert generated.read_text() == future_template
+
+    user_authored = tmp_path / "user.py"
+    user_source = "def kensa_run(case):\n    return case\n"
+    user_authored.write_text(user_source)
+    assert not cli._write_if_missing_or_kensa_generated(
+        user_authored,
+        future_template,
+        cli._is_kensa_conftest,
+    )
+    assert user_authored.read_text() == user_source
+
+
+def test_init_preserves_implemented_generated_conftest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    conftest = tmp_path / "tests" / "evals" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    implemented = cli.CONFTEST_TEMPLATE.replace(
+        """        raise NotImplementedError(
+            "Connect this agent to safe local, staging, or mocked dependencies."
+        )""",
+        '        return ConversationResponse(output={"ok": self.case.input})',
+    )
+    assert implemented != cli.CONFTEST_TEMPLATE
+    conftest.write_text(implemented)
+
+    assert main(["init"]) == 0
+
+    assert conftest.read_text() == implemented
 
 
 def test_kensa_skill_templates_are_packaged_and_actionable() -> None:

@@ -657,6 +657,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -693,6 +694,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "spacy", marker = "extra == 'redaction'", specifier = ">=3.8,<3.9" },
+    { name = "typing-extensions", specifier = ">=4.15.0" },
 ]
 provides-extras = ["redaction"]
 

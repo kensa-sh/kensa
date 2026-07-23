@@ -54,8 +54,8 @@ Use `kensa-setup`.
 
 That phase must only:
 
-1. Wire `tests/evals/conftest.py::kensa_run(case)`.
-2. Call the real local agent or application boundary.
+1. Make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent`.
+2. Implement `respond(messages)` with `ConversationResponse` at the real local agent boundary.
 3. Mock only external side effects.
 4. Record at least one LLM span.
 5. Run `kensa doctor` until harness readiness passes.

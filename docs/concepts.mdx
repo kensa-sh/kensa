@@ -55,10 +55,13 @@ Cases take either a literal `input` or a `messages` conversation. They are param
 Kensa never guesses how to call your agent. You connect it once in `tests/evals/conftest.py` by implementing the `kensa_run` fixture, then run a case through it:
 
 ```python
-output = case.run(kensa_run)
+result = case.run(kensa_run)
 ```
 
-`case.run(kensa_run)` invokes your fixture with the case, records a trace, and returns whatever your agent produced. `kensa doctor` checks that this harness reaches a real agent boundary rather than a stub.
+The fixture has already used the case to create one agent instance for the trial. `case.run(kensa_run)`
+invokes its `respond(messages)` method and returns a `CaseResult` containing canonical
+messages, evaluated output, and one termination. `kensa doctor` checks that this harness reaches a
+real agent boundary rather than a stub.
 
 ## Traces
 
@@ -78,7 +81,9 @@ While a case runs, Kensa collects OpenTelemetry spans into a **trace** exposed a
 
 Assertions answer binary questions about the run. **Deterministic** assertions are free and fast - plain `assert` and `kensa_trace.*` (tool calls, cost, turns, latency). Because pytest stops at the first failed assertion, ordering them before the judge means obvious regressions never reach an LLM call.
 
-A **judge** is the semantic escape hatch: `judge(output, criteria, ...)` returns a pass/fail verdict with reasoning, and you only call it for criteria that resist deterministic checks. See [Assertions](/assertions) and [Judge](/judge).
+A **judge** is the semantic escape hatch: `judge(result, criteria, ...)` sends ordered
+messages, normalized output, and termination as structured evidence. Use it only for criteria that
+resist deterministic checks. See [Assertions](/assertions) and [Judge](/judge).
 
 ## Trials
 
