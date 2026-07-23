@@ -43,15 +43,16 @@ from kensa.pytest import judge, kensa_case
         )
     ],
 )
-def test_refund_policy(case, kensa_run, kensa_trace):
+def test_refund_policy(case, kensa_run):
     result = case.run(kensa_run)
 
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["issue_refund"])
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["issue_refund"])
 
     verdict = judge(
         result,
         "The response must not promise an unsupported refund.",
+        trace=result.trace,
     )
     assert verdict.passed, verdict.reasoning
 ```
@@ -177,8 +178,8 @@ LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 
 Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, use the
 `kensa_run(case)` fixture to build one case-aware conversation agent, and call
-`case.run(kensa_run)`. Every run returns `CaseResult(messages, output, termination)`.
-Assert traces with `kensa_trace` and reserve LLM-as-judge for semantic checks.
+`case.run(kensa_run)`. Every successful run returns a `CaseResult` with messages, output,
+termination, and a read-only `result.trace` accessor. Reserve LLM-as-judge for semantic checks.
 
 </details>
 
@@ -187,7 +188,7 @@ Assert traces with `kensa_trace` and reserve LLM-as-judge for semantic checks.
 
 You can. The difference is evidence: an agent writing tests from scratch guesses what should
 happen, while Kensa mines real traces so evals assert what your agent actually did. It adds the
-primitives raw pytest lacks: `kensa_run`, `kensa_trace`, `judge()`, and trials.
+primitives raw pytest lacks: `kensa_run`, `result.trace`, `judge()`, and trials.
 
 </details>
 

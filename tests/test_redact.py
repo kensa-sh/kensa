@@ -1370,9 +1370,10 @@ def test_kensa_imports_and_eval_runs_never_load_the_nlp_stack(tmp_path: Path) ->
         "\n"
         "@pytest.mark.kensa(trials=1)\n"
         "@pytest.mark.parametrize('case', [kensa_case(id='light', input='hello')])\n"
-        "def test_light(case, kensa_run, kensa_trace):\n"
-        "    assert case.run(kensa_run).output == {'ok': 'hello'}\n"
-        "    assert kensa_trace.llm_turns == 1\n"
+        "def test_light(case, kensa_run):\n"
+        "    result = case.run(kensa_run)\n"
+        "    assert result.output == {'ok': 'hello'}\n"
+        "    assert result.trace.llm_turns == 1\n"
     )
     program = (
         "import sys\n"

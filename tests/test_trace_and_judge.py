@@ -31,23 +31,27 @@ def test_judge_receives_case_result_as_json() -> None:
     class TypedOutput(BaseModel):
         status: str
 
+    case_result = CaseResult(
+        messages=(
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "done"},
+        ),
+        output=TypedOutput(status="resolved"),
+        termination=Termination(source="agent", reason="resolved"),
+    )
     set_judge_provider(Provider())
     try:
-        result = judge(
-            CaseResult(
-                messages=(
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "done"},
-                ),
-                output=TypedOutput(status="resolved"),
-                termination=Termination(source="agent", reason="resolved"),
-            ),
+        result = judge(case_result, "must resolve")
+        explicit_result = judge(
+            case_result,
             "must resolve",
+            trace=case_result.trace,
         )
     finally:
         set_judge_provider(None)
 
     assert result.passed
+    assert explicit_result.passed
     assert calls[0]["output"] == {
         "messages": [
             {"role": "user", "content": "hello"},
@@ -56,6 +60,9 @@ def test_judge_receives_case_result_as_json() -> None:
         "output": {"status": "resolved"},
         "termination": {"source": "agent", "reason": "resolved"},
     }
+    assert calls[0]["trace"] is None
+    assert calls[1]["output"] == calls[0]["output"]
+    assert calls[1]["trace"] is case_result.trace
 
 
 @pytest.mark.asyncio
@@ -88,7 +95,7 @@ async def test_response_spans_attribute_sources_without_filtering_totals(
     )
     token = set_current_runtime(runtime)
     try:
-        await kensa_case(id="trace", input="x").run(
+        result = await kensa_case(id="trace", input="x").run(
             Agent(),
             simulator=LLMSimulator("customer"),
             max_turns=1,
@@ -96,6 +103,8 @@ async def test_response_spans_attribute_sources_without_filtering_totals(
     finally:
         reset_current_runtime(token)
 
+    assert result.trace is runtime.trace
+    assert result.trace.spans
     response_spans = {
         span.attributes["kensa.conversation.source"]: span
         for span in runtime.trace.spans
@@ -146,14 +155,15 @@ from kensa.pytest import ConversationResponse, kensa_case
 def test_agent(case, kensa_run, kensa_trace):
     result = case.run(kensa_run)
     assert result.output == {"ok": True}
-    assert not hasattr(kensa_trace, "called")
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["missing"])
-    assert kensa_trace.tools.order(["lookup_customer", "lookup_customer"])
-    assert not kensa_trace.tools.order(["missing", "lookup_customer"])
-    assert not kensa_trace.tools.no_repeats()
-    assert kensa_trace.tools.names == ["lookup_customer", "lookup_customer"]
-    assert kensa_trace.duration_ms >= 0
+    assert result.trace is kensa_trace
+    assert not hasattr(result.trace, "called")
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["missing"])
+    assert result.trace.tools.order(["lookup_customer", "lookup_customer"])
+    assert not result.trace.tools.order(["missing", "lookup_customer"])
+    assert not result.trace.tools.no_repeats()
+    assert result.trace.tools.names == ["lookup_customer", "lookup_customer"]
+    assert result.trace.duration_ms >= 0
 """
     )
 
@@ -193,10 +203,10 @@ from kensa.pytest import kensa_case
 
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
-def test_agent(case, kensa_run, kensa_trace):
-    case.run(kensa_run)
-    assert kensa_trace.incomplete
-    assert "force_flush" in kensa_trace.incomplete_reason
+def test_agent(case, kensa_run):
+    result = case.run(kensa_run)
+    assert result.trace.incomplete
+    assert "force_flush" in result.trace.incomplete_reason
 """
     )
 
@@ -281,7 +291,13 @@ def test_agent(case, kensa_run):
     result.assert_outcomes(passed=1)
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
-    assert payload["trials"][0]["judges"][0]["passed"] is True
+    trial = payload["trials"][0]
+    assert trial["output"] == {
+        "messages": [{"role": "assistant", "content": "safe"}],
+        "output": "safe",
+        "termination": {"source": "engine", "reason": "direct"},
+    }
+    assert trial["judges"][0]["passed"] is True
 
 
 def test_judge_failure_reasoning_appears_in_assertion_output(

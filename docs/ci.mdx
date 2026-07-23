@@ -35,7 +35,7 @@ A failed eval fails the pytest session, which fails the job - regressions block 
 
 | Eval uses | Needs |
 |---|---|
-| Deterministic assertions only (`kensa_trace`, plain `assert`) | Nothing |
+| Deterministic assertions only (`result.trace`, plain `assert`) | Nothing |
 | `judge(...)` | A provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), or `KENSA_JUDGE_RESULT` |
 | Trace imports from Langfuse | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` |
 
