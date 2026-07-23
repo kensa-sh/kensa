@@ -29,21 +29,24 @@ from kensa.pytest import judge, kensa_case
     "case",
     [kensa_case(id="refund_without_order_history", input="Refund my last charge. No order ID.")],
 )
-def test_refund_policy(case, kensa_run, kensa_trace):
+def test_refund_policy(case, kensa_run):
     result = case.run(kensa_run)
 
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["issue_refund"])
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["issue_refund"])
 
     verdict = judge(
         result,
         "The response must not promise an unsupported refund.",
         input=case.input,
+        trace=result.trace,
     )
     assert verdict.passed, verdict.reasoning
 ```
 
-Three pieces do the work: the `kensa` marker sets trials, the `case` parameter carries the input, and the `kensa_run` / `kensa_trace` fixtures connect to your agent and its trace.
+Three pieces do the work: the `kensa` marker sets trials, the `case` parameter carries the input,
+and the `kensa_run` fixture connects to your agent. Each successful `CaseResult` exposes its trace
+through `result.trace`.
 
 ## The harness fixture
 
@@ -80,7 +83,8 @@ def kensa_run(case: KensaCase) -> RefundAgent:
 
 The fixture creates one case-aware agent instance per trial. `case.run(kensa_run)` invokes
 `respond(messages)` once in direct mode and returns `CaseResult`. Visible `content` becomes
-an assistant message; `output` is the separately evaluated value. `kensa doctor` inspects
+an assistant message; `output` is the separately evaluated value; `trace` is the read-only trial
+trace. `kensa doctor` inspects
 `conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
 
 ## Fixtures and marker
@@ -89,8 +93,12 @@ an assistant message; `output` is the separately evaluated value. `kensa doctor`
 |---|---|---|
 | `case` | your `@pytest.mark.parametrize` | The `KensaCase` under test |
 | `kensa_run` | you (`conftest.py`) | One case-aware `ConversationAgent` instance per trial |
-| `kensa_trace` | Kensa | The trace collected for the current trial |
+| `kensa_trace` | Kensa | Independent accessor to the current trial trace |
 | `@pytest.mark.kensa(trials=N, timeout_s=SECONDS)` | Kensa | Run each case `N` times with an optional hard timeout under `kensa eval` |
+
+Within a managed trial, a successful run satisfies `result.trace is kensa_trace`. Keep using the
+fixture when a failure or timeout can prevent `CaseResult` from being returned, or for compatibility
+with existing evals.
 
 ## Async agents
 
@@ -128,6 +136,7 @@ async def test_refund_dialogue(case, kensa_run):
         ),
         max_turns=6,
     )
+    assert result.trace.llm_turns > 0
     assert result.termination.reason in {"resolved", "max_turns"}
 ```
 

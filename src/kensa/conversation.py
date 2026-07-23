@@ -25,7 +25,7 @@ from kensa.llm import (
     resolve_llm_config,
     validate_structured_result,
 )
-from kensa.runtime import current_runtime
+from kensa.runtime import KensaTrace, current_runtime
 from kensa.tracing import record_llm_call
 
 _MISSING = object()
@@ -89,6 +89,14 @@ class CaseResult(BaseModel):
     messages: tuple[KensaMessage, ...]
     output: Any = None
     termination: Termination
+
+    def model_post_init(self, __context: Any) -> None:
+        object.__setattr__(self, "_kensa_trace", KensaTrace())
+
+    @property
+    def trace(self) -> KensaTrace:
+        """Return trace evidence collected for this run."""
+        return cast(KensaTrace, self.__dict__["_kensa_trace"])
 
 
 class ConversationError(RuntimeError):
@@ -454,11 +462,15 @@ def _accept(
 
 def _result(state: _State, termination: Termination) -> CaseResult:
     output = None if state.output is _MISSING else _copy_typed(state.output)
-    return CaseResult(
+    result = CaseResult(
         messages=deepcopy(tuple(state.messages)),
         output=output,
         termination=termination,
     )
+    runtime = current_runtime()
+    if runtime is not None:
+        object.__setattr__(result, "_kensa_trace", runtime.trace)
+    return result
 
 
 def _publish_snapshot(state: _State) -> None:

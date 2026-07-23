@@ -60,30 +60,38 @@ result = case.run(kensa_run)
 
 The fixture has already used the case to create one agent instance for the trial. `case.run(kensa_run)`
 invokes its `respond(messages)` method and returns a `CaseResult` containing canonical
-messages, evaluated output, and one termination. `kensa doctor` checks that this harness reaches a
-real agent boundary rather than a stub.
+messages, evaluated output, one termination, and a read-only trace accessor. `kensa doctor` checks
+that this harness reaches a real agent boundary rather than a stub.
 
 ## Traces
 
-While a case runs, Kensa collects OpenTelemetry spans into a **trace** exposed as the `kensa_trace` fixture. Tool calls and model calls are captured automatically when you wrap them with the recording helpers (`record_tool_call`, `record_llm_call`) or run instrumented SDK code. Imported evidence is narrower than raw telemetry: Kensa keeps only its allowlisted TraceView fields and redacts retained values before storage.
+While a case runs, Kensa collects OpenTelemetry spans into a **trace** exposed on successful runs as
+`result.trace`. Tool calls and model calls are captured automatically when you wrap them with the
+recording helpers (`record_tool_call`, `record_llm_call`) or run instrumented SDK code. Imported
+evidence is narrower than raw telemetry: Kensa keeps only its allowlisted TraceView fields and
+redacts retained values before storage.
 
-`kensa_trace` exposes:
+`result.trace` exposes:
 
 | Accessor | What it returns |
 |---|---|
-| `kensa_trace.tools` | Tool-call assertions (`include`, `exclude`, `order`, `no_repeats`, `names`) |
-| `kensa_trace.cost_usd` | Total trace cost in USD |
-| `kensa_trace.llm_turns` | Count of LLM spans |
-| `kensa_trace.duration_ms` | Total trace duration |
-| `kensa_trace.spans` | Raw collected spans |
+| `result.trace.tools` | Tool-call assertions (`include`, `exclude`, `order`, `no_repeats`, `names`) |
+| `result.trace.cost_usd` | Total trace cost in USD |
+| `result.trace.llm_turns` | Count of LLM spans |
+| `result.trace.duration_ms` | Total trace duration |
+| `result.trace.spans` | Raw collected spans |
+
+The `kensa_trace` fixture remains available as an independent trial accessor for failures, timeouts,
+and existing evals. On success inside a managed trial, `result.trace is kensa_trace`.
 
 ## Assertions
 
-Assertions answer binary questions about the run. **Deterministic** assertions are free and fast - plain `assert` and `kensa_trace.*` (tool calls, cost, turns, latency). Because pytest stops at the first failed assertion, ordering them before the judge means obvious regressions never reach an LLM call.
+Assertions answer binary questions about the run. **Deterministic** assertions are free and fast - plain `assert` and `result.trace.*` (tool calls, cost, turns, latency). Because pytest stops at the first failed assertion, ordering them before the judge means obvious regressions never reach an LLM call.
 
 A **judge** is the semantic escape hatch: `judge(result, criteria, ...)` sends ordered
 messages, normalized output, and termination as structured evidence. Use it only for criteria that
-resist deterministic checks. See [Assertions](/assertions) and [Judge](/judge).
+resist deterministic checks. Trace evidence remains explicit: pass `trace=result.trace` when the
+criterion needs it. See [Assertions](/assertions) and [Judge](/judge).
 
 ## Trials
 

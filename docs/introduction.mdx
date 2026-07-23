@@ -28,16 +28,17 @@ from kensa.pytest import judge, kensa_case
         )
     ],
 )
-def test_refund_policy(case, kensa_run, kensa_trace):
+def test_refund_policy(case, kensa_run):
     result = case.run(kensa_run)
 
-    assert kensa_trace.tools.include(["lookup_customer"])
-    assert kensa_trace.tools.exclude(["issue_refund"])
+    assert result.trace.tools.include(["lookup_customer"])
+    assert result.trace.tools.exclude(["issue_refund"])
 
     verdict = judge(
         result,
         "The response must not promise an unsupported refund.",
         input=case.input,
+        trace=result.trace,
     )
     assert verdict.passed, verdict.reasoning
 ```
