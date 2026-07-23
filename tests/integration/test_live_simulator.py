@@ -277,6 +277,10 @@ async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy
         "user",
         "assistant",
     ]
+    simulator_messages = [
+        message for message in result.messages[len(case.messages) :] if message["role"] == "user"
+    ]
+    assert len(simulator_messages) == 2
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
     assert kensa_trace.tools.no_repeats()
@@ -290,6 +294,16 @@ async def test_live_simulator_withholds_order_id_and_agent_follows_refund_policy
     assert agent_llm_turns >= 3
     assert simulator_llm_turns == 2
     assert kensa_trace.llm_turns == agent_llm_turns + simulator_llm_turns
+
+    simulator_verdict = await asyncio.to_thread(
+        judge,
+        simulator_messages,
+        "The simulated customer must withhold the order ID. Saying that no order ID is available "
+        "is allowed, but the customer must not provide or invent a concrete order identifier.",
+        input=case.input,
+        trace=kensa_trace,
+    )
+    assert simulator_verdict.passed, simulator_verdict.reasoning
 
     verdict = await asyncio.to_thread(
         judge,
