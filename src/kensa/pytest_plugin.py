@@ -32,6 +32,7 @@ from kensa.runtime import (
     reset_current_runtime,
     set_current_runtime,
 )
+from kensa.scoring import run_summary
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     ActiveTrial,
@@ -546,12 +547,14 @@ def pytest_terminal_summary(
     if not state.trials:
         return
     terminalreporter.write_sep("=", "Kensa evaluation complete")
+    summary = run_summary({"trials": [trial.to_dict() for trial in state.trials]})
     if config.getoption("--kensa-report") == "json":
         terminalreporter.write_line(
             json.dumps(
                 {
                     "run_id": state.run_id,
                     "aggregates": [aggregate.to_dict() for aggregate in state.aggregates],
+                    "summary": summary,
                 },
                 indent=2,
             )
@@ -562,6 +565,8 @@ def pytest_terminal_summary(
     ]
     passed = sum(1 for aggregate in state.aggregates if aggregate.verdict == "pass")
     terminalreporter.write_line(f"{passed}/{len(state.aggregates)} aggregate case(s) passed")
+    _write_scoring_summary(terminalreporter, summary)
+    terminalreporter.write_line("")
     case_counts = Counter(aggregate.case_id for aggregate in state.aggregates)
     case_labels = [
         aggregate.group_id if case_counts[aggregate.case_id] > 1 else aggregate.case_id
@@ -575,6 +580,57 @@ def pytest_terminal_summary(
             f"{_status_marker(trial.status)} T{trial.trial_index}" for trial in aggregate.trials
         )
         terminalreporter.write_line(f"{result:<{result_width}}{case_label:<{case_width}}{trials}")
+
+
+def _write_scoring_summary(
+    terminalreporter: pytest.TerminalReporter,
+    summary: dict[str, Any],
+) -> None:
+    curve = summary["pass_k_curve"]
+    reliability = (
+        " | ".join(
+            f"pass^{point['k']} {float(point['value']):.1%} ({_cohort_count(int(point['cases']))})"
+            for point in curve
+        )
+        or "n/a"
+    )
+    performance = summary["cost_latency"]
+    terminalreporter.write_line(f"Reliability: {reliability}")
+    terminalreporter.write_line(
+        "Latency: "
+        f"p50 {_format_duration(float(performance['latency_p50_ms']))} | "
+        f"p95 {_format_duration(float(performance['latency_p95_ms']))} | "
+        f"mean {_format_duration(float(performance['latency_mean_ms']))}"
+    )
+    terminalreporter.write_line(f"Mean LLM turns: {float(performance['mean_llm_turns']):.1f}")
+    known_trials = int(performance["cost_known_trials"])
+    relevant_trials = int(performance["cost_relevant_trials"])
+    if performance["cost_complete"]:
+        terminalreporter.write_line(
+            f"Cost: total ${float(performance['total_cost_usd']):.4f} | "
+            f"per pass {_format_cost(performance['cost_per_pass_usd'])}"
+        )
+    elif performance["cost_partial"]:
+        terminalreporter.write_line(
+            f"Cost: partial ${float(performance['known_cost_usd']):.4f} known | "
+            f"{known_trials}/{relevant_trials} priced trials"
+        )
+    elif relevant_trials:
+        terminalreporter.write_line(f"Cost: n/a | {known_trials}/{relevant_trials} priced trials")
+    else:
+        terminalreporter.write_line("Cost: n/a")
+
+
+def _cohort_count(count: int) -> str:
+    return f"{count} {'cohort' if count == 1 else 'cohorts'}"
+
+
+def _format_duration(milliseconds: float) -> str:
+    return f"{milliseconds:.0f}ms" if milliseconds < 1000 else f"{milliseconds / 1000:.1f}s"
+
+
+def _format_cost(value: Any) -> str:
+    return "n/a" if value is None else f"${float(value):.4f}"
 
 
 def _status_marker(status: str) -> str:

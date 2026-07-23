@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kensa._smoke import is_smoke_trial
 from kensa.runtime import TrialMetadata
+from kensa.scoring import run_summary
 
 
 @dataclass
@@ -24,6 +26,7 @@ class KensaAggregate:
     partial: bool
     verdict: str
     trials: list[TrialMetadata]
+    smoke: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +40,7 @@ class KensaAggregate:
             "partial": self.partial,
             "verdict": self.verdict,
             "trials": [trial.to_dict() for trial in self.trials],
+            "smoke": self.smoke,
         }
 
 
@@ -82,6 +86,7 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
                 partial=partial,
                 verdict=verdict,
                 trials=ordered,
+                smoke=any(trial.is_smoke for trial in ordered),
             )
         )
     return aggregates
@@ -120,6 +125,7 @@ def write_run_artifacts(
         "trials": [trial.to_dict() for trial in trials],
         "aggregates": [aggregate.to_dict() for aggregate in aggregates],
     }
+    payload["summary"] = run_summary(payload)
     write_json_atomic(result_path, payload)
     _write_trace_artifact(run_id, trials, artifact_dir)
     return aggregates
@@ -152,6 +158,7 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
         "case": trial.case,
         "output": trial.output,
         "status": trial.status,
+        "smoke": trial.is_smoke,
         "duration_ms": trial.duration_ms,
         "spans": spans,
         "incomplete": bool(trace.get("incomplete", False)),
@@ -181,6 +188,7 @@ def trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
         if isinstance(judges, list)
         else [],
         active_operation=active_operation if isinstance(active_operation, dict) else None,
+        smoke=is_smoke_trial(row),
     )
 
 

@@ -292,6 +292,10 @@ def test_agent(case, mode):
 
     result.assert_outcomes(passed=4)
     result.stdout.fnmatch_lines(["*2/2 aggregate case(s) passed*"])
+    result.stdout.fnmatch_lines(
+        ["*Reliability: pass^1 100.0% (2 cohorts) | pass^2 100.0% (2 cohorts)*"]
+    )
+    assert "pass^3" not in result.stdout.str()
     summary_rows = [line for line in result.stdout.lines if line.startswith("✓ pass")]
     assert len(summary_rows) == 2
     assert any("test_agent[case_a-fast]" in line for line in summary_rows)
@@ -926,6 +930,11 @@ def test_agent(case, kensa_run):
     ]
     assert [aggregate["verdict"] for aggregate in payload["aggregates"]] == ["pass", "pass"]
     assert [aggregate["total"] for aggregate in payload["aggregates"]] == [3, 3]
+    assert payload["summary"]["pass_k_curve"] == [
+        {"k": 1, "value": 1.0, "cases": 2},
+        {"k": 2, "value": 1.0, "cases": 2},
+        {"k": 3, "value": 1.0, "cases": 2},
+    ]
     trace_files = list(
         (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
     )

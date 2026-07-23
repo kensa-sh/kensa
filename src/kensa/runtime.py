@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -17,6 +18,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import Status, StatusCode
 
 from kensa._serialization import json_value, jsonable
+from kensa._smoke import is_smoke_identity
 from kensa.errors import KensaCaseError
 
 if TYPE_CHECKING:
@@ -73,11 +75,25 @@ class KensaSpan:
 
     @property
     def cost_usd(self) -> float:
-        value = self.attributes.get("kensa.cost_usd", self.attributes.get("cost_usd", 0.0))
+        value = self._cost_value()
+        return value if value is not None else 0.0
+
+    @property
+    def cost_available(self) -> bool:
+        return self._cost_value() is not None
+
+    def _cost_value(self) -> float | None:
+        if "kensa.cost_usd" in self.attributes:
+            value = self.attributes["kensa.cost_usd"]
+        elif "cost_usd" in self.attributes:
+            value = self.attributes["cost_usd"]
+        else:
+            return None
         try:
-            return float(value)
+            cost = float(value)
         except (TypeError, ValueError):
-            return 0.0
+            return None
+        return cost if math.isfinite(cost) else None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,7 +108,8 @@ class KensaSpan:
             "status": self.status,
             "attributes": self.attributes,
             "duration_ms": self.duration_ms,
-            "cost_usd": self.cost_usd,
+            "cost_usd": self.cost_usd if self.cost_available else None,
+            "cost_available": self.cost_available,
         }
 
 
@@ -145,6 +162,13 @@ class KensaTrace:
         return round(sum(span.cost_usd for span in self.spans), 8)
 
     @property
+    def cost_available(self) -> bool:
+        billable = [
+            span for span in self.spans if span.kind.lower() == "llm" or span.cost_available
+        ]
+        return bool(billable) and all(span.cost_available for span in billable)
+
+    @property
     def llm_turns(self) -> int:
         return sum(1 for span in self.spans if span.kind.lower() == "llm")
 
@@ -173,7 +197,8 @@ class KensaTrace:
         return {
             "spans": [span.to_dict() for span in self.spans],
             "tools": self.tools.names,
-            "cost_usd": self.cost_usd,
+            "cost_usd": self.cost_usd if self.cost_available else None,
+            "cost_available": self.cost_available,
             "llm_turns": self.llm_turns,
             "duration_ms": self.duration_ms,
             "incomplete": self.incomplete,
@@ -197,6 +222,15 @@ class TrialMetadata:
     trace: dict[str, Any] = field(default_factory=dict)
     judges: list[dict[str, Any]] = field(default_factory=list)
     active_operation: dict[str, Any] | None = None
+    smoke: bool = False
+
+    @property
+    def is_smoke(self) -> bool:
+        return self.smoke or is_smoke_identity(
+            case_id=self.case_id,
+            group_id=self.group_id,
+            nodeid=self.nodeid,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -214,6 +248,7 @@ class TrialMetadata:
             "trace": self.trace,
             "judges": self.judges,
             "active_operation": self.active_operation,
+            "smoke": self.is_smoke,
         }
 
 

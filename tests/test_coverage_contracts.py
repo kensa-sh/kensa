@@ -107,10 +107,18 @@ def test_case_uninstrumented_async_run_paths() -> None:
 def test_kensa_trace_and_span_edge_paths() -> None:
     span = KensaSpan(name="s", start_time_unix_nano=None, end_time_unix_nano=None)
     assert span.duration_ms == 0
-    assert KensaSpan(name="s", attributes={"cost_usd": "bad"}).cost_usd == 0
+    invalid_cost = KensaSpan(name="s", attributes={"cost_usd": "bad"})
+    assert invalid_cost.cost_usd == 0
+    assert invalid_cost.cost_available is False
+    assert invalid_cost.to_dict()["cost_usd"] is None
+    assert KensaSpan(name="s", attributes={"cost_usd": float("nan")}).cost_available is False
     llm_span = KensaSpan(name="llm", kind="llm", tool_name="lookup", attributes={"cost_usd": 0.2})
+    assert llm_span.cost_available is True
+    assert llm_span.to_dict()["cost_available"] is True
     trace = KensaTrace()
     assert trace.duration_ms == 0
+    assert trace.cost_available is False
+    assert trace.to_dict()["cost_usd"] is None
     trace.replace([span, llm_span])
     assert trace.duration_ms == 0
     assert not hasattr(trace, "called")
@@ -124,8 +132,12 @@ def test_kensa_trace_and_span_edge_paths() -> None:
     assert not trace.tools.order(["missing"])
     assert trace.tools.no_repeats()
     assert trace.cost_usd == 0.2
+    assert trace.cost_available is True
     assert trace.llm_turns == 1
     assert trace.to_dict()["llm_turns"] == 1
+    trace.replace([llm_span, KensaSpan(name="unknown", kind="llm")])
+    assert trace.cost_available is False
+    assert trace.to_dict()["cost_usd"] is None
 
 
 def test_record_llm_call_counts_toward_kensa_trace_llm_turns() -> None:
@@ -153,6 +165,8 @@ def test_record_llm_call_counts_toward_kensa_trace_llm_turns() -> None:
         reset_current_runtime(token)
     assert result.output == {"seen": "hello"}
     assert runtime.trace.llm_turns == 1
+    assert runtime.trace.cost_available is False
+    assert runtime.trace.to_dict()["cost_usd"] is None
     llm_spans = [span for span in runtime.trace.spans if span.kind == "llm"]
     assert len(llm_spans) == 1
     assert llm_spans[0].attributes["kensa.llm.provider"] == "test-provider"
@@ -580,8 +594,11 @@ def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
             self.lines.append(line)
 
     class Config:
+        def __init__(self, report: str = "json") -> None:
+            self.report = report
+
         def getoption(self, name: str) -> Any:
-            return "json" if name == "--kensa-report" else None
+            return self.report if name == "--kensa-report" else None
 
     term = Terminal()
     config_obj = Config()
@@ -600,6 +617,15 @@ def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     config_obj.__dict__["_kensa_state"] = state
     pytest_terminal_summary(cast(Any, term), 0, cast(Any, config_obj))
     assert any('"aggregates"' in line for line in term.lines)
+    assert any('"summary"' in line for line in term.lines)
+
+    term_config = Config("term")
+    term_state = KensaSessionState(cast(Any, term_config))
+    term_state.aggregates = [aggregate]
+    term_state.trials = state.trials
+    term_config.__dict__["_kensa_state"] = term_state
+    pytest_terminal_summary(cast(Any, term), 0, cast(Any, term_config))
+    assert "Cost: n/a" in term.lines
 
     class Outcome:
         def __init__(self, report: Any) -> None:

@@ -478,7 +478,8 @@ def _record_timeout(
         trace = {
             "spans": [],
             "tools": [],
-            "cost_usd": 0.0,
+            "cost_usd": None,
+            "cost_available": False,
             "llm_turns": 0,
             "duration_ms": 0.0,
             "incomplete": True,

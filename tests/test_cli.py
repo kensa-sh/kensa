@@ -353,6 +353,9 @@ def test_eval_json_fails_when_only_smoke_passes(
     assert payload["data"]["evals_readiness"]["passing_eval_count"] == 0
     assert "type" not in payload["data"]["aggregates"][0]
     assert payload["data"]["aggregates"][0]["verdict"] == "pass"
+    assert payload["data"]["aggregates"][0]["smoke"] is True
+    assert payload["data"]["summary"]["eligible_agent_trials"] == 0
+    assert payload["data"]["summary"]["pass_k_curve"] == []
     assert any(
         "only the readiness smoke passed" in warning.lower() for warning in payload["warnings"]
     )
@@ -663,7 +666,10 @@ from kensa.pytest import kensa_case
 
 
 @pytest.mark.kensa(trials=1)
-@pytest.mark.parametrize("case", [kensa_case(id="answers_domain_question", input="hello")])
+@pytest.mark.parametrize(
+    "case",
+    [kensa_case(id="answers_domain_question", input="hello", smoke=True)],
+)
 def test_answers_domain_question(case, kensa_run):
     assert case.run(kensa_run).output == {"ok": "hello"}
 """
@@ -678,6 +684,12 @@ def test_answers_domain_question(case, kensa_run):
     assert payload["data"]["harness_readiness"]["smoke_eval_count"] == 1
     assert payload["data"]["evals_readiness"]["ready"] is True
     assert payload["data"]["evals_readiness"]["passing_eval_count"] == 1
+    domain_aggregate = next(
+        aggregate
+        for aggregate in payload["data"]["aggregates"]
+        if aggregate["case_id"] == "answers_domain_question"
+    )
+    assert domain_aggregate["smoke"] is False
     assert not any(
         "only the readiness smoke passed" in warning.lower() for warning in payload["warnings"]
     )
@@ -1514,6 +1526,7 @@ def test_agent(case, kensa_run):
     assert payload["data"]["complete"] is True
     assert payload["data"]["interruption"] is None
     assert payload["data"]["aggregates"][0]["verdict"] == "pass"
+    assert payload["data"]["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cases": 1}]
     assert payload["data"]["workers"] == 1
     assert payload["data"]["pytest"]["returncode"] == 0
     assert "--kensa-report=json" in payload["data"]["pytest_command"]
@@ -2688,6 +2701,8 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "import asyncio\nimport inspect\n\nimport pytest" in smoke
     assert "kensa_case" in smoke
     assert "@pytest.mark.kensa(trials=1)" in smoke
+    assert 'kensa_case(id="kensa_smoke", input="hello")' in smoke
+    assert "smoke=True" not in smoke
     assert "type=" not in smoke
     assert "case.run(kensa_run)" in smoke
     assert "inspect.isawaitable(result)" in smoke
