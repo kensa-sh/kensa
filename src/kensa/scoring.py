@@ -9,6 +9,8 @@ from typing import Any
 from kensa._smoke import is_smoke_trial
 
 Json = dict[str, Any]
+_ELIGIBLE_STATUSES = frozenset({"pass", "fail", "error"})
+_INFRASTRUCTURE_ERROR_KINDS = frozenset({"infrastructure", "setup", "teardown"})
 
 
 def pass_hat_k(successes: int, total: int, k: int) -> float | None:
@@ -20,19 +22,19 @@ def pass_hat_k(successes: int, total: int, k: int) -> float | None:
     return math.comb(successes, k) / math.comb(total, k)
 
 
-def pass_k_curve(per_case: list[tuple[int, int]]) -> list[Json]:
+def pass_k_curve(per_cohort: list[tuple[int, int]]) -> list[Json]:
     """Average pass^k across case cohorts with enough trials."""
-    if not per_case:
+    if not per_cohort:
         return []
     curve: list[Json] = []
-    for k in range(1, max(total for _, total in per_case) + 1):
+    for k in range(1, max(total for _, total in per_cohort) + 1):
         values = [
             value
-            for value in (pass_hat_k(passed, total, k) for passed, total in per_case)
+            for value in (pass_hat_k(passed, total, k) for passed, total in per_cohort)
             if value is not None
         ]
         if values:
-            curve.append({"k": k, "value": sum(values) / len(values), "cases": len(values)})
+            curve.append({"k": k, "value": sum(values) / len(values), "cohorts": len(values)})
     return curve
 
 
@@ -45,9 +47,9 @@ def cost_latency(trials: list[Json]) -> Json:
     cost_observations = [
         observation for trial in trials if (observation := _cost_observation(trial))[0]
     ]
-    known_costs = [cost for _, cost in cost_observations if cost is not None]
+    known_costs = [cost for _, _, cost in cost_observations if cost is not None]
     cost_relevant_trials = len(cost_observations)
-    cost_known_trials = len(known_costs)
+    cost_known_trials = sum(complete for _, complete, _ in cost_observations)
     cost_complete = cost_relevant_trials > 0 and cost_known_trials == cost_relevant_trials
     known_cost = sum(known_costs)
     total_cost = known_cost if cost_complete else None
@@ -69,29 +71,41 @@ def cost_latency(trials: list[Json]) -> Json:
         ),
         "has_cost": bool(known_costs),
         "cost_complete": cost_complete,
-        "cost_partial": 0 < cost_known_trials < cost_relevant_trials,
+        "cost_partial": bool(known_costs) and not cost_complete,
     }
 
 
-def _cost_observation(trial: Json) -> tuple[bool, float | None]:
+def _cost_observation(trial: Json) -> tuple[bool, bool, float | None]:
     trace = trial.get("trace")
     if not isinstance(trace, dict):
-        return False, None
-    cost = _finite_float(trace.get("cost_usd"))
+        return False, False, None
+    cost = _finite_cost(trace.get("cost_usd"))
+    known_cost = _finite_cost(trace.get("known_cost_usd"))
     turns = _finite_float(trace.get("llm_turns"))
     availability = trace.get("cost_available")
     relevant = (
         (turns is not None and turns > 0)
         or availability is True
+        or known_cost is not None
         or (cost is not None and cost != 0)
     )
     if not relevant:
-        return False, None
+        return False, False, None
     if availability is True:
-        return True, cost
+        return True, cost is not None, known_cost if known_cost is not None else cost
     if availability is False:
-        return True, None
-    return True, cost if cost not in {None, 0.0} else None
+        return True, False, known_cost
+    if "known_cost_usd" in trace:
+        return True, False, known_cost
+    legacy_cost = cost if cost not in {None, 0.0} else None
+    return True, legacy_cost is not None, legacy_cost
+
+
+def _finite_cost(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    number = _finite_float(value)
+    return number if number is not None and number >= 0 else None
 
 
 def _finite_float(value: Any) -> float | None:
@@ -126,13 +140,14 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 def run_summary(data: Json) -> Json:
     """Summarize reliability and performance for one eval artifact."""
-    trials = _scored_trials(data)
+    trials = [
+        trial
+        for trial in _scored_trials(data)
+        if trial.get("status") in _ELIGIBLE_STATUSES
+        and trial.get("error_kind") not in _INFRASTRUCTURE_ERROR_KINDS
+    ]
     cohorts: dict[str, Json] = {}
     for trial in trials:
-        if trial.get("error_kind") == "infrastructure":
-            continue
-        if trial.get("status") not in {"pass", "fail", "error"}:
-            continue
         case_id = _trial_case_id(trial)
         group_id = _trial_group_id(trial, case_id=case_id)
         cohort = cohorts.setdefault(
@@ -148,9 +163,9 @@ def run_summary(data: Json) -> Json:
         cohort["passed"] += trial.get("status") == "pass"
 
     cohort_values = list(cohorts.values())
-    per_case = [(cohort["passed"], cohort["total"]) for cohort in cohort_values]
+    per_cohort = [(cohort["passed"], cohort["total"]) for cohort in cohort_values]
     return {
-        "pass_k_curve": pass_k_curve(per_case),
+        "pass_k_curve": pass_k_curve(per_cohort),
         "pass_k_cohorts": cohort_values,
         "eligible_agent_trials": sum(cohort["total"] for cohort in cohort_values),
         "cost_latency": cost_latency(trials),

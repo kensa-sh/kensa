@@ -69,9 +69,9 @@ def test_pass_hat_k_returns_known_reliability_values() -> None:
 def test_pass_k_curve_reports_changing_cohort_population() -> None:
     assert pass_k_curve([]) == []
     assert pass_k_curve([(2, 3), (1, 1)]) == [
-        {"k": 1, "value": pytest.approx(5 / 6), "cases": 2},
-        {"k": 2, "value": pytest.approx(1 / 3), "cases": 1},
-        {"k": 3, "value": 0.0, "cases": 1},
+        {"k": 1, "value": pytest.approx(5 / 6), "cohorts": 2},
+        {"k": 2, "value": pytest.approx(1 / 3), "cohorts": 1},
+        {"k": 3, "value": 0.0, "cohorts": 1},
     ]
 
 
@@ -139,6 +139,26 @@ def test_cost_latency_never_presents_partial_cost_as_total() -> None:
     assert explicit_zero["cost_complete"] is True
 
 
+def test_cost_latency_preserves_partial_cost_within_one_trial() -> None:
+    trial = _trial(status="pass", cost_usd=None, cost_available=False)
+    trial["trace"]["known_cost_usd"] = 0.2
+
+    summary = cost_latency([trial])
+
+    assert summary["total_cost_usd"] is None
+    assert summary["known_cost_usd"] == 0.2
+    assert summary["cost_per_pass_usd"] is None
+    assert summary["cost_known_trials"] == 0
+    assert summary["cost_relevant_trials"] == 1
+    assert summary["cost_coverage"] == 0.0
+    assert summary["has_cost"] is True
+    assert summary["cost_complete"] is False
+    assert summary["cost_partial"] is True
+
+    trial["trace"].pop("cost_available")
+    assert cost_latency([trial])["known_cost_usd"] == 0.2
+
+
 def test_cost_latency_handles_legacy_and_invalid_cost_metadata() -> None:
     legacy_priced = _trial(
         status="pass",
@@ -150,13 +170,17 @@ def test_cost_latency_handles_legacy_and_invalid_cost_metadata() -> None:
         cost_usd=0.0,
         cost_available=None,
     )
-    invalid = _trial(status="error", cost_usd=float("nan"), cost_available=True)
+    invalid = [
+        _trial(status="error", cost_usd=float("nan"), cost_available=True),
+        _trial(status="error", cost_usd=-1, cost_available=True),
+        _trial(status="error", cost_usd=True, cost_available=True),
+    ]
 
-    summary = cost_latency([legacy_priced, legacy_unknown, invalid])
+    summary = cost_latency([legacy_priced, legacy_unknown, *invalid])
 
     assert summary["known_cost_usd"] == 0.2
     assert summary["cost_known_trials"] == 1
-    assert summary["cost_relevant_trials"] == 3
+    assert summary["cost_relevant_trials"] == 5
     assert summary["cost_complete"] is False
 
 
@@ -187,8 +211,8 @@ def test_run_summary_keeps_pytest_groups_as_distinct_cohorts() -> None:
         },
     ]
     assert summary["pass_k_curve"] == [
-        {"k": 1, "value": 0.75, "cases": 2},
-        {"k": 2, "value": 0.5, "cases": 2},
+        {"k": 1, "value": 0.75, "cohorts": 2},
+        {"k": 2, "value": 0.5, "cohorts": 2},
     ]
 
 
@@ -219,10 +243,38 @@ def test_run_summary_counts_agent_errors_and_timeouts_as_failures() -> None:
         }
     ]
     assert summary["pass_k_curve"] == [
-        {"k": 1, "value": pytest.approx(1 / 3), "cases": 1},
-        {"k": 2, "value": 0.0, "cases": 1},
-        {"k": 3, "value": 0.0, "cases": 1},
+        {"k": 1, "value": pytest.approx(1 / 3), "cohorts": 1},
+        {"k": 2, "value": 0.0, "cohorts": 1},
+        {"k": 3, "value": 0.0, "cohorts": 1},
     ]
+
+
+def test_run_summary_excludes_setup_and_teardown_from_all_metrics() -> None:
+    summary = run_summary(
+        {
+            "trials": [
+                _trial(status="pass", duration_ms=100, cost_usd=0.1),
+                _trial(
+                    status="error",
+                    duration_ms=0,
+                    cost_usd=0.2,
+                    error_kind="setup",
+                ),
+                _trial(
+                    status="error",
+                    duration_ms=0,
+                    cost_usd=0.3,
+                    error_kind="teardown",
+                ),
+            ]
+        }
+    )
+
+    assert summary["eligible_agent_trials"] == 1
+    assert summary["pass_k_curve"] == [{"k": 1, "value": 1.0, "cohorts": 1}]
+    assert summary["cost_latency"]["latency_mean_ms"] == 100
+    assert summary["cost_latency"]["known_cost_usd"] == 0.1
+    assert summary["cost_latency"]["cost_relevant_trials"] == 1
 
 
 def test_run_summary_uses_internal_and_legacy_smoke_identity() -> None:
@@ -292,7 +344,7 @@ def test_terminal_reports_cohort_population_and_cost_coverage() -> None:
     _write_scoring_summary(cast(Any, terminal), partial)
 
     assert "Reliability: pass^1 100.0% (2 cohorts) | pass^2 100.0% (1 cohort)" in terminal.lines
-    assert "Cost: partial $0.1000 known | 1/2 priced trials" in terminal.lines
+    assert "Cost: partial $0.1000 known | 1/2 fully priced trials" in terminal.lines
 
     _write_scoring_summary(
         cast(Any, terminal),
@@ -304,7 +356,7 @@ def test_terminal_reports_cohort_population_and_cost_coverage() -> None:
         cast(Any, terminal),
         run_summary({"trials": [_trial(status="pass", cost_usd=None, cost_available=False)]}),
     )
-    assert "Cost: n/a | 0/1 priced trials" in terminal.lines
+    assert "Cost: n/a | 0/1 fully priced trials" in terminal.lines
 
 
 def test_run_summary_empty_trials_returns_zero_metrics() -> None:
@@ -360,7 +412,7 @@ def test_artifact_and_markdown_reports_include_run_summary(tmp_path: Path) -> No
     payload = json.loads(result_path.read_text())
     assert payload["trials"][0]["smoke"] is False
     assert payload["aggregates"][0]["smoke"] is False
-    assert payload["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cases": 1}]
+    assert payload["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cohorts": 1}]
     assert payload["summary"]["cost_latency"]["total_cost_usd"] == 0.02
 
     markdown_path = tmp_path / "report.md"
@@ -370,7 +422,7 @@ def test_artifact_and_markdown_reports_include_run_summary(tmp_path: Path) -> No
     assert "| 1 | 100.0% | 1 |" in markdown
     assert "Latency p50: 125ms" in markdown
     assert "Total cost: $0.0200" in markdown
-    assert "Cost coverage: 1/1 relevant trials" in markdown
+    assert "Cost coverage: 1/1 fully priced trials" in markdown
 
 
 def test_artifact_marks_legacy_smoke_and_markdown_reports_partial_cost(
@@ -432,4 +484,4 @@ def test_artifact_marks_legacy_smoke_and_markdown_reports_partial_cost(
     cli._write_markdown_report(result_path, markdown_path)
     markdown = markdown_path.read_text()
     assert "Total cost: partial: $0.0200 known" in markdown
-    assert "Cost coverage: 1/2 relevant trials" in markdown
+    assert "Cost coverage: 1/2 fully priced trials" in markdown

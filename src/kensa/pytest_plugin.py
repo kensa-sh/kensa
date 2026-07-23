@@ -589,7 +589,8 @@ def _write_scoring_summary(
     curve = summary["pass_k_curve"]
     reliability = (
         " | ".join(
-            f"pass^{point['k']} {float(point['value']):.1%} ({_cohort_count(int(point['cases']))})"
+            f"pass^{point['k']} "
+            f"{float(point['value']):.1%} ({_cohort_count(int(point['cohorts']))})"
             for point in curve
         )
         or "n/a"
@@ -613,10 +614,12 @@ def _write_scoring_summary(
     elif performance["cost_partial"]:
         terminalreporter.write_line(
             f"Cost: partial ${float(performance['known_cost_usd']):.4f} known | "
-            f"{known_trials}/{relevant_trials} priced trials"
+            f"{known_trials}/{relevant_trials} fully priced trials"
         )
     elif relevant_trials:
-        terminalreporter.write_line(f"Cost: n/a | {known_trials}/{relevant_trials} priced trials")
+        terminalreporter.write_line(
+            f"Cost: n/a | {known_trials}/{relevant_trials} fully priced trials"
+        )
     else:
         terminalreporter.write_line("Cost: n/a")
 

@@ -1526,7 +1526,7 @@ def test_agent(case, kensa_run):
     assert payload["data"]["complete"] is True
     assert payload["data"]["interruption"] is None
     assert payload["data"]["aggregates"][0]["verdict"] == "pass"
-    assert payload["data"]["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cases": 1}]
+    assert payload["data"]["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cohorts": 1}]
     assert payload["data"]["workers"] == 1
     assert payload["data"]["pytest"]["returncode"] == 0
     assert "--kensa-report=json" in payload["data"]["pytest_command"]

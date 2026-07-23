@@ -112,6 +112,8 @@ def test_kensa_trace_and_span_edge_paths() -> None:
     assert invalid_cost.cost_available is False
     assert invalid_cost.to_dict()["cost_usd"] is None
     assert KensaSpan(name="s", attributes={"cost_usd": float("nan")}).cost_available is False
+    assert KensaSpan(name="s", attributes={"cost_usd": -1}).cost_available is False
+    assert KensaSpan(name="s", attributes={"cost_usd": True}).cost_available is False
     llm_span = KensaSpan(name="llm", kind="llm", tool_name="lookup", attributes={"cost_usd": 0.2})
     assert llm_span.cost_available is True
     assert llm_span.to_dict()["cost_available"] is True
@@ -137,7 +139,9 @@ def test_kensa_trace_and_span_edge_paths() -> None:
     assert trace.to_dict()["llm_turns"] == 1
     trace.replace([llm_span, KensaSpan(name="unknown", kind="llm")])
     assert trace.cost_available is False
-    assert trace.to_dict()["cost_usd"] is None
+    partial_cost = trace.to_dict()
+    assert partial_cost["cost_usd"] is None
+    assert partial_cost["known_cost_usd"] == 0.2
 
 
 def test_record_llm_call_counts_toward_kensa_trace_llm_turns() -> None:

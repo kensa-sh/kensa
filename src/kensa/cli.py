@@ -1146,7 +1146,7 @@ def _write_markdown_report(source: Path, destination: Path) -> None:
                 "| k | pass^k | Cohorts |",
                 "| ---: | ---: | ---: |",
                 *[
-                    f"| {point['k']} | {float(point['value']):.1%} | {point['cases']} |"
+                    f"| {point['k']} | {float(point['value']):.1%} | {point['cohorts']} |"
                     for point in curve
                 ],
             ]
@@ -1177,7 +1177,7 @@ def _write_markdown_report(source: Path, destination: Path) -> None:
             f"- Mean LLM turns: {float(performance['mean_llm_turns']):.1f}",
             f"- Total cost: {total_cost}",
             f"- Cost per pass: {cost_per_pass_text}",
-            f"- Cost coverage: {known_trials}/{relevant_trials} relevant trials",
+            f"- Cost coverage: {known_trials}/{relevant_trials} fully priced trials",
             "",
             "## Cases",
             "",

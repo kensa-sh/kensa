@@ -479,6 +479,7 @@ def _record_timeout(
             "spans": [],
             "tools": [],
             "cost_usd": None,
+            "known_cost_usd": None,
             "cost_available": False,
             "llm_turns": 0,
             "duration_ms": 0.0,

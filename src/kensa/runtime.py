@@ -89,11 +89,13 @@ class KensaSpan:
             value = self.attributes["cost_usd"]
         else:
             return None
+        if isinstance(value, bool):
+            return None
         try:
             cost = float(value)
         except (TypeError, ValueError):
             return None
-        return cost if math.isfinite(cost) else None
+        return cost if math.isfinite(cost) and cost >= 0 else None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,6 +164,11 @@ class KensaTrace:
         return round(sum(span.cost_usd for span in self.spans), 8)
 
     @property
+    def known_cost_usd(self) -> float | None:
+        costs = [span.cost_usd for span in self.spans if span.cost_available]
+        return round(sum(costs), 8) if costs else None
+
+    @property
     def cost_available(self) -> bool:
         billable = [
             span for span in self.spans if span.kind.lower() == "llm" or span.cost_available
@@ -194,10 +201,12 @@ class KensaTrace:
         self.incomplete_reason = incomplete_reason
 
     def to_dict(self) -> dict[str, Any]:
+        known_cost_usd = self.known_cost_usd
         return {
             "spans": [span.to_dict() for span in self.spans],
             "tools": self.tools.names,
-            "cost_usd": self.cost_usd if self.cost_available else None,
+            "cost_usd": known_cost_usd if self.cost_available else None,
+            "known_cost_usd": known_cost_usd,
             "cost_available": self.cost_available,
             "llm_turns": self.llm_turns,
             "duration_ms": self.duration_ms,
