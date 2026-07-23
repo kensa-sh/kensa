@@ -157,15 +157,16 @@ def test_loaded_dotenv_secret_does_not_leak_to_cli_json_report_or_traces(
     (eval_dir / "conftest.py").write_text(
         """import pytest
 from kensa import record_llm_call
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    def _run(case):
-        with record_llm_call(provider="test", model="test-model"):
-            return {"ok": case.input}
-
-    return _run
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            with record_llm_call(provider="test", model="test-model"):
+                return ConversationResponse(output={"ok": case.input})
+    return Agent()
 """
     )
     (eval_dir / "test_dotenv_secret.py").write_text(
@@ -178,7 +179,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.parametrize("case", [kensa_case(id="dotenv_secret", input="hello")])
 def test_dotenv_secret(case, kensa_run, kensa_trace):
     assert os.environ.get("OPENAI_API_KEY") is not None
-    assert case.run(kensa_run) == {"ok": "hello"}
+    assert case.run(kensa_run).output == {"ok": "hello"}
     assert kensa_trace.llm_turns == 1
 """
     )

@@ -2,28 +2,44 @@
 
 from __future__ import annotations
 
-import inspect
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal, NotRequired, Required, TypeAlias, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast, overload
 
-from kensa._serialization import require_json_serializable
+import typing_extensions
+
 from kensa.errors import KensaCaseError
 from kensa.runtime import current_runtime
+
+if TYPE_CHECKING:
+    from kensa.conversation import (
+        CaseResult,
+        ConversationAgent,
+        ConversationResponse,
+        Simulator,
+    )
 
 _MISSING = object()
 
 
-class KensaFunctionCall(TypedDict):
+class _SyncConversationAgent(Protocol):
+    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse: ...
+
+
+class _AsyncConversationAgent(Protocol):
+    def respond(self, messages: tuple[KensaMessage, ...]) -> Awaitable[ConversationResponse]: ...
+
+
+class KensaFunctionCall(typing_extensions.TypedDict):
     """OpenAI-compatible function call payload for assistant tool calls."""
 
     name: str
     arguments: str
 
 
-class KensaToolCall(TypedDict):
+class KensaToolCall(typing_extensions.TypedDict):
     """OpenAI-compatible function tool call used by any-llm completion."""
 
     id: str
@@ -31,51 +47,51 @@ class KensaToolCall(TypedDict):
     function: KensaFunctionCall
 
 
-class KensaSystemMessage(TypedDict, total=False):
+class KensaSystemMessage(typing_extensions.TypedDict, total=False):
     """System message in Kensa's portable chat-completion subset."""
 
-    role: Required[Literal["system"]]
-    content: Required[str]
-    name: NotRequired[str]
+    role: typing_extensions.Required[Literal["system"]]
+    content: typing_extensions.Required[str]
+    name: typing_extensions.NotRequired[str]
 
 
-class KensaDeveloperMessage(TypedDict, total=False):
+class KensaDeveloperMessage(typing_extensions.TypedDict, total=False):
     """Developer message in Kensa's OpenAI-compatible chat-completion subset."""
 
-    role: Required[Literal["developer"]]
-    content: Required[str]
-    name: NotRequired[str]
+    role: typing_extensions.Required[Literal["developer"]]
+    content: typing_extensions.Required[str]
+    name: typing_extensions.NotRequired[str]
 
 
-class KensaUserMessage(TypedDict, total=False):
+class KensaUserMessage(typing_extensions.TypedDict, total=False):
     """User message in Kensa's portable chat-completion subset."""
 
-    role: Required[Literal["user"]]
-    content: Required[str]
-    name: NotRequired[str]
+    role: typing_extensions.Required[Literal["user"]]
+    content: typing_extensions.Required[str]
+    name: typing_extensions.NotRequired[str]
 
 
-class _KensaAssistantTextMessage(TypedDict, total=False):
+class _KensaAssistantTextMessage(typing_extensions.TypedDict, total=False):
     """Assistant text message in Kensa's portable chat-completion subset."""
 
-    role: Required[Literal["assistant"]]
-    content: Required[str]
-    name: NotRequired[str]
+    role: typing_extensions.Required[Literal["assistant"]]
+    content: typing_extensions.Required[str]
+    name: typing_extensions.NotRequired[str]
 
 
-class _KensaAssistantToolCallMessage(TypedDict, total=False):
+class _KensaAssistantToolCallMessage(typing_extensions.TypedDict, total=False):
     """Assistant tool-call message in Kensa's portable chat-completion subset."""
 
-    role: Required[Literal["assistant"]]
-    content: NotRequired[str | None]
-    name: NotRequired[str]
-    tool_calls: Required[list[KensaToolCall]]
+    role: typing_extensions.Required[Literal["assistant"]]
+    content: typing_extensions.NotRequired[str | None]
+    name: typing_extensions.NotRequired[str]
+    tool_calls: typing_extensions.Required[list[KensaToolCall]]
 
 
 KensaAssistantMessage: TypeAlias = _KensaAssistantTextMessage | _KensaAssistantToolCallMessage
 
 
-class KensaToolMessage(TypedDict):
+class KensaToolMessage(typing_extensions.TypedDict):
     """Tool result message linked to an assistant tool call."""
 
     role: Literal["tool"]
@@ -122,24 +138,71 @@ class KensaCase:
             return cast(list[KensaMessage], messages)
         raise KensaCaseError("case.messages is only available when messages=... was provided")
 
-    def run(self, kensa_run: Callable[[KensaCase], Any]) -> Any:
-        """Run this case through the codebase-provided ``kensa_run(case)`` fixture."""
+    @overload
+    def run(
+        self,
+        agent: ConversationAgent,
+        *,
+        simulator: Simulator,
+        max_turns: int | None = None,
+        starts_with: Literal["simulator", "agent"] | None = None,
+    ) -> Awaitable[CaseResult]: ...
+
+    @overload
+    def run(
+        self,
+        agent: _SyncConversationAgent,
+        *,
+        simulator: None = None,
+        max_turns: None = None,
+        starts_with: None = None,
+    ) -> CaseResult: ...
+
+    @overload
+    def run(
+        self,
+        agent: _AsyncConversationAgent,
+        *,
+        simulator: None = None,
+        max_turns: None = None,
+        starts_with: None = None,
+    ) -> Awaitable[CaseResult]: ...
+
+    @overload
+    def run(
+        self,
+        agent: ConversationAgent,
+        *,
+        simulator: None = None,
+        max_turns: None = None,
+        starts_with: None = None,
+    ) -> CaseResult | Awaitable[CaseResult]: ...
+
+    def run(
+        self,
+        agent: ConversationAgent,
+        *,
+        simulator: Simulator | None = None,
+        max_turns: int | None = None,
+        starts_with: Literal["simulator", "agent"] | None = None,
+    ) -> CaseResult | Awaitable[CaseResult]:
+        """Run this case through one conversation agent and optional simulator."""
+
+        from kensa.conversation import _run_conversation
+
+        def _run() -> CaseResult | Awaitable[CaseResult]:
+            return _run_conversation(
+                self,
+                agent,
+                simulator=simulator,
+                max_turns=max_turns,
+                starts_with=starts_with,
+            )
 
         runtime = current_runtime()
         if runtime is not None:
-            return runtime.run_case(self, kensa_run)
-
-        result = kensa_run(self)
-        if inspect.isawaitable(result):
-
-            async def _await_uninstrumented() -> Any:
-                value = await result
-                require_json_serializable(value)
-                return value
-
-            return _await_uninstrumented()
-        require_json_serializable(result)
-        return result
+            return runtime.run_case(self, _run)
+        return _run()
 
     def __repr__(self) -> str:
         return self.id

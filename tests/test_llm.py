@@ -14,13 +14,19 @@ from kensa.llm import (
     LLMConfigurationError,
     LLMProviderError,
     LLMResult,
+    _acompletion,
     _completion,
     _extract_usage,
+    acomplete,
     complete,
     resolve_llm_config,
     validate_structured_result,
 )
 from kensa.models import LLMModel, LLMProvider
+
+
+class StructuredAnswer(BaseModel):
+    answer: str
 
 
 def _chat_response(
@@ -68,6 +74,87 @@ def test_complete_uses_any_llm_with_env_defaults(monkeypatch: pytest.MonkeyPatch
             "temperature": 0.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_acomplete_uses_native_any_llm_async_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_completion(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return _chat_response(
+            parsed={"answer": "ok"},
+            usage=SimpleNamespace(input_tokens=4, output_tokens=2),
+        )
+
+    monkeypatch.setattr("kensa.llm._acompletion", fake_completion)
+
+    result = await acomplete(
+        [{"role": "user", "content": "hello"}],
+        model="gpt-5.5",
+        provider="openai",
+        temperature=0.5,
+        response_format=StructuredAnswer,
+        timeout_s=3,
+    )
+
+    assert result.parsed == {"answer": "ok"}
+    assert result.total_tokens == 6
+    assert calls == [
+        {
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "provider": "openai",
+            "temperature": 0.5,
+            "response_format": StructuredAnswer,
+            "client_args": {"timeout": 3, "max_retries": 0},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acompletion_translates_provider_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_completion(**kwargs: Any) -> Any:
+        del kwargs
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr("any_llm.acompletion", fake_completion)
+
+    with pytest.raises(KensaTimeoutError, match="slow"):
+        await _acompletion(model="gpt-5.5", messages=[])
+
+
+@pytest.mark.asyncio
+async def test_acompletion_import_and_ordinary_error_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = __import__
+
+    def missing_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "any_llm":
+            raise ImportError("missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", missing_import)
+    with pytest.raises(LLMProviderError, match="Any LLM"):
+        await _acompletion(model="m")
+
+    class FakeAnyLLM:
+        @staticmethod
+        async def acompletion(**kwargs: Any) -> Any:
+            del kwargs
+            raise RuntimeError("provider failed")
+
+    def successful_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "any_llm":
+            return FakeAnyLLM
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", successful_import)
+    with pytest.raises(RuntimeError, match="provider failed"):
+        await _acompletion(model="m")
 
 
 def test_complete_uses_default_model_when_env_model_is_missing(

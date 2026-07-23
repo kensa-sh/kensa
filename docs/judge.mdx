@@ -10,13 +10,16 @@ keywords:
   - model resolution
 ---
 
-`judge(...)` evaluates a natural-language criterion against your agent's output and returns a pass/fail verdict with reasoning. Reach for it only when a check can't be expressed deterministically - whether a response promised an unsupported refund, stayed on policy, or avoided a hallucinated detail.
+`judge(...)` evaluates a natural-language criterion against a completed agent run and returns a
+pass/fail verdict with reasoning. When given `CaseResult`, the judge receives ordered
+messages, normalized output, and termination as structured JSON. Reach for it only when a check
+cannot be expressed deterministically.
 
 ```python
 from kensa.pytest import judge
 
-result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
-assert result.passed, result.reasoning
+verdict = judge(result, "The response must not promise an unsupported refund.", input=case.input)
+assert verdict.passed, verdict.reasoning
 ```
 
 ## Signature
@@ -34,7 +37,7 @@ def judge(
 
 | Argument | Description |
 |---|---|
-| `output` | The agent output to evaluate (the return value of `case.run(...)`) |
+| `output` | Evidence to evaluate, normally the `CaseResult` returned by `case.run(...)` |
 | `criteria` | The natural-language pass condition |
 | `input` | The original case input, for grounding (`input=case.input`) |
 | `trace` | The `kensa_trace`, so the judge can consider tool calls (`trace=kensa_trace`) |
@@ -57,7 +60,7 @@ class JudgeResult:
 Assert on `passed` and surface `reasoning` as the failure message so a red test explains itself:
 
 ```python
-assert result.passed, result.reasoning
+assert verdict.passed, verdict.reasoning
 ```
 
 ## Assertions gate the judge

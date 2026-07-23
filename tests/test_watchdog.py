@@ -37,11 +37,15 @@ def _write_eval(tmp_path: Path, source: str) -> None:
     eval_dir.mkdir(parents=True)
     (eval_dir / "conftest.py").write_text(
         """import pytest
+from kensa.pytest import ConversationResponse
 
 
 @pytest.fixture
-def kensa_run():
-    return lambda case: {"input": case.input}
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
 """
     )
     (eval_dir / "test_timeout.py").write_text(source)
@@ -103,7 +107,7 @@ def test_bounded(case, kensa_run, hanging_fixture):
     assert result["interruption"]["kind"] == "timeout"
     assert list((tmp_path / ".kensa" / "state").glob("*.json")) == []
     if phase == "teardown":
-        assert trial["output"] == {"input": "hello"}
+        assert trial["output"]["output"] == {"input": "hello"}
         assert len(result["trials"]) == 1
 
 
@@ -130,7 +134,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=3, timeout_s=0.2)
 @pytest.mark.parametrize("case", [kensa_case(id="three_trials", input="hello")])
 def test_three_trials(case, kensa_run, request):
-    output = case.run(kensa_run)
+    result = case.run(kensa_run)
     if "trial2" in request.node.nodeid:
         child = subprocess.Popen([
             sys.executable,
@@ -146,7 +150,7 @@ def test_three_trials(case, kensa_run, request):
             time.sleep(0.005)
         print("x" * 200_000, flush=True)
         time.sleep(60)
-    assert output == {"input": "hello"}
+    assert result.output == {"input": "hello"}
 """,
     )
 
@@ -199,10 +203,10 @@ from kensa.pytest import kensa_case
     kensa_case(id="fast_c", input="c"),
 ])
 def test_parallel_timeout(case, kensa_run):
-    output = case.run(kensa_run)
+    result = case.run(kensa_run)
     if case.id == "hang":
         time.sleep(60)
-    assert output == {"input": case.input}
+    assert result.output == {"input": case.input}
 """,
     )
 
@@ -271,7 +275,7 @@ def hanging_teardown():
 @pytest.mark.parametrize("case", [kensa_case(id="teardown_active", input="fast")])
 def test_teardown_active(case, kensa_run, hanging_teardown):
     Path("teardown.worker").write_text(os.environ["PYTEST_XDIST_WORKER"])
-    assert case.run(kensa_run) == {"input": "fast"}
+    assert case.run(kensa_run).output == {"input": "fast"}
 
 
 @pytest.mark.kensa(timeout_s=1)
@@ -505,7 +509,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa
 @pytest.mark.parametrize("case", [kensa_case(id="background", input="hello")])
 def test_background(case, kensa_run):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     Path("background.pid").write_text(str(child.pid))
     print("output before success", flush=True)
@@ -602,9 +606,9 @@ from kensa.pytest import judge, kensa_case
 @pytest.mark.kensa(timeout_s=0.5)
 @pytest.mark.parametrize("case", [kensa_case(id="snapshot", input="hello")])
 def test_snapshot(case, kensa_run):
-    output = case.run(kensa_run)
-    result = judge(output, "must preserve evidence")
-    assert result.passed
+    result = case.run(kensa_run)
+    verdict = judge(result, "must preserve evidence")
+    assert verdict.passed
     time.sleep(60)
 """,
     )
@@ -618,7 +622,7 @@ def test_snapshot(case, kensa_run):
     assert trial["status"] == "error"
     assert trial["error_kind"] == "timeout"
     assert trial["case"] == {"id": "snapshot", "input": "hello"}
-    assert trial["output"] == {"input": "hello"}
+    assert trial["output"]["output"] == {"input": "hello"}
     assert trial["trace"]["spans"][0]["name"] == "kensa.pytest.trial"
     assert trial["trace"]["incomplete"] is True
     assert trial["judges"] == [
@@ -664,7 +668,7 @@ def judging_teardown():
 @pytest.mark.kensa(timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="teardown_snapshot", input="hello")])
 def test_teardown_snapshot(case, kensa_run, judging_teardown):
-    assert case.run(kensa_run) == {"input": "hello"}
+    assert case.run(kensa_run).output == {"input": "hello"}
 """,
     )
     conftest = tmp_path / "tests" / "evals" / "conftest.py"

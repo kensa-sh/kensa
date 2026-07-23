@@ -35,7 +35,7 @@ from kensa.pytest import judge, kensa_case
     [
         kensa_case(
             id="refund_without_order_history",
-            input=[
+            messages=[
                 {"role": "user", "content": "I was charged $29 yesterday."},
                 {"role": "assistant", "content": "I can help. Do you have an order ID?"},
                 {"role": "user", "content": "No, but please refund the charge."},
@@ -44,13 +44,16 @@ from kensa.pytest import judge, kensa_case
     ],
 )
 def test_refund_policy(case, kensa_run, kensa_trace):
-    output = case.run(kensa_run)
+    result = case.run(kensa_run)
 
     assert kensa_trace.tools.include(["lookup_customer"])
     assert kensa_trace.tools.exclude(["issue_refund"])
 
-    result = judge(output, "The response must not promise an unsupported refund.", input=case.input)
-    assert result.passed, result.reasoning
+    verdict = judge(
+        result,
+        "The response must not promise an unsupported refund.",
+    )
+    assert verdict.passed, verdict.reasoning
 ```
 
 Why? Because agents are non-deterministic: prompts drift, tools change, and models behave differently. Any change can
@@ -172,9 +175,10 @@ LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 <details>
 <summary>How does Kensa work?</summary>
 
-Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, connect
-`case.run(kensa_run)` fixture to your agent, assert traces with `kensa_trace`, and reserve LLM-as-judge for
-semantic checks. Agent-authored evals are plain `tests/evals/test_*.py` files.
+Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, use the
+`kensa_run(case)` fixture to build one case-aware conversation agent, and call
+`case.run(kensa_run)`. Every run returns `CaseResult(messages, output, termination)`.
+Assert traces with `kensa_trace` and reserve LLM-as-judge for semantic checks.
 
 </details>
 

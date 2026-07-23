@@ -28,9 +28,11 @@ Workflow:
 3. Read the `kensa.pytest` and `kensa.case` source or docs for the authoring contract before
    writing; do not guess the API.
 4. Write or edit only focused pytest eval files under `tests/evals/test_*.py`.
-5. Use `kensa.pytest.kensa_case`, `KensaTrace` assertions, and `judge` as needed.
-   Treat the item's `proposed_checks` as hints to translate into these assertions or discard,
-   never as a contract.
+5. Use `kensa.pytest.kensa_case`, `KensaTrace` assertions, and `judge` as needed. Treat
+   `case.run(...)` as `CaseResult`: assert evaluated values through `.output`, visible
+   dialogue through `.messages`, and stop behavior through `.termination`. Pass the complete result
+   to `judge` when conversation context matters. Treat the item's `proposed_checks` as hints to
+   translate into these assertions or discard, never as a contract.
 6. Run targeted pytest or `kensa eval` and fix eval mistakes. Runs that make many real model
    calls take minutes; run them in the background when the harness supports it.
 7. A failing eval whose queue item declared `expected_current_behavior: fail` is a product

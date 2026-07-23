@@ -87,21 +87,28 @@ kensa eval
 ```python
 import pytest
 
+from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
 from kensa.tracing import record_tool_call
 
 
-@pytest.fixture
-def kensa_run():
-    def _run(case):
-        # Call your real agent / app here.
+class RepositoryAgent:
+    def __init__(self, case: KensaCase) -> None:
+        self.case = case
+
+    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
         with record_tool_call("lookup_customer"):
             ...
-        return {"message": "I need order history before issuing a refund."}
+        return ConversationResponse(content="I need order history before issuing a refund.")
 
-    return _run
+
+@pytest.fixture
+def kensa_run(case: KensaCase) -> RepositoryAgent:
+    return RepositoryAgent(case)
 ```
 
-`kensa doctor` then verifies the harness is wired to a real agent boundary before you trust any verdict.
+The fixture owns case-aware construction and teardown. Kensa calls the returned instance's
+`respond(messages)` method and returns one `CaseResult` for both direct and simulated runs.
+`kensa doctor` verifies the harness is wired to a real agent boundary before you trust any verdict.
 
 ## Next
 

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
-from kensa.errors import KensaCaseError
+from pydantic import BaseModel
 
 
 def jsonable(value: Any) -> Any:
@@ -16,8 +17,10 @@ def jsonable(value: Any) -> Any:
         return repr(value)
 
 
-def require_json_serializable(value: Any) -> None:
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError) as exc:
-        raise KensaCaseError(f"case.run(...) output must be JSON-serializable: {exc}") from exc
+def json_value(value: Any) -> Any:
+    """Return an isolated JSON value, honoring Pydantic JSON serialization."""
+
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    json.dumps(value)
+    return deepcopy(value)
