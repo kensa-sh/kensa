@@ -54,3 +54,30 @@ jobs:
       - run: uv pip install ".[redaction]"
       - run: uv run pytest -q -m "not live"
       - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live
+
+  merge-release:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'satyaborg' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'chore/release-v') &&
+      startsWith(github.event.pull_request.title, 'chore: release ') &&
+      github.event.pull_request.draft == false
+    needs: [test, lint, build, redaction]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api \
+            --method PUT \
+            "repos/${GH_REPO}/pulls/${PR_NUMBER}/merge" \
+            --field merge_method=merge \
+            --field sha="$HEAD_SHA"
