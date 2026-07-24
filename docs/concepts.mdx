@@ -76,7 +76,8 @@ redacts retained values before storage.
 | Accessor | What it returns |
 |---|---|
 | `result.trace.tools` | Tool-call assertions (`include`, `exclude`, `order`, `no_repeats`, `names`) |
-| `result.trace.cost_usd` | Total trace cost in USD |
+| `result.trace.cost_usd` | Complete trace cost, or `None` when any billable span is unpriced |
+| `result.trace.known_cost_usd` | Sum of priced spans, including when complete cost is unavailable |
 | `result.trace.llm_turns` | Count of LLM spans |
 | `result.trace.duration_ms` | Total trace duration |
 | `result.trace.spans` | Raw collected spans |

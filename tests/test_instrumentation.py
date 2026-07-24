@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from opentelemetry.trace import SpanKind
 
 import kensa
 from kensa import cli_traces, redact, tracing
@@ -52,10 +55,54 @@ def test_record_llm_call_exports_llm_span(tmp_path: Path) -> None:
     row = rows[-1]
     assert row["name"] == "openai.responses.create"
     assert row["attributes"]["kensa.span.kind"] == "llm"
+    assert row["attributes"]["gen_ai.operation.name"] == "chat"
     assert row["attributes"]["kensa.llm.provider"] == "openai"
-    assert row["attributes"]["gen_ai.system"] == "openai"
+    assert row["attributes"]["gen_ai.provider.name"] == "openai"
+    assert "gen_ai.system" not in row["attributes"]
     assert row["attributes"]["kensa.llm.model"] == "gpt-5-mini"
     assert row["attributes"]["gen_ai.request.model"] == "gpt-5-mini"
+
+
+def test_record_llm_call_uses_client_span_kind_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kinds: list[SpanKind] = []
+
+    class Tracer:
+        def start_as_current_span(self, name: str, **kwargs: Any) -> Any:
+            del name
+            kinds.append(kwargs["kind"])
+            return nullcontext()
+
+    monkeypatch.setattr(tracing.trace, "get_tracer", lambda name: Tracer())
+
+    with record_llm_call():
+        pass
+    with record_llm_call(span_kind=SpanKind.INTERNAL):
+        pass
+
+    assert kinds == [SpanKind.CLIENT, SpanKind.INTERNAL]
+
+
+def test_record_llm_call_uses_requested_genai_operation_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_names: list[str] = []
+
+    class Tracer:
+        def start_as_current_span(self, name: str, **kwargs: Any) -> Any:
+            del name
+            operation_names.append(kwargs["attributes"]["gen_ai.operation.name"])
+            return nullcontext()
+
+    monkeypatch.setattr(tracing.trace, "get_tracer", lambda name: Tracer())
+
+    with record_llm_call(operation_name="embeddings"):
+        pass
+    with record_llm_call(operation_name="text_completion"):
+        pass
+
+    assert operation_names == ["embeddings", "text_completion"]
 
 
 def test_record_span_flattens_explicit_attributes(tmp_path: Path) -> None:

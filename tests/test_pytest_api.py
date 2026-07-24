@@ -292,6 +292,10 @@ def test_agent(case, mode):
 
     result.assert_outcomes(passed=4)
     result.stdout.fnmatch_lines(["*2/2 aggregate case(s) passed*"])
+    result.stdout.fnmatch_lines(
+        ["*Reliability: pass^1 100.0% (2 cohorts) | pass^2 100.0% (2 cohorts)*"]
+    )
+    assert "pass^3" not in result.stdout.str()
     summary_rows = [line for line in result.stdout.lines if line.startswith("✓ pass")]
     assert len(summary_rows) == 2
     assert any("test_agent[case_a-fast]" in line for line in summary_rows)
@@ -475,6 +479,66 @@ def test_agent(case, kensa_run, bad_teardown):
     payload = json.loads(artifact.read_text())
     assert payload["trials"][0]["status"] == "error"
     assert payload["trials"][0]["error_kind"] == "teardown"
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
+    assert payload["summary"]["cost_latency"]["latency_mean_ms"] == 0.0
+
+
+@pytest.mark.parametrize("phase", ["call", "teardown"])
+def test_skips_are_excluded_from_aggregates_and_scoring(
+    pytester: pytest.Pytester,
+    phase: str,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
+
+
+@pytest.fixture
+def skip_in_teardown():
+    yield
+    pytest.skip("teardown skip")
+"""
+    )
+    fixture = ", skip_in_teardown" if phase == "teardown" else ""
+    body = (
+        'pytest.skip("call skip")'
+        if phase == "call"
+        else 'assert case.run(kensa_run).output == {"ok": True}'
+    )
+    pytester.makepyfile(
+        test_eval=f"""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="case_a", input="hello")])
+def test_agent(case, kensa_run{fixture}):
+    {body}
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    assert result.ret == 0
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    payload = json.loads(artifact.read_text())
+    assert len(payload["trials"]) == 1
+    assert payload["trials"][0]["status"] == "skipped"
+    assert payload["trials"][0]["error_kind"] == "skip"
+    assert payload["aggregates"] == []
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
 
 
 def test_case_run_records_output_artifact(pytester: pytest.Pytester) -> None:
@@ -617,12 +681,16 @@ def test_agent(case, failing_setup):
 
     result.assert_outcomes(errors=1)
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
-    trial = json.loads(artifact.read_text())["trials"][0]
+    payload = json.loads(artifact.read_text())
+    trial = payload["trials"][0]
     assert trial["status"] == "error"
     assert trial["error_kind"] == "setup"
     assert trial["error"] == "setup failed after case run"
     assert trial["case"] == {"id": "case_a", "input": "hello"}
     assert trial["output"]["output"] == {"input": "hello"}
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
+    assert payload["summary"]["cost_latency"]["latency_mean_ms"] == 0.0
 
 
 def test_teardown_judge_preserves_finalized_trial_outcomes(
@@ -926,6 +994,11 @@ def test_agent(case, kensa_run):
     ]
     assert [aggregate["verdict"] for aggregate in payload["aggregates"]] == ["pass", "pass"]
     assert [aggregate["total"] for aggregate in payload["aggregates"]] == [3, 3]
+    assert payload["summary"]["pass_k_curve"] == [
+        {"k": 1, "value": 1.0, "cohorts": 2},
+        {"k": 2, "value": 1.0, "cohorts": 2},
+        {"k": 3, "value": 1.0, "cohorts": 2},
+    ]
     trace_files = list(
         (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
     )
@@ -1358,7 +1431,10 @@ def test_agent(case, skip_during_setup):
     result.assert_outcomes(skipped=1, failed=1)
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
-    assert payload["trials"] == []
+    assert len(payload["trials"]) == 1
+    assert payload["trials"][0]["case_id"] == "case_skip"
+    assert payload["trials"][0]["status"] == "skipped"
+    assert payload["aggregates"] == []
     assert payload["complete"] is False
     assert payload["interruption"]["kind"] == "worker_crash"
 

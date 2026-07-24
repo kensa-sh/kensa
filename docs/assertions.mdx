@@ -56,14 +56,17 @@ def test_refund(case, kensa_run):
 def test_within_budget(case, kensa_run):
     result = case.run(kensa_run)
 
-    assert result.trace.cost_usd < 0.10        # under 10 cents
+    cost_usd = result.trace.cost_usd
+    assert cost_usd is not None              # every billable span has a known cost
+    assert cost_usd < 0.10                    # under 10 cents
     assert result.trace.llm_turns <= 5         # at most five model calls
     assert result.trace.duration_ms < 30_000   # under 30 seconds
 ```
 
 | Accessor | Type | Meaning |
 |---|---|---|
-| `result.trace.cost_usd` | `float` | Total trace cost in USD |
+| `result.trace.cost_usd` | `float \| None` | Total cost, or `None` when any billable span is unpriced |
+| `result.trace.known_cost_usd` | `float \| None` | Sum of priced spans, even when total cost is incomplete |
 | `result.trace.llm_turns` | `int` | Number of LLM spans |
 | `result.trace.duration_ms` | `float` | Total trace duration |
 | `result.trace.spans` | `list` | Raw collected spans, for custom checks |

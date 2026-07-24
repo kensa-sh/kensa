@@ -123,6 +123,125 @@ async def test_response_spans_attribute_sources_without_filtering_totals(
     assert runtime.trace.duration_ms >= 0
 
 
+def test_instrumented_genai_spans_are_llm_turns_with_partial_cost() -> None:
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_instrumented_genai_spans",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+    )
+
+    def operation() -> dict[str, bool]:
+        tracer = trace.get_tracer("instrumented-genai")
+        with tracer.start_as_current_span(
+            "current.chat",
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.provider.name": "openai",
+                "kensa.cost_usd": 0.2,
+            },
+        ):
+            pass
+        with tracer.start_as_current_span(
+            "legacy.chat",
+            attributes={"gen_ai.system": "openai"},
+        ):
+            pass
+        with tracer.start_as_current_span(
+            "current.tool",
+            attributes={"gen_ai.tool.name": "lookup"},
+        ):
+            pass
+        return {"ok": True}
+
+    runtime.run_case(kensa_case(id="instrumented", input="hello"), operation)
+
+    llm_spans = [span for span in runtime.trace.spans if span.kind == "llm"]
+    assert [span.name for span in llm_spans] == ["current.chat", "legacy.chat"]
+    assert runtime.trace.llm_turns == 2
+    assert runtime.trace.known_cost_usd == 0.2
+    assert runtime.trace.cost_available is False
+    assert runtime.trace.cost_usd is None
+    assert runtime.trace.tools.names == ["lookup"]
+
+
+def test_completed_llm_operation_publishes_trace_before_case_output() -> None:
+    snapshots: list[tuple[bool, int, float | None]] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_completed_llm_snapshot",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        snapshot_callback=lambda current: snapshots.append(
+            (
+                current.output_recorded,
+                current.trace.llm_turns,
+                current.trace.known_cost_usd,
+            )
+        ),
+    )
+
+    def operation() -> str:
+        with record_llm_call(attributes={"kensa.cost_usd": 0.2}):
+            pass
+        return "done"
+
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(kensa_case(id="snapshot", input="hello"), operation)
+    finally:
+        reset_current_runtime(token)
+
+    assert snapshots == [(False, 1, 0.2), (True, 1, 0.2)]
+
+
+def test_completed_instrumented_genai_span_publishes_trace_before_case_output() -> None:
+    snapshots: list[tuple[bool, int, float | None]] = []
+    operation_kinds: list[str | None] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_completed_instrumented_genai_snapshot",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        operation_callback=lambda operation: operation_kinds.append(
+            operation.kind if operation is not None else None
+        ),
+        snapshot_callback=lambda current: snapshots.append(
+            (
+                current.output_recorded,
+                current.trace.llm_turns,
+                current.trace.known_cost_usd,
+            )
+        ),
+    )
+
+    def operation() -> str:
+        tracer = trace.get_tracer("instrumented-genai")
+        with tracer.start_as_current_span(
+            "chat test-model",
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.provider.name": "test",
+                "gen_ai.request.model": "test-model",
+                "kensa.cost_usd": 0.2,
+            },
+        ):
+            pass
+        return "done"
+
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(kensa_case(id="snapshot", input="hello"), operation)
+    finally:
+        reset_current_runtime(token)
+
+    assert operation_kinds == ["llm", None]
+    assert snapshots == [(False, 1, 0.2), (True, 1, 0.2)]
+
+
 def test_trace_spans_are_available_immediately_after_case_run(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """
@@ -522,6 +641,7 @@ def test_judge_timeout_is_advisory_and_reports_active_operation(
     assert operations == [
         {
             "name": "judge",
+            "kind": "span",
             "attributes": {"provider": "openai", "model": "gpt-5.4-mini"},
         },
         None,

@@ -161,6 +161,22 @@ Kensa aggregates the trials per case at session end:
 
 `fail`, `flaky`, and `error` fail the pytest session.
 
+Aggregates preserve the requested `configured_trials`; `total` excludes skips, and skips alone do
+not make an aggregate partial.
+
+### Reliability, cost, and latency
+
+Kensa reports [τ-bench](https://arxiv.org/abs/2406.12045) `pass^k` as
+`C(passes, k) / C(trials, k)`, averaged across eligible pytest `group_id` cohorts. Each point includes
+its cohort count because fewer cohorts may qualify as `k` increases.
+
+Passes are successful; assertion failures, agent exceptions, and call timeouts are unsuccessful.
+Smoke, skipped, fixture-phase, and infrastructure trials are excluded from all summary metrics.
+
+Cost totals appear only when at least one cost-relevant trial exists and all are priced; cost per
+pass also requires a pass. Otherwise they are `null`; `known_cost_usd` and `cost_coverage` report
+partial data. JSON artifacts expose these metrics under `summary`.
+
 ## Plugin options
 
 The plugin adds these pytest options:

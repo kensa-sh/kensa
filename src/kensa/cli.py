@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 
 from kensa import cli_inspect, cli_output, cli_traces, redact
 from kensa import config as kensa_config
+from kensa._smoke import is_smoke_aggregate
 from kensa.artifacts import write_run_artifacts
 from kensa.constants import (
     CLI_EPILOG,
@@ -38,8 +39,6 @@ from kensa.constants import (
     KENSA_DIR,
     LOCAL_ENDPOINT_HOSTS,
     SETUP_HANDOFF_PROMPT,
-    SMOKE_CASE_ID,
-    SMOKE_NODEID_FRAGMENT,
     SMOKE_TEMPLATE,
     TRACE_IMPORT_LATEST_SCHEMA_VERSION,
     TRACE_IMPORTS_DIR,
@@ -54,6 +53,7 @@ from kensa.models import (
     KensaProjectConfig,
     RedactionModelChoice,
 )
+from kensa.scoring import run_summary
 from kensa.traces import (
     ImportResult,
     _import_trace_records,
@@ -996,6 +996,7 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
                 "complete": artifact_payload.get("complete", False) if artifact_payload else False,
                 "interruption": artifact_payload.get("interruption") if artifact_payload else None,
                 "aggregates": artifact_payload.get("aggregates", []) if artifact_payload else [],
+                "summary": artifact_payload.get("summary", {}) if artifact_payload else {},
                 "timeout": completed.timeout.to_dict() if completed.timeout else None,
                 **_eval_readiness_data(readiness),
                 "pytest": {
@@ -1079,8 +1080,7 @@ def _latest_eval_readiness() -> _EvalReadiness:
 
 
 def _is_scaffolded_smoke_aggregate(aggregate: dict[str, Any]) -> bool:
-    group_id = str(aggregate.get("group_id") or "")
-    return aggregate.get("case_id") == SMOKE_CASE_ID or (SMOKE_NODEID_FRAGMENT in group_id)
+    return is_smoke_aggregate(aggregate)
 
 
 def _print_eval_readiness_terminal(
@@ -1135,7 +1135,54 @@ def _latest_result_artifact(result_dir: Path) -> Path | None:
 
 def _write_markdown_report(source: Path, destination: Path) -> None:
     data = json.loads(source.read_text())
-    lines = ["# Kensa Eval Report", ""]
+    summary = data.get("summary")
+    if not isinstance(summary, dict):
+        summary = run_summary(data)
+    curve = summary["pass_k_curve"]
+    lines = ["# Kensa Eval Report", "", "## Reliability", ""]
+    if curve:
+        lines.extend(
+            [
+                "| k | pass^k | Cohorts |",
+                "| ---: | ---: | ---: |",
+                *[
+                    f"| {point['k']} | {float(point['value']):.1%} | {point['cohorts']} |"
+                    for point in curve
+                ],
+            ]
+        )
+    else:
+        lines.append("No eligible agent trials.")
+    performance = summary["cost_latency"]
+    known_trials = int(performance["cost_known_trials"])
+    relevant_trials = int(performance["cost_relevant_trials"])
+    if performance["cost_complete"]:
+        total_cost = f"${float(performance['total_cost_usd']):.4f}"
+    elif performance["cost_partial"]:
+        total_cost = f"partial: ${float(performance['known_cost_usd']):.4f} known"
+    else:
+        total_cost = "n/a"
+    cost_per_pass = performance["cost_per_pass_usd"]
+    cost_per_pass_text = f"${float(cost_per_pass):.4f}" if cost_per_pass is not None else "n/a"
+    lines.extend(
+        [
+            "",
+            f"Eligible agent trials: {summary['eligible_agent_trials']}",
+            "",
+            "## Cost and latency",
+            "",
+            f"- Latency p50: {float(performance['latency_p50_ms']):.0f}ms",
+            f"- Latency p95: {float(performance['latency_p95_ms']):.0f}ms",
+            f"- Latency mean: {float(performance['latency_mean_ms']):.0f}ms",
+            f"- Mean LLM turns: {float(performance['mean_llm_turns']):.1f}",
+            f"- Total cost: {total_cost}",
+            f"- Cost per pass: {cost_per_pass_text}",
+            f"- Cost coverage: {known_trials}/{relevant_trials} fully priced trials",
+            "",
+            "## Cases",
+            "",
+        ]
+    )
     lines.extend(
         (
             f"- **{aggregate['verdict']}** `{aggregate['group_id']}`: "

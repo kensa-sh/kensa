@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kensa._smoke import is_smoke_trial
 from kensa.runtime import TrialMetadata
+from kensa.scoring import run_summary
 
 
 @dataclass
@@ -24,6 +26,8 @@ class KensaAggregate:
     partial: bool
     verdict: str
     trials: list[TrialMetadata]
+    skipped: int = 0
+    smoke: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,9 +38,11 @@ class KensaAggregate:
             "passed": self.passed,
             "failed": self.failed,
             "errored": self.errored,
+            "skipped": self.skipped,
             "partial": self.partial,
             "verdict": self.verdict,
             "trials": [trial.to_dict() for trial in self.trials],
+            "smoke": self.smoke,
         }
 
 
@@ -50,13 +56,17 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
         groups.setdefault(trial.group_id, []).append(trial)
     aggregates: list[KensaAggregate] = []
     for group_id, group_trials in sorted(groups.items()):
-        ordered = sorted(group_trials, key=lambda trial: trial.trial_index)
+        all_trials = sorted(group_trials, key=lambda trial: trial.trial_index)
+        ordered = [trial for trial in all_trials if trial.status != "skipped"]
+        if not ordered:
+            continue
         total = len(ordered)
         passed = sum(1 for trial in ordered if trial.status == "pass")
         errored = sum(1 for trial in ordered if trial.status == "error")
         failed = sum(1 for trial in ordered if trial.status == "fail")
-        configured = ordered[0].configured_trials if ordered else 0
-        partial = total < configured
+        skipped = len(all_trials) - total
+        configured = max(trial.configured_trials for trial in all_trials)
+        partial = total + skipped < configured
         timed_out = any(trial.error_kind == "timeout" for trial in ordered)
         if timed_out:
             verdict = "error"
@@ -73,7 +83,7 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
         aggregates.append(
             KensaAggregate(
                 group_id=group_id,
-                case_id=ordered[0].case_id if ordered else "default",
+                case_id=ordered[0].case_id,
                 configured_trials=configured,
                 total=total,
                 passed=passed,
@@ -82,6 +92,8 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
                 partial=partial,
                 verdict=verdict,
                 trials=ordered,
+                skipped=skipped,
+                smoke=any(trial.is_smoke for trial in all_trials),
             )
         )
     return aggregates
@@ -120,6 +132,7 @@ def write_run_artifacts(
         "trials": [trial.to_dict() for trial in trials],
         "aggregates": [aggregate.to_dict() for aggregate in aggregates],
     }
+    payload["summary"] = run_summary(payload)
     write_json_atomic(result_path, payload)
     _write_trace_artifact(run_id, trials, artifact_dir)
     return aggregates
@@ -152,6 +165,7 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
         "case": trial.case,
         "output": trial.output,
         "status": trial.status,
+        "smoke": trial.is_smoke,
         "duration_ms": trial.duration_ms,
         "spans": spans,
         "incomplete": bool(trace.get("incomplete", False)),
@@ -181,6 +195,7 @@ def trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
         if isinstance(judges, list)
         else [],
         active_operation=active_operation if isinstance(active_operation, dict) else None,
+        smoke=is_smoke_trial(row),
     )
 
 

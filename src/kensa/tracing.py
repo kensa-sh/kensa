@@ -8,15 +8,18 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.trace import SpanKind
 
 from kensa._serialization import jsonable
-from kensa.runtime import current_runtime
+from kensa.runtime import OperationKind, current_runtime
 from kensa.traces import write_trace_manifest
+
+GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_completion"]
 
 
 class JSONLSpanExporter(SpanExporter):
@@ -217,7 +220,12 @@ def _span_links(span: ReadableSpan) -> list[dict[str, Any]]:
 @contextmanager
 def record_span(name: str, **attributes: Any) -> Iterator[None]:
     attrs = _flatten_attributes(attributes)
-    with _record_span(name, span_attributes=attrs, operation_attributes=attrs):
+    with _record_span(
+        name,
+        span_attributes=attrs,
+        operation_attributes=attrs,
+        operation_kind="span",
+    ):
         yield
 
 
@@ -227,13 +235,24 @@ def _record_span(
     *,
     span_attributes: dict[str, Any],
     operation_attributes: dict[str, Any],
+    operation_kind: OperationKind,
+    span_kind: SpanKind = SpanKind.INTERNAL,
 ) -> Iterator[None]:
     tracer = trace.get_tracer("kensa.app")
     runtime = current_runtime()
     operation = (
-        runtime.operation(name, operation_attributes) if runtime is not None else nullcontext()
+        runtime.operation(name, operation_attributes, kind=operation_kind)
+        if runtime is not None
+        else nullcontext()
     )
-    with operation, tracer.start_as_current_span(name, attributes=span_attributes):
+    with (
+        operation,
+        tracer.start_as_current_span(
+            name,
+            kind=span_kind,
+            attributes=span_attributes,
+        ),
+    ):
         yield
 
 
@@ -249,6 +268,7 @@ def record_tool_call(name: str, **attributes: Any) -> Iterator[None]:
         name,
         span_attributes=attrs,
         operation_attributes=operation_attributes,
+        operation_kind="tool",
     ):
         yield
 
@@ -259,13 +279,18 @@ def record_llm_call(
     *,
     provider: str | None = None,
     model: str | None = None,
+    operation_name: GenAIOperationName = "chat",
+    span_kind: SpanKind = SpanKind.CLIENT,
     **attributes: Any,
 ) -> Iterator[None]:
     operation_attributes = _flatten_attributes(attributes)
-    attrs = {"kensa.span.kind": "llm"}
+    attrs = {
+        "kensa.span.kind": "llm",
+        "gen_ai.operation.name": operation_name,
+    }
     if provider is not None:
         attrs["kensa.llm.provider"] = provider
-        attrs["gen_ai.system"] = provider
+        attrs["gen_ai.provider.name"] = provider
         operation_attributes["provider"] = provider
     if model is not None:
         attrs["kensa.llm.model"] = model
@@ -276,6 +301,8 @@ def record_llm_call(
         name,
         span_attributes=attrs,
         operation_attributes=operation_attributes,
+        operation_kind="llm",
+        span_kind=span_kind,
     ):
         yield
 
