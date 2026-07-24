@@ -161,66 +161,21 @@ Kensa aggregates the trials per case at session end:
 
 `fail`, `flaky`, and `error` fail the pytest session.
 
-Aggregate objects keep `configured_trials` at the requested trial count. Their `total` field counts
-recorded non-skipped trials, while `skipped` reports recorded skips. A skip does not make an
-aggregate partial by itself.
+Aggregates preserve the requested `configured_trials`; `total` excludes skips, and skips alone do
+not make an aggregate partial.
 
 ### Reliability, cost, and latency
 
-Kensa reports `pass^k`, following the reliability metric introduced by
-[τ-bench](https://arxiv.org/abs/2406.12045). For one cohort with `s` passing trials out of `n`,
-Kensa calculates:
+Kensa reports [τ-bench](https://arxiv.org/abs/2406.12045) `pass^k` as
+`C(passes, k) / C(trials, k)`, averaged across eligible pytest `group_id` cohorts. Each point includes
+its cohort count because fewer cohorts may qualify as `k` increases.
 
-```text
-pass^k = C(s, k) / C(n, k)
-```
+Passes are successful; assertion failures, agent exceptions, and call timeouts are unsuccessful.
+Smoke, skipped, fixture-phase, and infrastructure trials are excluded from all summary metrics.
 
-The reported value is the average across cohorts with at least `k` trials. Each curve point includes
-its own `cohorts` count because fewer cohorts may qualify as `k` increases. Cohorts are keyed by
-pytest `group_id`, so separate parameter configurations of the same case are scored independently.
-
-A passing trial is successful. Assertion failures, agent exceptions, and call-phase timeouts are
-unsuccessful. Smoke trials, skipped trials, fixture setup or teardown failures and timeouts, and
-explicitly classified infrastructure failures are excluded from reliability, latency, and cost
-metrics.
-
-A trial trace has `cost_usd` only when every billable span in that trial is priced. The summary has
-`total_cost_usd` and `cost_per_pass_usd` only when every cost-relevant trial is fully priced.
-Otherwise those fields are `null`, while `known_cost_usd` preserves the sum of priced spans from
-incomplete trials. `cost_coverage` is the fraction of cost-relevant trials that are fully priced.
-Costs must be finite, nonnegative numbers; booleans are treated as unavailable.
-
-The JSON artifact stores these metrics under `summary`:
-
-```json
-{
-  "summary": {
-    "pass_k_curve": [
-      {"k": 1, "value": 0.75, "cohorts": 2}
-    ],
-    "pass_k_cohorts": [
-      {"group_id": "mode-a", "case_id": "refund", "passed": 2, "total": 2},
-      {"group_id": "mode-b", "case_id": "refund", "passed": 1, "total": 2}
-    ],
-    "eligible_agent_trials": 4,
-    "cost_latency": {
-      "latency_p50_ms": 1200.0,
-      "latency_p95_ms": 1800.0,
-      "latency_mean_ms": 1350.0,
-      "total_cost_usd": null,
-      "known_cost_usd": 0.08,
-      "cost_per_pass_usd": null,
-      "mean_llm_turns": 3.5,
-      "cost_known_trials": 3,
-      "cost_relevant_trials": 4,
-      "cost_coverage": 0.75,
-      "has_cost": true,
-      "cost_complete": false,
-      "cost_partial": true
-    }
-  }
-}
-```
+Cost totals appear only when at least one cost-relevant trial exists and all are priced; cost per
+pass also requires a pass. Otherwise they are `null`; `known_cost_usd` and `cost_coverage` report
+partial data. JSON artifacts expose these metrics under `summary`.
 
 ## Plugin options
 
