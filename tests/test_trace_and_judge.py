@@ -199,12 +199,16 @@ def test_completed_llm_operation_publishes_trace_before_case_output() -> None:
 
 def test_completed_instrumented_genai_span_publishes_trace_before_case_output() -> None:
     snapshots: list[tuple[bool, int, float | None]] = []
+    operation_kinds: list[str | None] = []
     runtime = KensaTrialRuntime(
         trial=KensaTrial(1, 1),
         nodeid="test_completed_instrumented_genai_snapshot",
         group_id="group",
         case_id="case",
         no_judge=False,
+        operation_callback=lambda operation: operation_kinds.append(
+            operation.kind if operation is not None else None
+        ),
         snapshot_callback=lambda current: snapshots.append(
             (
                 current.output_recorded,
@@ -234,6 +238,7 @@ def test_completed_instrumented_genai_span_publishes_trace_before_case_output() 
     finally:
         reset_current_runtime(token)
 
+    assert operation_kinds == ["llm", None]
     assert snapshots == [(False, 1, 0.2), (True, 1, 0.2)]
 
 

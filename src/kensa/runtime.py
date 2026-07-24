@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
+from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
 
@@ -408,16 +409,25 @@ class KensaTrialRuntime:
         if (self.output_recorded or not require_output) and self._snapshot_callback is not None:
             self._snapshot_callback(self)
 
-    def _record_finished_spans(self, spans: Sequence[ReadableSpan]) -> None:
-        if self._trace_id is not None and any(
-            _is_instrumented_genai_llm_span(span, trace_id=self._trace_id) for span in spans
-        ):
-            self.trace.replace(
-                collect_spans(self._trace_id),
-                incomplete=self.trace.incomplete,
-                incomplete_reason=self.trace.incomplete_reason,
-            )
-            self._publish_snapshot(require_output=False)
+    def _start_instrumented_genai_span(self, key: tuple[int, int], span: Span) -> None:
+        operation = ActiveOperation(
+            name=span.name,
+            attributes=_jsonable_mapping(dict(span.attributes or {})),
+            kind="llm",
+        )
+        self._active_operations[key] = operation
+        self._publish_active_operation(operation)
+
+    def _finish_instrumented_genai_span(self, key: tuple[int, int]) -> None:
+        self._active_operations.pop(key, None)
+        active = next(reversed(self._active_operations.values()), None)
+        self._publish_active_operation(active)
+        self.trace.replace(
+            collect_spans(self._trace_id),
+            incomplete=self.trace.incomplete,
+            incomplete_reason=self.trace.incomplete_reason,
+        )
+        self._publish_snapshot(require_output=False)
 
     def _flush_and_populate_trace(self) -> None:
         incomplete = False
@@ -470,13 +480,36 @@ class KensaTrialRuntime:
         )
 
 
-class _SnapshottingSpanExporter(InMemorySpanExporter):
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        result = super().export(spans)
+class _RuntimeSpanProcessor(SpanProcessor):
+    def __init__(self) -> None:
+        self._runtimes: dict[tuple[int, int], KensaTrialRuntime] = {}
+        self._lock = Lock()
+
+    def on_start(
+        self,
+        span: Span,
+        parent_context: otel_context.Context | None = None,
+    ) -> None:
+        del parent_context
         runtime = _CURRENT_RUNTIME.get()
-        if result is SpanExportResult.SUCCESS and runtime is not None:
-            runtime._record_finished_spans(spans)
-        return result
+        key = _span_key(span)
+        if (
+            runtime is None
+            or runtime._trace_id is None
+            or key is None
+            or not _is_instrumented_genai_llm_span(span, trace_id=runtime._trace_id)
+        ):
+            return
+        runtime._start_instrumented_genai_span(key, span)
+        with self._lock:
+            self._runtimes[key] = runtime
+
+    def on_end(self, span: ReadableSpan) -> None:
+        key = _span_key(span)
+        with self._lock:
+            runtime = self._runtimes.pop(key, None) if key is not None else None
+        if runtime is not None and key is not None:
+            runtime._finish_instrumented_genai_span(key)
 
 
 def ensure_tracing() -> None:
@@ -484,9 +517,10 @@ def ensure_tracing() -> None:
     if _PROVIDER_READY:
         return
     _PROVIDER_READY = True
-    exporter = _SnapshottingSpanExporter()
+    exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
+    provider.add_span_processor(_RuntimeSpanProcessor())
     provider_for_exporter: Any = provider
     provider_for_exporter._kensa_exporter = exporter
     try:
@@ -541,7 +575,16 @@ def _normalize_span(raw: Any) -> KensaSpan:
     )
 
 
-def _is_instrumented_genai_llm_span(raw: ReadableSpan, *, trace_id: str) -> bool:
+def _span_key(raw: Span | ReadableSpan) -> tuple[int, int] | None:
+    context = raw.get_span_context()
+    return (context.trace_id, context.span_id) if context is not None else None
+
+
+def _is_instrumented_genai_llm_span(
+    raw: Span | ReadableSpan,
+    *,
+    trace_id: str,
+) -> bool:
     attrs = dict(raw.attributes or {})
     context = raw.get_span_context()
     span_trace_id = f"{context.trace_id:032x}" if context is not None else None
