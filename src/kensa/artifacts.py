@@ -158,6 +158,7 @@ def _write_trace_artifact(
 def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
     trace = trial.trace if isinstance(trial.trace, dict) else {}
     spans = trace.get("spans") if isinstance(trace.get("spans"), list) else []
+    agent_runs = trace.get("agent_runs") if isinstance(trace.get("agent_runs"), list) else []
     return {
         "id": f"{run_id}_{trial.case_id}_trial{trial.trial_index}",
         "run_id": run_id,
@@ -168,6 +169,7 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
         "smoke": trial.is_smoke,
         "duration_ms": trial.duration_ms,
         "spans": spans,
+        "agent_runs": agent_runs,
         "incomplete": bool(trace.get("incomplete", False)),
         "incomplete_reason": trace.get("incomplete_reason"),
     }

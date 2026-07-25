@@ -103,6 +103,122 @@ case-aware agent returned by `kensa_run(case)` wraps real tool and model calls w
 attempted agent or simulator response, while the existing trace totals include activity from both
 sources. See [Pytest plugin](/pytest).
 
+## Attaching evidence from a target-owned agent
+
+Keep the deployed agent in its own repository or service and translate its native result into
+`AgentRunEvidence` inside your adapter. Kensa records the supplied data but never imports, invokes,
+or connects to the target agent.
+
+```python
+from kensa.pytest import (
+    AgentEvent,
+    AgentRunEvidence,
+    ConversationResponse,
+    EffectPolicy,
+    EvidenceCompleteness,
+    ExecutionAttestation,
+    StateObservation,
+    TraceReference,
+    attach_agent_run,
+)
+
+
+class TargetAdapter:
+    def __init__(self, client):
+        self.client = client
+
+    async def respond(self, messages):
+        external = await self.client.run(messages)
+        attach_agent_run(
+            AgentRunEvidence(
+                run_id=external.run_id,
+                attestation=ExecutionAttestation(
+                    revision=external.revision,
+                    environment="agent-staging",
+                    effects=EffectPolicy.SANDBOXED,
+                ),
+                events=tuple(
+                    AgentEvent(
+                        id=event.id,
+                        parent_id=event.parent_id,
+                        sequence=index,
+                        kind=event.kind,
+                        name=event.name,
+                        input=event.input,
+                        output=event.output,
+                        attributes=event.attributes,
+                        status=event.status,
+                        started_at_ns=event.started_at_ns,
+                        ended_at_ns=event.ended_at_ns,
+                    )
+                    for index, event in enumerate(external.events)
+                ),
+                trace=TraceReference(
+                    provider=external.trace_provider,
+                    trace_id=external.trace_id,
+                    url=external.trace_url,
+                ),
+                trajectory_completeness=EvidenceCompleteness.COMPLETE,
+                state=(
+                    StateObservation(
+                        name="account",
+                        value=external.account_state,
+                        source="staging-database",
+                        observed_at_ns=external.observed_at_ns,
+                    ),
+                ),
+                state_completeness=EvidenceCompleteness.COMPLETE,
+            )
+        )
+        return ConversationResponse(output=external.output)
+```
+
+Call `attach_agent_run()` after the target finishes and before `respond()` returns. With no active
+Kensa runtime it is a no-op, so the same adapter works in application tests. If a Kensa runtime
+exists, attachment before `case.run()`, after the operation returns, or from a late background task
+raises `KensaCaseError`. Each `run_id` is immutable: an equal duplicate is ignored and conflicting
+evidence is rejected.
+
+### Evidence reference
+
+| Model | Fields |
+|---|---|
+| `AgentRunEvidence` | `schema_version`, `run_id`, `attestation`, ordered `events`, optional `trace`, `trajectory_completeness`, ordered `state`, `state_completeness`, `incomplete_reason` |
+| `ExecutionAttestation` | target `revision`, named `environment`, and `effects` |
+| `TraceReference` | provider name, provider-owned `trace_id`, and optional `url` |
+| `AgentEvent` | provider-owned `id` and optional parent, increasing `sequence`, `kind`, `name`, JSON `input`, `output`, and `attributes`, `status`, and optional Unix epoch nanosecond timestamps |
+| `StateObservation` | `name`, JSON `value`, `source`, and optional Unix epoch nanosecond observation time |
+
+Event `kind` is one of `llm`, `tool`, `handoff`, `retrieval`, `action`, `state`, or `span`.
+Event `status` is `completed`, `failed`, or `cancelled`. Completeness is `complete`, `pending`,
+`partial`, or `unavailable`; any value other than `complete` requires an `incomplete_reason`.
+Trajectory and state completeness are independent.
+
+Effect policies are target-supplied facts:
+
+| Value | Meaning |
+|---|---|
+| `none` | The evaluated path had no effectful tool capability |
+| `captured` | Effectful calls were intercepted without reaching the dependency |
+| `sandboxed` | Effects reached the isolated environment named by `environment` |
+| `live` | Effects could reach the named non-isolated environment |
+
+Attaching `effects="live"` does not make a network call or approve, reject, authorize, sandbox, or
+roll back an effect. Point adapters at test or sandbox environments unless live effects are
+deliberately part of the evaluation policy.
+
+Trajectory events become normalized spans in `result.trace`. Tool events appear in
+`result.trace.tools`, and LLM events count toward `result.trace.llm_turns`. A finite nonnegative
+`kensa.cost_usd` event attribute contributes to known cost. If any local or external LLM event has
+no valid cost, `known_cost_usd` still sums priced events while `cost_available` is false and
+`cost_usd` is unavailable.
+
+`StateObservation` contains actual state read from the target-owned environment and stays under
+`result.trace.agent_runs[*].state`. It never becomes a span or trial outcome. An
+`AgentEvent(kind="state")` is only a reported trajectory transition, not proof of actual state.
+
+<Warning>Attached evidence is written unredacted to result JSON, trace JSONL, xdist, failure, and timeout artifacts. It can contain prompts, tool arguments, tool results, and state values. Protect `.kensa` artifacts and avoid production secrets.</Warning>
+
 ## From traces to evals
 
 Once evidence is imported, your coding agent turns it into evals. The `kensa-inspect` skill reads the redacted evidence and proposes reviewable **eval ideas** as a YAML queue under `.kensa/inspect/`, which the CLI can read and validate:

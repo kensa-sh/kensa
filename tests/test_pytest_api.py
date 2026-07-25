@@ -55,6 +55,169 @@ def _assistant_tool_message(*tool_calls: Any) -> dict[str, Any]:
     return {"role": "assistant", "content": None, "tool_calls": list(tool_calls)}
 
 
+@pytest.mark.parametrize("xdist", [False, True])
+def test_external_evidence_survives_result_and_trace_artifacts(
+    pytester: pytest.Pytester,
+    xdist: bool,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import (
+    AgentEvent,
+    AgentRunEvidence,
+    ConversationResponse,
+    ExecutionAttestation,
+    StateObservation,
+    attach_agent_run,
+)
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            attach_agent_run(
+                AgentRunEvidence(
+                    run_id="external-run",
+                    attestation=ExecutionAttestation(
+                        revision="revision-1",
+                        environment="sandbox",
+                        effects="sandboxed",
+                    ),
+                    events=(
+                        AgentEvent(
+                            id="external-tool",
+                            sequence=1,
+                            kind="tool",
+                            name="external.lookup",
+                            status="completed",
+                        ),
+                    ),
+                    trajectory_completeness="complete",
+                    state=(
+                        StateObservation(
+                            name="account",
+                            value={"status": "active"},
+                            source="database",
+                        ),
+                    ),
+                    state_completeness="complete",
+                )
+            )
+            return ConversationResponse(output={"ok": True})
+
+    return Agent()
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="external", input="hello")])
+def test_external(case, kensa_run):
+    result = case.run(kensa_run)
+    assert result.trace.agent_runs[0].run_id == "external-run"
+    assert result.trace.tools.names == ["external.lookup"]
+"""
+    )
+
+    if xdist:
+        result = _run_kensa_xdist(
+            pytester,
+            "-q",
+            "-n",
+            "2",
+            "--dist=load",
+            "--kensa-write-artifacts",
+        )
+    else:
+        result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(passed=1)
+    artifact_path = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    artifact = json.loads(artifact_path.read_text())
+    trial_trace = artifact["trials"][0]["trace"]
+    trace_path = next(
+        (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
+    )
+    trace_record = json.loads(trace_path.read_text().splitlines()[0])
+    assert trial_trace["agent_runs"][0]["run_id"] == "external-run"
+    assert trial_trace["agent_runs"][0]["state"][0]["value"] == {"status": "active"}
+    assert trace_record["agent_runs"] == trial_trace["agent_runs"]
+    assert trace_record["spans"] == trial_trace["spans"]
+
+
+def test_external_evidence_survives_agent_exception_artifact(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import (
+    AgentEvent,
+    AgentRunEvidence,
+    ExecutionAttestation,
+    attach_agent_run,
+)
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            attach_agent_run(
+                AgentRunEvidence(
+                    run_id="failed-run",
+                    attestation=ExecutionAttestation(
+                        revision="revision-1",
+                        environment="sandbox",
+                        effects="sandboxed",
+                    ),
+                    events=(
+                        AgentEvent(
+                            id="failed-event",
+                            sequence=1,
+                            kind="action",
+                            name="before-failure",
+                            status="completed",
+                        ),
+                    ),
+                    trajectory_completeness="complete",
+                    state_completeness="complete",
+                )
+            )
+            raise RuntimeError("target failed after attachment")
+
+    return Agent()
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="external-failure", input="hello")])
+def test_external_failure(case, kensa_run):
+    case.run(kensa_run)
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(failed=1)
+    artifact_path = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trial = json.loads(artifact_path.read_text())["trials"][0]
+    assert trial["status"] == "error"
+    assert trial["trace"]["agent_runs"][0]["run_id"] == "failed-run"
+    assert any(span["span_id"] == "failed-event" for span in trial["trace"]["spans"])
+
+
 def test_kensa_case_requires_id() -> None:
     with pytest.raises(KensaCaseError):
         kensa_case(id="", input="hello")
