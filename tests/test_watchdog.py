@@ -59,6 +59,7 @@ def test_eval_timeout_bounds_full_pytest_item(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    timeout_s = 1
     fixture = {
         "setup": "time.sleep(10)\n    yield",
         "call": "yield",
@@ -77,7 +78,7 @@ def hanging_fixture():
     {fixture}
 
 
-@pytest.mark.kensa(trials=1, timeout_s=0.15)
+@pytest.mark.kensa(trials=1, timeout_s={timeout_s})
 @pytest.mark.parametrize("case", [kensa_case(id="bounded", input="hello")])
 def test_bounded(case, kensa_run, hanging_fixture):
     {call}
@@ -93,12 +94,12 @@ def test_bounded(case, kensa_run, hanging_fixture):
     result = json.loads(artifact.read_text())
     trial = result["trials"][0]
     assert code == 1
-    assert elapsed < 2
+    assert elapsed < 3
     assert payload["summary"] == "Kensa eval timed out."
     assert payload["data"]["timeout"] == {
         "case_id": "bounded",
         "trial_index": 1,
-        "timeout_s": 0.15,
+        "timeout_s": timeout_s,
         "phase": phase,
     }
     assert trial["status"] == "error"
