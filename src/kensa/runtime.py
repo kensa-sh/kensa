@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 from collections.abc import Awaitable, Callable, Iterator
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, get_ident
 from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import context as otel_context
@@ -34,6 +35,7 @@ _EXPORTER: Any | None = None
 _PROVIDER_READY = False
 
 OperationKind = Literal["span", "tool", "llm"]
+_ExecutionOwner = tuple[int, asyncio.Task[Any] | None]
 _GEN_AI_LLM_OPERATIONS = frozenset({"chat", "embeddings", "generate_content", "text_completion"})
 _GEN_AI_LLM_ATTRIBUTES = frozenset(
     {
@@ -49,6 +51,14 @@ _GEN_AI_LLM_ATTRIBUTES = frozenset(
         "gen_ai.usage.prompt_tokens",
     }
 )
+
+
+def _execution_owner() -> _ExecutionOwner:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return get_ident(), task
 
 
 @dataclass(frozen=True)
@@ -314,7 +324,7 @@ class KensaTrialRuntime:
         self.case: dict[str, Any] = {}
         self.judges: list[Any] = []
         self._run_started = False
-        self._run_active = False
+        self._run_owner: _ExecutionOwner | None = None
         self._trace_id: str | None = None
         self._local_spans: list[KensaSpan] = []
         self._attached_runs: dict[str, AgentRunEvidence] = {}
@@ -373,42 +383,55 @@ class KensaTrialRuntime:
             },
         )
         self._trace_id = f"{span.get_span_context().trace_id:032x}"
-        self._run_active = True
+        self._activate_run()
         try:
             with trace.use_span(span, end_on_exit=False):
                 result = operation()
         except BaseException as exc:
-            self._run_active = False
+            self._deactivate_run()
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             span.end()
             self._flush_and_populate_trace()
             raise
 
         if inspect.isawaitable(result):
-            self._run_active = False
+            self._deactivate_run()
             return self._await_result(result, span)
 
-        self._run_active = False
+        self._deactivate_run()
         span.end()
         return self._record_output_and_trace(result)
 
     async def _await_result(self, result: Awaitable[Any], span: Any) -> Any:
-        self._run_active = True
+        self._activate_run()
         try:
             with trace.use_span(span, end_on_exit=False):
                 value = await result
         except BaseException as exc:
-            self._run_active = False
+            self._deactivate_run()
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             span.end()
             self._flush_and_populate_trace()
             raise
-        self._run_active = False
+        self._deactivate_run()
         span.end()
         return self._record_output_and_trace(value)
 
+    def _activate_run(self) -> None:
+        self._run_owner = _execution_owner()
+
+    def _deactivate_run(self) -> None:
+        self._run_owner = None
+
+    def _owns_active_run(self) -> bool:
+        if self._run_owner is None:
+            return False
+        owner_thread, owner_task = self._run_owner
+        current_thread, current_task = _execution_owner()
+        return owner_thread == current_thread and owner_task is current_task
+
     def attach_agent_run(self, evidence: AgentRunEvidence) -> None:
-        if not self._run_active:
+        if not self._owns_active_run():
             raise KensaCaseError("attach_agent_run() requires an active case.run() operation")
         snapshot = evidence.model_copy(deep=True)
         existing = self._attached_runs.get(snapshot.run_id)

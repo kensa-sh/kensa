@@ -10,7 +10,8 @@ import kensa
 import kensa.pytest as kensa_pytest
 import kensa.runtime as runtime_module
 import kensa.target as kensa_target
-from kensa.case import kensa_case
+from kensa.case import KensaMessage, kensa_case
+from kensa.conversation import ConversationResponse
 from kensa.errors import KensaCaseError
 from kensa.runtime import (
     KensaSpan,
@@ -388,7 +389,7 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_attach_agent_run_requires_only_an_active_case_operation() -> None:
+async def test_attach_agent_run_requires_the_active_case_operation_owner() -> None:
     assert attach_agent_run(_evidence()) is None
 
     sync_runtime = _runtime()
@@ -450,6 +451,54 @@ async def test_attach_agent_run_requires_only_an_active_case_operation() -> None
     assert len(late_errors) == 1
     assert isinstance(late_errors[0], KensaCaseError)
     assert [run.run_id for run in async_runtime.trace.agent_runs] == ["async"]
+
+
+@pytest.mark.asyncio
+async def test_background_task_cannot_attach_evidence_during_later_conversation_turn() -> None:
+    runtime = _runtime()
+    release_late_task = asyncio.Event()
+    late_task_finished = asyncio.Event()
+    late_errors: list[BaseException] = []
+    late_tasks: list[asyncio.Task[None]] = []
+
+    async def attach_late() -> None:
+        await release_late_task.wait()
+        try:
+            attach_agent_run(_evidence(run_id="late"))
+        except BaseException as exc:
+            late_errors.append(exc)
+        finally:
+            late_task_finished.set()
+
+    class Agent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            del messages
+            attach_agent_run(_evidence(run_id="current"))
+            late_tasks.append(asyncio.create_task(attach_late()))
+            return ConversationResponse(content="agent response")
+
+    class Simulator:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            del messages
+            release_late_task.set()
+            await late_task_finished.wait()
+            return ConversationResponse(termination_reason="finished")
+
+    token = set_current_runtime(runtime)
+    try:
+        await kensa_case(id="conversation", input="hello").run(
+            Agent(),
+            simulator=Simulator(),
+            max_turns=2,
+            starts_with="agent",
+        )
+    finally:
+        reset_current_runtime(token)
+
+    assert len(late_errors) == 1
+    assert isinstance(late_errors[0], KensaCaseError)
+    assert late_tasks[0].done()
+    assert [run.run_id for run in runtime.trace.agent_runs] == ["current"]
 
 
 def test_attachment_snapshots_and_deduplicates_run_identity() -> None:
