@@ -17,14 +17,23 @@ from pydantic import (
 _MODEL_CONFIG = ConfigDict(
     frozen=True,
     extra="forbid",
-    str_strip_whitespace=True,
     allow_inf_nan=False,
 )
 _NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+_TimestampNs = Annotated[int, Field(strict=True, ge=0, le=2**64 - 1)]
+
+
+def _strip_nonblank(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("must contain non-whitespace text")
+    return stripped
 
 
 def _nonblank(value: str | None) -> str | None:
-    if value is not None and not value:
+    if value is not None and not value.strip():
         raise ValueError("must contain non-whitespace text")
     return value
 
@@ -52,7 +61,7 @@ class TraceReference(BaseModel):
     trace_id: str
     url: str | None = None
 
-    _validate_identity = field_validator("provider", "trace_id")(_nonblank)
+    _validate_identity = field_validator("provider", "trace_id")(_strip_nonblank)
 
 
 class ExecutionAttestation(BaseModel):
@@ -64,7 +73,7 @@ class ExecutionAttestation(BaseModel):
     environment: str
     effects: EffectPolicy
 
-    _validate_identity = field_validator("revision", "environment")(_nonblank)
+    _validate_identity = field_validator("revision", "environment")(_strip_nonblank)
 
 
 class AgentEvent(BaseModel):
@@ -81,10 +90,10 @@ class AgentEvent(BaseModel):
     output: JsonValue | None = None
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     status: Literal["completed", "failed", "cancelled"]
-    started_at_ns: _NonNegativeInt | None = None
-    ended_at_ns: _NonNegativeInt | None = None
+    started_at_ns: _TimestampNs | None = None
+    ended_at_ns: _TimestampNs | None = None
 
-    _validate_identity = field_validator("id", "parent_id", "name")(_nonblank)
+    _validate_identity = field_validator("id", "parent_id", "name")(_strip_nonblank)
 
     @model_validator(mode="after")
     def _validate_timestamps(self) -> Self:
@@ -105,9 +114,9 @@ class StateObservation(BaseModel):
     name: str
     value: JsonValue
     source: str
-    observed_at_ns: _NonNegativeInt | None = None
+    observed_at_ns: _TimestampNs | None = None
 
-    _validate_identity = field_validator("name", "source")(_nonblank)
+    _validate_identity = field_validator("name", "source")(_strip_nonblank)
 
 
 class AgentRunEvidence(BaseModel):
@@ -125,7 +134,8 @@ class AgentRunEvidence(BaseModel):
     state_completeness: EvidenceCompleteness
     incomplete_reason: str | None = None
 
-    _validate_identity = field_validator("run_id", "incomplete_reason")(_nonblank)
+    _validate_run_id = field_validator("run_id")(_strip_nonblank)
+    _validate_incomplete_reason = field_validator("incomplete_reason")(_nonblank)
 
     @model_validator(mode="after")
     def _validate_run(self) -> Self:

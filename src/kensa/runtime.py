@@ -115,7 +115,7 @@ class KensaSpan:
             return None
         try:
             cost = float(value)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return None
         return cost if math.isfinite(cost) and cost >= 0 else None
 
@@ -385,6 +385,7 @@ class KensaTrialRuntime:
             raise
 
         if inspect.isawaitable(result):
+            self._run_active = False
             return self._await_result(result, span)
 
         self._run_active = False
@@ -392,6 +393,7 @@ class KensaTrialRuntime:
         return self._record_output_and_trace(result)
 
     async def _await_result(self, result: Awaitable[Any], span: Any) -> Any:
+        self._run_active = True
         try:
             with trace.use_span(span, end_on_exit=False):
                 value = await result

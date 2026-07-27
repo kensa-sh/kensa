@@ -105,9 +105,12 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
             "sequence": 1,
             "kind": "tool",
             "name": " lookup ",
-            "input": {"ids": [1, 2]},
-            "output": {"found": True},
-            "attributes": {"nested": {"value": None}},
+            "input": {"prompt": "  prompt  ", "ids": [1, "  two  "]},
+            "output": {"text": "  answer  "},
+            "attributes": {
+                "label": "  payload  ",
+                "nested": {"value": "  nested  "},
+            },
             "status": "completed",
             "started_at_ns": 10,
             "ended_at_ns": 20,
@@ -115,7 +118,7 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
     )
     observation = StateObservation(
         name=" account ",
-        value={"status": "active"},
+        value={"status": "  active  "},
         source=" database ",
         observed_at_ns=30,
     )
@@ -152,9 +155,12 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
                 "sequence": 1,
                 "kind": "tool",
                 "name": "lookup",
-                "input": {"ids": [1, 2]},
-                "output": {"found": True},
-                "attributes": {"nested": {"value": None}},
+                "input": {"prompt": "  prompt  ", "ids": [1, "  two  "]},
+                "output": {"text": "  answer  "},
+                "attributes": {
+                    "label": "  payload  ",
+                    "nested": {"value": "  nested  "},
+                },
                 "status": "completed",
                 "started_at_ns": 10,
                 "ended_at_ns": 20,
@@ -169,7 +175,7 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
         "state": [
             {
                 "name": "account",
-                "value": {"status": "active"},
+                "value": {"status": "  active  "},
                 "source": "database",
                 "observed_at_ns": 30,
             }
@@ -197,7 +203,7 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
     for model, field, value in models_and_fields:
         assert model.model_config["frozen"] is True
         assert model.model_config["extra"] == "forbid"
-        assert model.model_config["str_strip_whitespace"] is True
+        assert model.model_config.get("str_strip_whitespace", False) is False
         assert model.model_config["allow_inf_nan"] is False
         with pytest.raises(ValidationError, match="frozen"):
             setattr(model, field, value)
@@ -281,8 +287,10 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
         {"sequence": -1},
         {"started_at_ns": True},
         {"started_at_ns": -1},
+        {"started_at_ns": 2**64},
         {"ended_at_ns": True},
         {"ended_at_ns": -1},
+        {"ended_at_ns": 10**400},
         {"kind": "unknown"},
         {"status": "unknown"},
         {"input": object()},
@@ -294,7 +302,12 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
         with pytest.raises(ValidationError):
             AgentEvent.model_validate({**base_event, **replacement})
 
-    for replacement in [{"observed_at_ns": True}, {"observed_at_ns": -1}, {"value": {1, 2}}]:
+    for replacement in [
+        {"observed_at_ns": True},
+        {"observed_at_ns": -1},
+        {"observed_at_ns": 2**64},
+        {"value": {1, 2}},
+    ]:
         with pytest.raises(ValidationError):
             StateObservation.model_validate(
                 {
@@ -368,9 +381,10 @@ def test_external_evidence_models_enforce_the_v1_contract() -> None:
     partial_parent = _evidence(
         events=(_event(parent_id="outside-the-supplied-events"),),
         trajectory_completeness="unavailable",
-        incomplete_reason="provider omitted the rest",
+        incomplete_reason="  provider omitted the rest  ",
     )
     assert partial_parent.events[0].parent_id == "outside-the-supplied-events"
+    assert partial_parent.incomplete_reason == "  provider omitted the rest  "
 
 
 @pytest.mark.asyncio
@@ -421,13 +435,13 @@ async def test_attach_agent_run_requires_only_an_active_case_operation() -> None
 
     token = set_current_runtime(async_runtime)
     try:
-        assert (
-            await async_runtime.run_case(
-                kensa_case(id="async", input="hello"),
-                async_operation,
-            )
-            == "done"
+        pending = async_runtime.run_case(
+            kensa_case(id="async", input="hello"),
+            async_operation,
         )
+        with pytest.raises(KensaCaseError, match=r"active case\.run"):
+            attach_agent_run(_evidence(run_id="before-await"))
+        assert await pending == "done"
         release_late_task.set()
         await late_tasks[0]
     finally:
@@ -719,6 +733,34 @@ def test_external_events_feed_existing_trace_accessors(
     assert runtime.trace.cost_available is False
     assert runtime.trace.cost_usd is None
     assert runtime.trace.duration_ms == pytest.approx(0.000009)
+
+
+def test_external_evidence_ignores_unrepresentable_cost() -> None:
+    runtime = _runtime()
+    evidence = _evidence(
+        events=(
+            _event(
+                attributes={"kensa.cost_usd": 10**400},
+                started_at_ns=0,
+                ended_at_ns=2**64 - 1,
+            ),
+        ),
+    )
+
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(
+            kensa_case(id="large-cost", input="hello"),
+            lambda: (attach_agent_run(evidence), "done")[1],
+        )
+    finally:
+        reset_current_runtime(token)
+
+    trace = runtime.trace.to_dict()
+    assert trace["cost_usd"] is None
+    assert trace["known_cost_usd"] is None
+    assert trace["cost_available"] is False
+    assert trace["spans"][0]["cost_usd"] is None
 
 
 def test_external_evidence_public_api_is_target_scoped() -> None:
