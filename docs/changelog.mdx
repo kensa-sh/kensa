@@ -11,6 +11,26 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.16.1
+
+Eval reports now quantify reliability and make incomplete cost data explicit.
+
+- Terminal, Markdown, and JSON reports include `pass^k` reliability with cohort counts, latency percentiles, mean LLM turns, and cost per pass.
+- Trace cost is `None` when any billable span is unpriced, while `known_cost_usd` preserves the sum of priced spans.
+- Timeouts distinguish setup, agent call, and teardown failures while preserving the active instrumented GenAI operation.
+
+[View the 0.16.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.16.1).
+
+## 0.16.0
+
+Conversational evals now model multi-turn agent interactions and return structured run evidence.
+
+- **Breaking:** the `kensa_run` fixture now returns a case-aware agent with `respond(messages)`, and `case.run(kensa_run)` returns a `CaseResult` instead of the raw agent output.
+- Cases can start from message history, and optional simulators can drive bounded conversations with explicit termination metadata.
+- Successful results expose messages, output, termination, and a read-only trace; pass `trace=result.trace` to `judge(...)` when a criterion needs trajectory evidence.
+
+[View the 0.16.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.16.0).
+
 ## 0.15.0
 
 Project configuration is now explicit in `pyproject.toml`, failed eval runs can be diagnosed against repository evidence, and console output is easier to scan.
