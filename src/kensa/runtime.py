@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, get_ident
 from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import context as otel_context
@@ -24,6 +26,7 @@ from kensa.errors import KensaCaseError
 
 if TYPE_CHECKING:
     from kensa.case import KensaCase
+    from kensa.target import AgentEvent, AgentRunEvidence
 
 _CURRENT_RUNTIME: ContextVar[KensaTrialRuntime | None] = ContextVar(
     "kensa_current_runtime", default=None
@@ -32,6 +35,7 @@ _EXPORTER: Any | None = None
 _PROVIDER_READY = False
 
 OperationKind = Literal["span", "tool", "llm"]
+_ExecutionOwner = tuple[int, asyncio.Task[Any] | None]
 _GEN_AI_LLM_OPERATIONS = frozenset({"chat", "embeddings", "generate_content", "text_completion"})
 _GEN_AI_LLM_ATTRIBUTES = frozenset(
     {
@@ -47,6 +51,14 @@ _GEN_AI_LLM_ATTRIBUTES = frozenset(
         "gen_ai.usage.prompt_tokens",
     }
 )
+
+
+def _execution_owner() -> _ExecutionOwner:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return get_ident(), task
 
 
 @dataclass(frozen=True)
@@ -113,7 +125,7 @@ class KensaSpan:
             return None
         try:
             cost = float(value)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return None
         return cost if math.isfinite(cost) and cost >= 0 else None
 
@@ -172,6 +184,7 @@ class KensaTrace:
 
     def __init__(self) -> None:
         self.spans: list[KensaSpan] = []
+        self.agent_runs: tuple[AgentRunEvidence, ...] = ()
         self.incomplete = False
         self.incomplete_reason: str | None = None
 
@@ -213,10 +226,12 @@ class KensaTrace:
         self,
         spans: list[KensaSpan],
         *,
+        agent_runs: tuple[AgentRunEvidence, ...] = (),
         incomplete: bool = False,
         incomplete_reason: str | None = None,
     ) -> None:
         self.spans = spans
+        self.agent_runs = agent_runs
         self.incomplete = incomplete
         self.incomplete_reason = incomplete_reason
 
@@ -224,6 +239,7 @@ class KensaTrace:
         known_cost_usd = self.known_cost_usd
         return {
             "spans": [span.to_dict() for span in self.spans],
+            "agent_runs": [run.model_dump(mode="json") for run in self.agent_runs],
             "tools": self.tools.names,
             "cost_usd": self.cost_usd,
             "known_cost_usd": known_cost_usd,
@@ -308,7 +324,12 @@ class KensaTrialRuntime:
         self.case: dict[str, Any] = {}
         self.judges: list[Any] = []
         self._run_started = False
+        self._run_owner: _ExecutionOwner | None = None
         self._trace_id: str | None = None
+        self._local_spans: list[KensaSpan] = []
+        self._attached_runs: dict[str, AgentRunEvidence] = {}
+        self._local_trace_incomplete = False
+        self._local_trace_incomplete_reason: str | None = None
         self._active_operations: dict[object, ActiveOperation] = {}
         self._operation_callback = operation_callback
         self._snapshot_callback = snapshot_callback
@@ -362,32 +383,67 @@ class KensaTrialRuntime:
             },
         )
         self._trace_id = f"{span.get_span_context().trace_id:032x}"
+        self._activate_run()
         try:
             with trace.use_span(span, end_on_exit=False):
                 result = operation()
         except BaseException as exc:
+            self._deactivate_run()
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             span.end()
             self._flush_and_populate_trace()
             raise
 
         if inspect.isawaitable(result):
+            self._deactivate_run()
             return self._await_result(result, span)
 
+        self._deactivate_run()
         span.end()
         return self._record_output_and_trace(result)
 
     async def _await_result(self, result: Awaitable[Any], span: Any) -> Any:
+        self._activate_run()
         try:
             with trace.use_span(span, end_on_exit=False):
                 value = await result
         except BaseException as exc:
+            self._deactivate_run()
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             span.end()
             self._flush_and_populate_trace()
             raise
+        self._deactivate_run()
         span.end()
         return self._record_output_and_trace(value)
+
+    def _activate_run(self) -> None:
+        self._run_owner = _execution_owner()
+
+    def _deactivate_run(self) -> None:
+        self._run_owner = None
+
+    def _owns_active_run(self) -> bool:
+        if self._run_owner is None:
+            return False
+        owner_thread, owner_task = self._run_owner
+        current_thread, current_task = _execution_owner()
+        return owner_thread == current_thread and owner_task is current_task
+
+    def attach_agent_run(self, evidence: AgentRunEvidence) -> None:
+        if not self._owns_active_run():
+            raise KensaCaseError("attach_agent_run() requires an active case.run() operation")
+        snapshot = evidence.model_copy(deep=True)
+        existing = self._attached_runs.get(snapshot.run_id)
+        if existing == snapshot:
+            return
+        if existing is not None:
+            raise KensaCaseError(
+                f"attach_agent_run() received conflicting evidence for run_id {snapshot.run_id!r}"
+            )
+        self._attached_runs[snapshot.run_id] = snapshot
+        self._refresh_trace()
+        self._publish_snapshot(require_output=False)
 
     def _record_output_and_trace(self, value: Any) -> Any:
         try:
@@ -422,11 +478,8 @@ class KensaTrialRuntime:
         self._active_operations.pop(key, None)
         active = next(reversed(self._active_operations.values()), None)
         self._publish_active_operation(active)
-        self.trace.replace(
-            collect_spans(self._trace_id),
-            incomplete=self.trace.incomplete,
-            incomplete_reason=self.trace.incomplete_reason,
-        )
+        self._local_spans = collect_spans(self._trace_id)
+        self._refresh_trace()
         self._publish_snapshot(require_output=False)
 
     def _flush_and_populate_trace(self) -> None:
@@ -448,8 +501,19 @@ class KensaTrialRuntime:
             except Exception as exc:
                 incomplete = True
                 reason = f"OpenTelemetry force_flush failed: {exc}"
-        spans = collect_spans(self._trace_id)
-        self.trace.replace(spans, incomplete=incomplete, incomplete_reason=reason)
+        self._local_spans = collect_spans(self._trace_id)
+        self._local_trace_incomplete = incomplete
+        self._local_trace_incomplete_reason = reason
+        self._refresh_trace()
+
+    def _refresh_trace(self) -> None:
+        agent_runs = tuple(self._attached_runs.values())
+        self.trace.replace(
+            _merge_spans(self._local_spans, agent_runs),
+            agent_runs=agent_runs,
+            incomplete=self._local_trace_incomplete,
+            incomplete_reason=self._local_trace_incomplete_reason,
+        )
 
     def record_judge(self, result: Any) -> None:
         self.judges.append(result)
@@ -528,6 +592,85 @@ def ensure_tracing() -> None:
         _EXPORTER = exporter
     except Exception:
         _EXPORTER = getattr(trace.get_tracer_provider(), "_kensa_exporter", None)
+
+
+def _merge_spans(
+    local_spans: list[KensaSpan],
+    agent_runs: tuple[AgentRunEvidence, ...],
+) -> list[KensaSpan]:
+    if not agent_runs:
+        return list(local_spans)
+
+    sortable: list[tuple[KensaSpan, int, int, int]] = [
+        (span, 0, index, 0) for index, span in enumerate(local_spans)
+    ]
+    for run_index, run in enumerate(agent_runs):
+        sortable.extend(
+            (_normalize_agent_event(run, event), 1, run_index, event.sequence)
+            for event in run.events
+        )
+    sortable.sort(key=_merged_span_sort_key)
+    return [span for span, _, _, _ in sortable]
+
+
+def _merged_span_sort_key(
+    item: tuple[KensaSpan, int, int, int],
+) -> tuple[int, int, int, int, int]:
+    span, source, first_order, second_order = item
+    start = span.start_time_unix_nano
+    return (
+        start is None,
+        start if start is not None else 0,
+        source,
+        first_order,
+        second_order,
+    )
+
+
+def _normalize_agent_event(run: AgentRunEvidence, event: AgentEvent) -> KensaSpan:
+    attributes = deepcopy(event.attributes)
+    for key in {
+        "input",
+        "output",
+        "kensa.evidence.source",
+        "kensa.agent.run_id",
+        "kensa.agent.revision",
+        "kensa.agent.environment",
+        "kensa.agent.effects",
+        "kensa.agent.event.sequence",
+    }:
+        attributes.pop(key, None)
+    if event.input is not None:
+        attributes["input"] = deepcopy(event.input)
+    if event.output is not None:
+        attributes["output"] = deepcopy(event.output)
+    attributes.update(
+        {
+            "kensa.evidence.source": "agent_run",
+            "kensa.agent.run_id": run.run_id,
+            "kensa.agent.revision": run.attestation.revision,
+            "kensa.agent.environment": run.attestation.environment,
+            "kensa.agent.effects": run.attestation.effects.value,
+            "kensa.agent.event.sequence": event.sequence,
+        }
+    )
+    status = {
+        "completed": "ok",
+        "failed": "error",
+        "cancelled": "cancelled",
+    }[event.status]
+    return KensaSpan(
+        name=event.name,
+        kind=event.kind,
+        tool_name=event.name if event.kind == "tool" else None,
+        trace_id=run.trace.trace_id if run.trace is not None else None,
+        span_id=event.id,
+        parent_span_id=event.parent_id,
+        start_time_unix_nano=event.started_at_ns,
+        end_time_unix_nano=event.ended_at_ns,
+        status=status,
+        attributes=attributes,
+    )
 
 
 def collect_spans(trace_id: str | None) -> list[KensaSpan]:

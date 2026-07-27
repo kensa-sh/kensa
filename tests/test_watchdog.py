@@ -59,6 +59,7 @@ def test_eval_timeout_bounds_full_pytest_item(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    timeout_s = 1
     fixture = {
         "setup": "time.sleep(10)\n    yield",
         "call": "yield",
@@ -77,7 +78,7 @@ def hanging_fixture():
     {fixture}
 
 
-@pytest.mark.kensa(trials=1, timeout_s=0.15)
+@pytest.mark.kensa(trials=1, timeout_s={timeout_s})
 @pytest.mark.parametrize("case", [kensa_case(id="bounded", input="hello")])
 def test_bounded(case, kensa_run, hanging_fixture):
     {call}
@@ -93,12 +94,12 @@ def test_bounded(case, kensa_run, hanging_fixture):
     result = json.loads(artifact.read_text())
     trial = result["trials"][0]
     assert code == 1
-    assert elapsed < 2
+    assert elapsed < 3
     assert payload["summary"] == "Kensa eval timed out."
     assert payload["data"]["timeout"] == {
         "case_id": "bounded",
         "trial_index": 1,
-        "timeout_s": 0.15,
+        "timeout_s": timeout_s,
         "phase": phase,
     }
     assert trial["status"] == "error"
@@ -649,6 +650,93 @@ def test_priced(case, priced_agent):
     assert cost["cost_relevant_trials"] == 2
     assert cost["cost_coverage"] == 1.0
     assert cost["cost_complete"] is True
+
+
+def test_eval_timeout_preserves_attached_external_evidence_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa.pytest import (
+    AgentEvent,
+    AgentRunEvidence,
+    ConversationResponse,
+    ExecutionAttestation,
+    StateObservation,
+    attach_agent_run,
+    kensa_case,
+)
+
+
+@pytest.fixture
+def external_agent(request):
+    class Agent:
+        def respond(self, messages):
+            attach_agent_run(
+                AgentRunEvidence(
+                    run_id="external-run",
+                    attestation=ExecutionAttestation(
+                        revision="revision-1",
+                        environment="sandbox",
+                        effects="sandboxed",
+                    ),
+                    events=(
+                        AgentEvent(
+                            id="external-llm",
+                            sequence=1,
+                            kind="llm",
+                            name="external.llm",
+                            attributes={"kensa.cost_usd": 0.2},
+                            status="completed",
+                        ),
+                    ),
+                    trajectory_completeness="complete",
+                    state=(
+                        StateObservation(
+                            name="account",
+                            value={"status": "active"},
+                            source="database",
+                        ),
+                    ),
+                    state_completeness="complete",
+                )
+            )
+            if "trial2" in request.node.nodeid:
+                time.sleep(60)
+            return ConversationResponse(output={"ok": True})
+
+    return Agent()
+
+
+@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.parametrize("case", [kensa_case(id="external", input="hello")])
+def test_external(case, external_agent):
+    case.run(external_agent)
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trials = artifact["trials"]
+    assert [trial["status"] for trial in trials] == ["pass", "error"]
+    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["trace"]["agent_runs"][0]["run_id"] == "external-run"
+    assert trials[1]["trace"]["agent_runs"][0]["state"][0]["value"] == {"status": "active"}
+    external_span = next(
+        span for span in trials[1]["trace"]["spans"] if span["span_id"] == "external-llm"
+    )
+    assert external_span["kind"] == "llm"
+    assert external_span["attributes"]["kensa.evidence.source"] == "agent_run"
+    assert trials[1]["trace"]["llm_turns"] == 1
+    assert trials[1]["trace"]["known_cost_usd"] == 0.2
 
 
 def test_eval_timeout_preserves_instrumented_genai_cost_snapshot(

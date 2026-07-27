@@ -11,6 +11,7 @@ from opentelemetry import trace
 from pydantic import BaseModel
 
 import kensa.conversation as conversation
+import kensa.runtime as runtime_module
 from kensa import KensaTimeoutError, record_llm_call, record_span, record_tool_call
 from kensa.case import KensaMessage, kensa_case
 from kensa.conversation import ConversationResponse, LLMSimulator, Termination
@@ -18,6 +19,14 @@ from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
 from kensa.pytest import CaseResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
+from kensa.target import (
+    AgentEvent,
+    AgentRunEvidence,
+    EffectPolicy,
+    EvidenceCompleteness,
+    ExecutionAttestation,
+    attach_agent_run,
+)
 
 
 def test_judge_receives_case_result_as_json() -> None:
@@ -164,6 +173,68 @@ def test_instrumented_genai_spans_are_llm_turns_with_partial_cost() -> None:
     assert runtime.trace.cost_available is False
     assert runtime.trace.cost_usd is None
     assert runtime.trace.tools.names == ["lookup"]
+
+
+def test_attached_evidence_survives_snapshots_errors_and_flush_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots: list[dict[str, Any]] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_attached_evidence_survives_snapshots_errors_and_flush_failure",
+        group_id="group",
+        case_id="case",
+        no_judge=True,
+        snapshot_callback=lambda current: snapshots.append(current.trace.to_dict()),
+    )
+    evidence = AgentRunEvidence(
+        run_id="external-run",
+        attestation=ExecutionAttestation(
+            revision="revision-1",
+            environment="sandbox",
+            effects=EffectPolicy.SANDBOXED,
+        ),
+        events=(
+            AgentEvent(
+                id="external-tool",
+                sequence=1,
+                kind="tool",
+                name="external.lookup",
+                status="completed",
+            ),
+        ),
+        trajectory_completeness=EvidenceCompleteness.COMPLETE,
+        state_completeness=EvidenceCompleteness.COMPLETE,
+    )
+    trace_identity = runtime.trace
+
+    class FailingProvider:
+        def force_flush(self, *, timeout_millis: int) -> bool:
+            assert timeout_millis == 10_000
+            raise RuntimeError("flush unavailable")
+
+    def operation() -> None:
+        attach_agent_run(evidence)
+        monkeypatch.setattr(runtime_module.trace, "get_tracer_provider", FailingProvider)
+        raise RuntimeError("target failed")
+
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(RuntimeError, match="target failed"):
+            runtime.run_case(kensa_case(id="failure", input="hello"), operation)
+        runtime._record_conversation_snapshot({"accepted": True})
+        runtime.record_judge(JudgeResult(True, "preserved"))
+        metadata = runtime.metadata(status="error", duration_ms=1, error="target failed")
+    finally:
+        reset_current_runtime(token)
+
+    assert runtime.trace is trace_identity
+    assert runtime.trace.incomplete is True
+    assert runtime.trace.incomplete_reason == "OpenTelemetry force_flush failed: flush unavailable"
+    assert [run.run_id for run in runtime.trace.agent_runs] == ["external-run"]
+    assert sum(span.span_id == "external-tool" for span in runtime.trace.spans) == 1
+    assert metadata.trace["agent_runs"][0]["run_id"] == "external-run"
+    assert all(snapshot["agent_runs"][0]["run_id"] == "external-run" for snapshot in snapshots)
 
 
 def test_completed_llm_operation_publishes_trace_before_case_output() -> None:
