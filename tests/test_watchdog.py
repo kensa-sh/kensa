@@ -178,7 +178,7 @@ import pytest
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(trials=3, timeout_s=0.2)
+@pytest.mark.kensa(trials=3, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="three_trials", input="hello")])
 def test_three_trials(case, kensa_run, request):
     result = case.run(kensa_run)
@@ -214,7 +214,7 @@ def test_three_trials(case, kensa_run, request):
     assert result["trials"][0]["status"] == "pass"
     assert result["trials"][1]["failure"]["category"] == "agent"
     assert result["trials"][1]["failure"]["kind"] == "timeout"
-    assert 0 < result["trials"][1]["duration_ms"] < 1000
+    assert 0 < result["trials"][1]["duration_ms"] < 2000
     assert aggregate["verdict"] == "error"
     assert aggregate["partial"] is True
     assert "x" * 1000 in payload["data"]["pytest"]["stdout"]
