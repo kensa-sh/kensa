@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from opentelemetry import trace
@@ -15,6 +15,7 @@ import kensa.runtime as runtime_module
 from kensa import KensaTimeoutError, record_llm_call, record_span, record_tool_call
 from kensa.case import KensaMessage, kensa_case
 from kensa.conversation import ConversationResponse, LLMSimulator, Termination
+from kensa.errors import KensaEvalError, TrialFailure
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
 from kensa.pytest import CaseResult
@@ -27,6 +28,108 @@ from kensa.target import (
     ExecutionAttestation,
     attach_agent_run,
 )
+
+
+def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -> None:
+    passed = JudgeResult(passed=True, reasoning="ok", metadata={"nested": ["safe"]})
+    assert passed.require() is passed
+
+    with pytest.raises(AssertionError, match="criteria not met"):
+        JudgeResult(passed=False, reasoning="criteria not met").require()
+
+    execution = JudgeResult(
+        passed=False,
+        reasoning="provider unavailable",
+        provider="openai",
+        model="gpt-test",
+        metadata={"request_id": "req-1"},
+        error=True,
+    )
+    with pytest.raises(KensaEvalError) as execution_error:
+        execution.require()
+    assert execution_error.value.failure.model_dump(mode="json") == {
+        "category": "judge",
+        "kind": "execution",
+        "message": "provider unavailable",
+        "evidence": {
+            "provider": "openai",
+            "model": "gpt-test",
+            "metadata": {"request_id": "req-1"},
+        },
+    }
+
+    snapshots: list[dict[str, Any]] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+        snapshot_callback=lambda current: snapshots.append(
+            current.metadata(status="provisional", duration_ms=0).to_dict()
+        ),
+    )
+    runtime.output_recorded = True
+
+    class InvalidMetadataProvider:
+        def judge(self, **kwargs: Any) -> JudgeResult:
+            del kwargs
+            return JudgeResult(
+                passed=False,
+                reasoning="provider failure",
+                provider="custom",
+                model="judge-v1",
+                metadata={"invalid": object()},
+                error=True,
+            )
+
+    set_judge_provider(InvalidMetadataProvider())
+    token = set_current_runtime(runtime)
+    try:
+        invalid = judge("output", "criteria")
+    finally:
+        reset_current_runtime(token)
+        set_judge_provider(None)
+
+    assert invalid.to_dict() == {
+        "passed": False,
+        "reasoning": "Judge result metadata is not JSON-serializable.",
+        "evidence": [],
+        "provider": "custom",
+        "model": "judge-v1",
+        "metadata": {},
+        "error": True,
+    }
+    assert snapshots[-1]["judges"] == [invalid.to_dict()]
+    with pytest.raises(KensaEvalError) as contract_error:
+        invalid.require()
+    assert contract_error.value.failure.model_dump(mode="json") == {
+        "category": "judge",
+        "kind": "contract",
+        "message": "Judge result metadata is not JSON-serializable.",
+        "evidence": {"provider": "custom", "model": "judge-v1"},
+    }
+    assert isinstance(contract_error.value.__cause__, TypeError)
+
+    direct_invalid = JudgeResult(
+        passed=False,
+        reasoning="invalid",
+        provider="direct",
+        metadata={"invalid": object()},
+        error=True,
+    )
+    with pytest.raises(KensaEvalError) as direct_error:
+        direct_invalid.require()
+    assert direct_error.value.failure.category == "judge"
+    assert direct_error.value.failure.kind == "contract"
+
+    class NonObjectJudgeResult(JudgeResult):
+        def to_dict(self) -> dict[str, Any]:
+            return cast(Any, [])
+
+    with pytest.raises(KensaEvalError) as non_object_error:
+        NonObjectJudgeResult(passed=True, reasoning="invalid").require()
+    assert isinstance(non_object_error.value.__cause__, TypeError)
 
 
 def test_judge_receives_case_result_as_json() -> None:
@@ -224,7 +327,15 @@ def test_attached_evidence_survives_snapshots_errors_and_flush_failure(
             runtime.run_case(kensa_case(id="failure", input="hello"), operation)
         runtime._record_conversation_snapshot({"accepted": True})
         runtime.record_judge(JudgeResult(True, "preserved"))
-        metadata = runtime.metadata(status="error", duration_ms=1, error="target failed")
+        metadata = runtime.metadata(
+            status="error",
+            duration_ms=1,
+            failure=TrialFailure(
+                category="agent",
+                kind="execution",
+                message="target failed",
+            ),
+        )
     finally:
         reset_current_runtime(token)
 

@@ -179,6 +179,34 @@ exists, attachment before `case.run()`, after the operation returns, or from a l
 raises `KensaCaseError`. Each `run_id` is immutable: an equal duplicate is ignored and conflicting
 evidence is rejected.
 
+Attachment lifecycle errors and conflicting `run_id` evidence are `KensaCaseError` values. Even
+when the conversation boundary wraps them, Kensa records them as `harness/case_contract`, not as
+agent execution failures.
+
+Invalid `AgentRunEvidence` model construction originates inside the target adapter and is therefore
+an `agent/execution` error by default when it escapes through `respond()`. If the adapter knows that
+invalid evidence is its own contract defect, translate it explicitly:
+
+```python
+from pydantic import ValidationError
+
+from kensa.pytest import AgentRunEvidence, KensaEvalError
+
+
+try:
+    evidence = AgentRunEvidence.model_validate(external.evidence)
+except ValidationError as exc:
+    raise KensaEvalError(
+        "Target adapter returned invalid agent-run evidence.",
+        category="harness",
+        kind="agent_run_contract",
+        evidence={"validation_errors": exc.error_count()},
+    ) from exc
+```
+
+Kensa does not classify arbitrary Pydantic validation errors as harness failures because the target
+agent can use Pydantic for its own behavior.
+
 ### Evidence reference
 
 | Model | Fields |

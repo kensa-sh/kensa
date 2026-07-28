@@ -24,6 +24,7 @@ from kensa.artifacts import (
     write_json_atomic,
     write_run_artifacts,
 )
+from kensa.errors import FailureCategory, TrialFailure
 from kensa.runtime import ActiveOperation, OperationKind, TrialMetadata
 
 DEFAULT_JUDGE_TIMEOUT_S = 30.0
@@ -504,13 +505,14 @@ def _record_timeout(
         f"{format_timeout_s(active.timeout_s)} seconds."
     )
     trials = load_trials(control.result_path)
-    error_kind = active.phase if active.phase != "call" else "timeout"
+    failure = _timeout_failure(active, message)
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
     if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
         existing = control.trial_snapshot
     if existing is None:
         trace = {
             "spans": [],
+            "agent_runs": [],
             "tools": [],
             "cost_usd": None,
             "known_cost_usd": None,
@@ -527,8 +529,7 @@ def _record_timeout(
             trial_index=active.trial_index,
             configured_trials=active.configured_trials,
             status="error",
-            error=message,
-            error_kind=error_kind,
+            failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=trace,
             active_operation=(
@@ -542,8 +543,7 @@ def _record_timeout(
         metadata = replace(
             existing,
             status="error",
-            error=message,
-            error_kind=error_kind,
+            failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=trace,
             active_operation=(
@@ -573,6 +573,40 @@ def _record_timeout(
         timeout_s=active.timeout_s,
         phase=active.phase,
         message=message,
+    )
+
+
+def _timeout_failure(active: ActiveTrial, message: str) -> TrialFailure:
+    category: FailureCategory
+    kind: str
+    if active.phase in {"setup", "teardown"}:
+        category = "harness"
+        kind = active.phase
+    else:
+        operation = active.active_operation
+        source = (
+            operation.attributes.get("kensa.conversation.source")
+            if operation is not None and operation.name == "kensa.conversation.respond"
+            else None
+        )
+        if source == "simulator":
+            category = "simulator"
+        elif operation is not None and operation.name == "judge":
+            category = "judge"
+        else:
+            category = "agent"
+        kind = "timeout"
+    evidence: dict[str, Any] = {
+        "timeout_s": timeout_value(active.timeout_s),
+        "phase": active.phase,
+    }
+    if active.active_operation is not None:
+        evidence["active_operation"] = active.active_operation.to_dict()
+    return TrialFailure(
+        category=category,
+        kind=kind,
+        message=message,
+        evidence=evidence,
     )
 
 

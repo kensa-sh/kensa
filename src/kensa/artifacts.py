@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from kensa._smoke import is_smoke_trial
+from kensa.errors import TrialFailure
 from kensa.runtime import TrialMetadata
 from kensa.scoring import run_summary
 
@@ -67,7 +68,9 @@ def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
         skipped = len(all_trials) - total
         configured = max(trial.configured_trials for trial in all_trials)
         partial = total + skipped < configured
-        timed_out = any(trial.error_kind == "timeout" for trial in ordered)
+        timed_out = any(
+            trial.failure is not None and trial.failure.kind == "timeout" for trial in ordered
+        )
         if timed_out:
             verdict = "error"
         elif partial:
@@ -112,7 +115,9 @@ def load_trials(result_path: Path) -> list[TrialMetadata]:
     rows = payload.get("trials", []) if isinstance(payload, dict) else []
     if not isinstance(rows, list):
         raise ValueError(f"Kensa result artifact has invalid trials: {result_path}")
-    return [trial_from_dict(row) for row in rows if isinstance(row, dict)]
+    if not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"Kensa result artifact has invalid trial rows: {result_path}")
+    return [trial_from_dict(row) for row in rows]
 
 
 def write_run_artifacts(
@@ -166,6 +171,7 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
         "case": trial.case,
         "output": trial.output,
         "status": trial.status,
+        "failure": (trial.failure.model_dump(mode="json") if trial.failure is not None else None),
         "smoke": trial.is_smoke,
         "duration_ms": trial.duration_ms,
         "spans": spans,
@@ -176,21 +182,32 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
 
 
 def trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
+    legacy_fields = {"error", "error_kind"} & row.keys()
+    if legacy_fields:
+        names = ", ".join(sorted(legacy_fields))
+        raise ValueError(f"Kensa trial contains removed legacy field(s): {names}")
+    if "failure" not in row:
+        raise ValueError("Kensa trial is missing required failure field")
     case = row.get("case")
     trace = row.get("trace")
     judges = row.get("judges")
     active_operation = row.get("active_operation")
+    failure_payload = row["failure"]
+    if failure_payload is not None and not isinstance(failure_payload, dict):
+        raise ValueError("Kensa trial failure must be an object or null")
+    failure = (
+        TrialFailure.model_validate(failure_payload) if isinstance(failure_payload, dict) else None
+    )
     return TrialMetadata(
         nodeid=str(row.get("nodeid", "")),
         group_id=str(row.get("group_id", "")),
         case_id=str(row.get("case_id", "default")),
         trial_index=int(row.get("trial_index", 1)),
         configured_trials=int(row.get("configured_trials", 1)),
-        status=str(row.get("status", "error")),
+        status=str(row.get("status", "")),
         case=case if isinstance(case, dict) else {},
         output=row.get("output"),
-        error=str(row["error"]) if row.get("error") is not None else None,
-        error_kind=(str(row["error_kind"]) if row.get("error_kind") is not None else None),
+        failure=failure,
         duration_ms=float(row.get("duration_ms", 0.0)),
         trace=trace if isinstance(trace, dict) else {},
         judges=[judge for judge in judges if isinstance(judge, dict)]

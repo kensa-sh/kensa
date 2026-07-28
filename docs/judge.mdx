@@ -24,7 +24,7 @@ verdict = judge(
     input=case.input,
     trace=result.trace,
 )
-assert verdict.passed, verdict.reasoning
+verdict.require()
 ```
 
 ## Signature
@@ -65,11 +65,27 @@ class JudgeResult:
     error: bool
 ```
 
-Assert on `passed` and surface `reasoning` as the failure message so a red test explains itself:
+Use `require()` when the judgment gates the eval:
 
 ```python
-assert verdict.passed, verdict.reasoning
+verdict.require()
 ```
+
+`require()` returns the same result for a completed positive judgment. A completed negative
+judgment raises `AssertionError(reasoning)` and remains an eligible agent assertion failure. A
+disabled judge, timeout, provider failure, or configuration failure raises
+`KensaEvalError(category="judge", kind="execution")`, which remains a strict eval error but is
+excluded from agent-performance metrics.
+
+Judge snapshots are validated and deep-copied as JSON before Kensa publishes them to a runtime
+artifact. If a provider returns non-JSON metadata, `judge()` records and returns a JSON-safe error
+result with safe provider and model identity but without the invalid metadata.
+Calling `require()` on that result raises
+`KensaEvalError(category="judge", kind="contract")` chained from the serialization error.
+`require()` repeats this validation for directly constructed results outside `judge()`.
+
+An arbitrary later `assert verdict.passed` cannot distinguish a completed negative judgment from
+a judge execution error. Use `require()` whenever judge provenance should affect scoring.
 
 ## Assertions gate the judge
 

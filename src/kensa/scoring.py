@@ -9,8 +9,15 @@ from typing import Any
 from kensa._smoke import is_smoke_trial
 
 Json = dict[str, Any]
-_ELIGIBLE_STATUSES = frozenset({"pass", "fail", "error"})
-_INFRASTRUCTURE_ERROR_KINDS = frozenset({"infrastructure", "setup", "teardown"})
+_FAILURE_CATEGORIES = (
+    "agent",
+    "simulator",
+    "judge",
+    "configuration",
+    "infrastructure",
+    "harness",
+    "unknown",
+)
 
 
 def pass_hat_k(successes: int, total: int, k: int) -> float | None:
@@ -84,8 +91,10 @@ def _cost_observation(trial: Json) -> tuple[bool, bool, float | None]:
     turns = _finite_float(trace.get("llm_turns"))
     availability = trace.get("cost_available")
     operation = trial.get("active_operation")
+    failure = trial.get("failure")
     llm_timed_out = (
-        trial.get("error_kind") == "timeout"
+        isinstance(failure, dict)
+        and failure.get("kind") == "timeout"
         and isinstance(operation, dict)
         and operation.get("kind") == "llm"
     )
@@ -149,12 +158,24 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 def run_summary(data: Json) -> Json:
     """Summarize reliability and performance for one eval artifact."""
+    scored_trials = _scored_trials(data)
     trials = [
         trial
-        for trial in _scored_trials(data)
-        if trial.get("status") in _ELIGIBLE_STATUSES
-        and trial.get("error_kind") not in _INFRASTRUCTURE_ERROR_KINDS
+        for trial in scored_trials
+        if trial.get("status") in {"pass", "fail"}
+        or (trial.get("status") == "error" and _failure_category(trial) == "agent")
     ]
+    error_counts = dict.fromkeys(_FAILURE_CATEGORIES, 0)
+    for trial in scored_trials:
+        if trial.get("status") != "error":
+            continue
+        category = _failure_category(trial)
+        if category is not None:
+            error_counts[category] += 1
+    excluded_error_trials = sum(
+        trial.get("status") == "error" and _failure_category(trial) != "agent"
+        for trial in scored_trials
+    )
     cohorts: dict[str, Json] = {}
     for trial in trials:
         case_id = _trial_case_id(trial)
@@ -177,8 +198,18 @@ def run_summary(data: Json) -> Json:
         "pass_k_curve": pass_k_curve(per_cohort),
         "pass_k_cohorts": cohort_values,
         "eligible_agent_trials": sum(cohort["total"] for cohort in cohort_values),
+        "error_counts": error_counts,
+        "excluded_error_trials": excluded_error_trials,
         "cost_latency": cost_latency(trials),
     }
+
+
+def _failure_category(trial: Json) -> str | None:
+    failure = trial.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    category = failure.get("category")
+    return category if category in _FAILURE_CATEGORIES else None
 
 
 def _scored_trials(data: Json) -> list[Json]:
