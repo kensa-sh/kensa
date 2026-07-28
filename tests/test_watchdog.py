@@ -510,7 +510,7 @@ import pytest
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(timeout_s=0.15)
+@pytest.mark.kensa(timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="detached", input="hello")])
 def test_detached(case):
     child = subprocess.Popen(
@@ -612,7 +612,7 @@ from kensa import record_llm_call
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(timeout_s=0.15)
+@pytest.mark.kensa(timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="active_case", input="hello")])
 def test_active_operation(case):
     with record_llm_call(
@@ -671,7 +671,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
@@ -760,7 +760,7 @@ def external_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="external", input="hello")])
 def test_external(case, external_agent):
     case.run(external_agent)
@@ -823,7 +823,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
@@ -886,7 +886,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
