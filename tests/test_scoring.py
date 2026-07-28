@@ -503,8 +503,25 @@ def test_terminal_reports_cohort_population_and_cost_coverage() -> None:
     )
     _write_scoring_summary(cast(Any, terminal), partial)
 
+    assert "Eligible agent trials: 3" in terminal.lines
+    assert not any(line.startswith("Excluded errors:") for line in terminal.lines)
     assert "Reliability: pass^1 100.0% (2 cohorts) | pass^2 100.0% (1 cohort)" in terminal.lines
     assert "Cost: partial $0.1000 known | 1/2 fully priced trials" in terminal.lines
+
+    excluded_terminal = Terminal()
+    _write_scoring_summary(
+        cast(Any, excluded_terminal),
+        run_summary(
+            {
+                "trials": [
+                    _trial(status="pass"),
+                    _trial(status="error", failure_category="simulator"),
+                ]
+            }
+        ),
+    )
+    assert "Eligible agent trials: 1" in excluded_terminal.lines
+    assert "Excluded errors: simulator 1" in excluded_terminal.lines
 
     _write_scoring_summary(
         cast(Any, terminal),
