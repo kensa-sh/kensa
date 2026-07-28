@@ -6,9 +6,9 @@ import json
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from kensa._serialization import json_value
 from kensa.errors import KensaEvalError
@@ -18,6 +18,7 @@ from kensa.runtime import current_runtime
 from kensa.watchdog import DEFAULT_JUDGE_TIMEOUT_S, format_timeout_s, timeout_value
 
 DEFAULT_ANTHROPIC_JUDGE_MODEL = LLMModel.CLAUDE_SONNET_4_6.value
+_JUDGE_CONTRACT_ERROR = "Judge result violates the JudgeResult contract."
 
 
 class JudgeProvider(Protocol):
@@ -65,7 +66,7 @@ class JudgeResult:
                 contract_error = exc
         if contract_error is not None:
             error = KensaEvalError(
-                "Judge result metadata is not JSON-serializable.",
+                _JUDGE_CONTRACT_ERROR,
                 category="judge",
                 kind="contract",
                 evidence=_safe_judge_identity(self.provider, self.model),
@@ -85,6 +86,23 @@ class JudgeResult:
         if not self.passed:
             raise AssertionError(self.reasoning)
         return self
+
+
+class _JudgeResultSnapshot(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        allow_inf_nan=False,
+    )
+
+    passed: bool
+    reasoning: str = Field(min_length=1)
+    evidence: list[str]
+    provider: str | None
+    model: str | None
+    metadata: dict[str, JsonValue]
+    error: bool
 
 
 class _JudgeLLMResponse(BaseModel):
@@ -198,12 +216,13 @@ def judge(
     return result
 
 
-def _validated_judge_snapshot(result: JudgeResult) -> dict[str, Any]:
+def _validated_judge_snapshot(result: JudgeResult) -> _JudgeResultSnapshot:
     snapshot = json_value(result.to_dict())
-    json.dumps(snapshot, allow_nan=False)
     if not isinstance(snapshot, dict):
         raise TypeError("Judge result must serialize to an object")
-    return snapshot
+    validated = _JudgeResultSnapshot.model_validate(snapshot)
+    json.dumps(validated.model_dump(mode="json"), allow_nan=False)
+    return validated
 
 
 def _snapshot_judge_result(result: JudgeResult) -> JudgeResult:
@@ -212,20 +231,20 @@ def _snapshot_judge_result(result: JudgeResult) -> JudgeResult:
     except (TypeError, ValueError) as exc:
         return JudgeResult(
             passed=False,
-            reasoning="Judge result metadata is not JSON-serializable.",
+            reasoning=_JUDGE_CONTRACT_ERROR,
             provider=result.provider if isinstance(result.provider, str) else None,
             model=result.model if isinstance(result.model, str) else None,
             error=True,
             _contract_error=exc,
         )
     return JudgeResult(
-        passed=cast(bool, snapshot["passed"]),
-        reasoning=cast(str, snapshot["reasoning"]),
-        evidence=cast(list[str], snapshot["evidence"]),
-        provider=cast(str | None, snapshot["provider"]),
-        model=cast(str | None, snapshot["model"]),
-        metadata=cast(dict[str, Any], snapshot["metadata"]),
-        error=cast(bool, snapshot["error"]),
+        passed=snapshot.passed,
+        reasoning=snapshot.reasoning,
+        evidence=snapshot.evidence,
+        provider=snapshot.provider,
+        model=snapshot.model,
+        metadata=snapshot.metadata,
+        error=snapshot.error,
         _contract_error=result._contract_error,
     )
 

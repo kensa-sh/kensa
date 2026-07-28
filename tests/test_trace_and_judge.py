@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 from opentelemetry import trace
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 import kensa.conversation as conversation
 import kensa.runtime as runtime_module
@@ -71,19 +71,17 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
     )
     runtime.output_recorded = True
 
-    class InvalidMetadataProvider:
+    class InvalidResultProvider:
         def judge(self, **kwargs: Any) -> JudgeResult:
             del kwargs
             return JudgeResult(
-                passed=False,
-                reasoning="provider failure",
+                passed=cast(Any, "yes"),
+                reasoning="invalid",
                 provider="custom",
                 model="judge-v1",
-                metadata={"invalid": object()},
-                error=True,
             )
 
-    set_judge_provider(InvalidMetadataProvider())
+    set_judge_provider(InvalidResultProvider())
     token = set_current_runtime(runtime)
     try:
         invalid = judge("output", "criteria")
@@ -93,7 +91,7 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
 
     assert invalid.to_dict() == {
         "passed": False,
-        "reasoning": "Judge result metadata is not JSON-serializable.",
+        "reasoning": "Judge result violates the JudgeResult contract.",
         "evidence": [],
         "provider": "custom",
         "model": "judge-v1",
@@ -106,10 +104,10 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
     assert contract_error.value.failure.model_dump(mode="json") == {
         "category": "judge",
         "kind": "contract",
-        "message": "Judge result metadata is not JSON-serializable.",
+        "message": "Judge result violates the JudgeResult contract.",
         "evidence": {"provider": "custom", "model": "judge-v1"},
     }
-    assert isinstance(contract_error.value.__cause__, TypeError)
+    assert isinstance(contract_error.value.__cause__, ValidationError)
 
     direct_invalid = JudgeResult(
         passed=False,
@@ -122,6 +120,13 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
         direct_invalid.require()
     assert direct_error.value.failure.category == "judge"
     assert direct_error.value.failure.kind == "contract"
+    assert isinstance(direct_error.value.__cause__, TypeError)
+
+    with pytest.raises(KensaEvalError) as blank_reasoning_error:
+        JudgeResult(passed=False, reasoning="", error=True).require()
+    assert blank_reasoning_error.value.failure.category == "judge"
+    assert blank_reasoning_error.value.failure.kind == "contract"
+    assert isinstance(blank_reasoning_error.value.__cause__, ValidationError)
 
     class NonObjectJudgeResult(JudgeResult):
         def to_dict(self) -> dict[str, Any]:
