@@ -869,6 +869,68 @@ def test_agent(case, kensa_run{fixture}):
     assert payload["summary"]["pass_k_curve"] == []
 
 
+def test_xfails_use_harness_provenance_and_are_excluded_from_scoring(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.xfail(reason="marked reason")
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="marked", input="hello")])
+def test_marked(case, kensa_run):
+    case.run(kensa_run)
+    raise AssertionError("marked failure")
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="imperative", input="hello")])
+def test_imperative(case, kensa_run):
+    case.run(kensa_run)
+    pytest.xfail("imperative reason")
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(xfailed=2)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    payload = json.loads(artifact.read_text())
+    trials = {trial["case_id"]: trial for trial in payload["trials"]}
+    assert set(trials) == {"marked", "imperative"}
+    for case_id, reason in {
+        "marked": "marked reason",
+        "imperative": "imperative reason",
+    }.items():
+        assert trials[case_id]["status"] == "skipped"
+        assert trials[case_id]["failure"] == {
+            "category": "harness",
+            "kind": "xfail",
+            "message": reason,
+            "evidence": {"phase": "call", "outcome": "skipped"},
+        }
+    assert payload["aggregates"] == []
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
+
+
 def test_case_run_records_output_artifact(pytester: pytest.Pytester) -> None:
     pytester.makeconftest(
         """

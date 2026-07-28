@@ -596,12 +596,21 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
             and existing.status in {"fail", "error"}
         )
         if not preserve_call_failure and (existing is None or existing.status != "skipped"):
-            error = (
-                call.excinfo.value
-                if call.excinfo is not None
-                else pytest.skip.Exception(f"pytest {report.when} skipped")
-            )
-            _, failure = _classify_exception(error, phase=report.when)
+            wasxfail = getattr(report, "wasxfail", None)
+            if wasxfail is not None:
+                failure = TrialFailure(
+                    category="harness",
+                    kind="xfail",
+                    message=str(wasxfail).strip() or "pytest expected failure",
+                    evidence={"phase": report.when, "outcome": report.outcome},
+                )
+            else:
+                error = (
+                    call.excinfo.value
+                    if call.excinfo is not None
+                    else pytest.skip.Exception(f"pytest {report.when} skipped")
+                )
+                _, failure = _classify_exception(error, phase=report.when)
             _record_trial(
                 item.config,
                 runtime.metadata(

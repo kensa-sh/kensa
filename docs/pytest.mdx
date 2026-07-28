@@ -205,9 +205,11 @@ to right without parsing exception text.
 
 Responder failures use `ConversationError` ownership. Simulator contract, execution, and timeout
 failures are `simulator`; agent execution and timeout failures are `agent`; an invalid agent
-response is `harness/agent_contract`. Direct assertions are `agent/assertion`. Setup, teardown, and
-skips are `harness`; direct call timeouts and other untyped call exceptions are `unknown`. Starting
-`case.run(...)` does not change an untyped exception to an agent failure.
+response is `harness/agent_contract`. Direct assertions are `agent/assertion`. Setup and teardown
+failures are `harness`; regular skips are `harness/skip`, and expected failures from either
+`pytest.mark.xfail` or `pytest.xfail()` are `harness/xfail`. Direct call timeouts and other untyped
+call exceptions are `unknown`. Starting `case.run(...)` does not change an untyped exception to an
+agent failure.
 
 ### Reliability, cost, and latency
 
