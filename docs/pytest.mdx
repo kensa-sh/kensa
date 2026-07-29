@@ -231,6 +231,64 @@ Cost totals appear only when at least one cost-relevant trial exists and all are
 pass also requires a pass. Otherwise they are `null`; `known_cost_usd` and `cost_coverage` report
 partial data. JSON artifacts expose these metrics under `summary`.
 
+### Versioned result artifacts
+
+Every initial, incremental, interrupted, and completed result uses the strict
+`kensa.result.v1` schema. An initial artifact is a valid snapshot:
+
+```json
+{
+  "schema_version": "kensa.result.v1",
+  "run_id": "run-123",
+  "complete": false,
+  "interruption": null,
+  "trials": [],
+  "aggregates": [],
+  "summary": {
+    "pass_k_curve": [],
+    "pass_k_cohorts": [],
+    "eligible_agent_trials": 0,
+    "error_counts": {
+      "agent": 0,
+      "simulator": 0,
+      "judge": 0,
+      "configuration": 0,
+      "infrastructure": 0,
+      "harness": 0,
+      "unknown": 0
+    },
+    "excluded_error_trials": 0,
+    "cost_latency": {
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "latency_mean_ms": 0.0,
+      "total_cost_usd": null,
+      "known_cost_usd": 0.0,
+      "cost_per_pass_usd": null,
+      "mean_llm_turns": 0.0,
+      "cost_known_trials": 0,
+      "cost_relevant_trials": 0,
+      "cost_coverage": 0.0,
+      "has_cost": false,
+      "cost_complete": false,
+      "cost_partial": false
+    }
+  }
+}
+```
+
+Load the complete typed snapshot through the public API:
+
+```python
+from kensa.results import RunResult, load_run_result
+
+result: RunResult = load_run_result(".kensa/results/run-123.json")
+```
+
+The loader accepts only `kensa.result.v1`. Missing, malformed, unsupported, unversioned, internally
+inconsistent, or unknown-field input raises a `ValueError` naming the artifact path. It never drops
+invalid rows or falls back to permissive legacy parsing.
+
 ## Plugin options
 
 The plugin adds these pytest options:

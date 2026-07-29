@@ -13,8 +13,8 @@ from typing import Any, cast
 
 import pytest
 
-from kensa import cli, cli_output, cli_traces
-from kensa.artifacts import load_trials, trial_from_dict
+from kensa import artifacts, cli, cli_output, cli_traces
+from kensa.artifacts import trial_from_dict
 from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
 from kensa.conversation import ConversationError, ConversationResponse
 from kensa.errors import TrialFailure
@@ -60,18 +60,25 @@ def test_trial_artifact_reconstruction_rejects_legacy_unknown_and_mismatched_sha
         "trial_index": 1,
         "configured_trials": 1,
         "status": "error",
+        "case": {"id": "case"},
+        "output": None,
         "failure": {
             "category": "agent",
             "kind": "execution",
             "message": "failed",
             "evidence": {},
         },
+        "duration_ms": 0.0,
+        "trace": {},
+        "judges": [],
+        "active_operation": None,
+        "smoke": False,
     }
 
     assert trial_from_dict(base).failure == TrialFailure.model_validate(base["failure"])
-    with pytest.raises(ValueError, match="legacy"):
+    with pytest.raises(ValueError, match="error"):
         trial_from_dict({**base, "error": "failed"})
-    with pytest.raises(ValueError, match="legacy"):
+    with pytest.raises(ValueError, match="error_kind"):
         trial_from_dict({**base, "error_kind": "exception"})
     with pytest.raises(ValueError, match="status"):
         trial_from_dict({**base, "status": "other"})
@@ -81,16 +88,34 @@ def test_trial_artifact_reconstruction_rejects_legacy_unknown_and_mismatched_sha
         trial_from_dict({**base, "failure": None})
     with pytest.raises(ValueError, match="failure"):
         trial_from_dict({key: value for key, value in base.items() if key != "failure"})
-    with pytest.raises(ValueError, match="object or null"):
+    with pytest.raises(ValueError, match="object"):
         trial_from_dict({**base, "failure": "failed"})
 
 
-def test_trial_artifact_loader_rejects_non_object_rows(tmp_path: Path) -> None:
-    result_path = tmp_path / "result.json"
-    result_path.write_text(json.dumps({"trials": [None]}))
+def test_internal_trial_metadata_rejects_unknown_and_mismatched_statuses() -> None:
+    with pytest.raises(ValueError, match="Unknown trial status"):
+        TrialMetadata(
+            nodeid="node",
+            group_id="group",
+            case_id="case",
+            trial_index=1,
+            configured_trials=1,
+            status="unknown",
+        )
+    with pytest.raises(ValueError, match="one failure"):
+        TrialMetadata(
+            nodeid="node",
+            group_id="group",
+            case_id="case",
+            trial_index=1,
+            configured_trials=1,
+            status="fail",
+        )
 
-    with pytest.raises(ValueError, match="invalid trial rows"):
-        load_trials(result_path)
+
+def test_partial_trial_artifact_loader_is_removed() -> None:
+    assert "load_trials" not in artifacts.__all__
+    assert not hasattr(artifacts, "load_trials")
 
 
 def test_case_fallbacks_and_uninstrumented_run_paths() -> None:

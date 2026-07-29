@@ -295,6 +295,7 @@ def test_external(case, kensa_run):
     result.assert_outcomes(failed=1)
     artifact_path = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     artifact = json.loads(artifact_path.read_text())
+    assert artifact["schema_version"] == "kensa.result.v1"
     trial_trace = artifact["trials"][0]["trace"]
     trace_path = next(
         (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
@@ -1381,6 +1382,7 @@ def test_agent(case, kensa_run):
     artifacts = list(result_dir.glob("*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
+    assert payload["schema_version"] == "kensa.result.v1"
     assert payload["complete"] is True
     assert payload["interruption"] is None
     assert [(trial["case_id"], trial["trial_index"]) for trial in payload["trials"]] == [
@@ -1971,7 +1973,7 @@ def test_remote_xdist_nodes_are_untouched(tmp_path: Path) -> None:
     assert node.workerinput == {"workerid": "gw0"}
 
 
-def test_controller_normalizes_worker_trial_payload() -> None:
+def test_controller_rejects_malformed_worker_trial_payload() -> None:
     config = SimpleNamespace(getoption=lambda name: None)
     payload = {
         "nodeid": "tests/evals/test_agent.py::test_agent[trial1-case_a]",
@@ -1992,13 +1994,8 @@ def test_controller_normalizes_worker_trial_payload() -> None:
         when="call",
     )
 
-    pytest_plugin.pytest_runtest_logreport(cast(Any, report))
-
-    trial = pytest_plugin._state(cast(Any, config)).trials[0]
-    assert trial.case == {}
-    assert trial.trace == {}
-    assert trial.judges == []
-    assert trial.active_operation is None
+    with pytest.raises(ValueError, match="case"):
+        pytest_plugin.pytest_runtest_logreport(cast(Any, report))
 
 
 def test_control_file_invalid_run_id_names_source(tmp_path: Path) -> None:

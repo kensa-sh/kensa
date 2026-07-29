@@ -3117,6 +3117,9 @@ def test_kensa_diagnose_skill_is_repo_aware_and_read_only() -> None:
     evals_normalized = " ".join(evals_skill.split()).lower()
 
     assert ".kensa/results/<run-id>.json" in diagnose_skill
+    assert "kensa.result.v1" in diagnose_skill
+    assert "load_run_result" in diagnose_skill
+    assert "reject" in diagnose_skill.lower()
     assert "explicit result path" in diagnose_skill
     assert "multiple" in diagnose_skill
     assert "most recently modified" in diagnose_skill

@@ -610,6 +610,7 @@ def test_artifact_and_markdown_reports_include_run_summary(tmp_path: Path) -> No
     )
 
     payload = json.loads(result_path.read_text())
+    assert payload["schema_version"] == "kensa.result.v1"
     assert payload["trials"][0]["smoke"] is False
     assert payload["aggregates"][0]["smoke"] is False
     assert payload["summary"]["pass_k_curve"] == [{"k": 1, "value": 1.0, "cohorts": 1}]
@@ -679,7 +680,8 @@ def test_artifact_marks_legacy_smoke_and_markdown_reports_partial_cost(
     )
 
     payload = json.loads(result_path.read_text())
-    assert payload["trials"][0]["smoke"] is True
+    smoke_trial = next(trial for trial in payload["trials"] if trial["case_id"] == "kensa_smoke")
+    assert smoke_trial["smoke"] is True
     smoke_aggregate = next(
         aggregate for aggregate in payload["aggregates"] if aggregate["case_id"] == "kensa_smoke"
     )

@@ -17,14 +17,15 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from kensa.artifacts import (
-    load_trials,
     trial_from_dict,
+    trial_result_to_metadata,
     trial_sort_key,
     upsert_trial,
     write_json_atomic,
     write_run_artifacts,
 )
 from kensa.errors import FailureCategory, TrialFailure
+from kensa.results import load_run_result
 from kensa.runtime import ActiveOperation, OperationKind, TrialMetadata
 
 DEFAULT_JUDGE_TIMEOUT_S = 30.0
@@ -504,7 +505,8 @@ def _record_timeout(
         f"Kensa timeout: {active.case_id} trial {active.trial_index} exceeded "
         f"{format_timeout_s(active.timeout_s)} seconds."
     )
-    trials = load_trials(control.result_path)
+    result = load_run_result(control.result_path)
+    trials = [trial_result_to_metadata(trial) for trial in result.trials]
     failure = _timeout_failure(active, message)
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
     if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
