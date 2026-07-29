@@ -67,3 +67,16 @@ def test_release_workflow_separates_tag_and_publication_jobs() -> None:
     assert "needs: [prepare, publish-pypi]" in workflow
     assert workflow.index("\n  tag:\n") < workflow.index("\n  publish-pypi:\n")
     assert workflow.index("\n  publish-pypi:\n") < workflow.index("\n  github-release:\n")
+
+
+def test_release_workflow_requires_live_redaction_before_tagging() -> None:
+    workflow = RELEASE_WORKFLOW.read_text()
+    redaction_job = workflow.split("\n  redaction:\n", maxsplit=1)[1].split(
+        "\n  build:\n", maxsplit=1
+    )[0]
+
+    assert "needs: prepare" in redaction_job
+    assert "ref: ${{ needs.prepare.outputs.sha }}" in redaction_job
+    assert 'uv pip install ".[redaction]"' in redaction_job
+    assert "uv run pytest tests/integration/test_live_redaction.py -q --run-live" in redaction_job
+    assert "needs: [prepare, test, lint, redaction, build]" in workflow

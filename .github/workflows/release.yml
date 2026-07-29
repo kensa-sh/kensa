@@ -99,6 +99,20 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
 
+  redaction:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.11
+      - run: uv sync --group dev --python 3.11
+      - run: uv pip install ".[redaction]"
+      - run: uv run pytest -q -m "not live"
+      - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live
+
   build:
     needs: prepare
     runs-on: ubuntu-latest
@@ -127,7 +141,7 @@ jobs:
           path: dist/
 
   tag:
-    needs: [prepare, test, lint, build]
+    needs: [prepare, test, lint, redaction, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
