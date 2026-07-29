@@ -13,20 +13,17 @@ usage() {
   cat <<'EOF'
 usage:
   ./scripts/release.sh <patch|minor|major> [--dry-run] [--run-tests]
-  ./scripts/release.sh publish [--dry-run] [--run-tests]
 
 Release flow:
   1. Run patch/minor/major to open a version-bump PR.
-  2. Merge the PR after CI passes.
-  3. Run publish from main to push the tag. The tag workflow publishes to PyPI
-     and creates the GitHub Release with generated notes.
+  2. Update docs/changelog.mdx in the PR.
+  3. Merge the PR manually after CI passes.
+  4. The merge workflow publishes to PyPI and creates the GitHub Release.
 
 Examples:
   ./scripts/release.sh patch --dry-run
   ./scripts/release.sh patch
   ./scripts/release.sh minor --run-tests
-  ./scripts/release.sh publish --dry-run
-  ./scripts/release.sh publish
 EOF
 }
 
@@ -163,11 +160,12 @@ release_pr_body() {
   cat <<EOF
 Release PR for v$version.
 
-After this merges, publish with:
+## Release checklist
 
-\`\`\`bash
-./scripts/release.sh publish
-\`\`\`
+- [ ] Update \`docs/changelog.mdx\` for v$version.
+
+Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
+the GitHub Release for \`v$version\`.
 EOF
 }
 
@@ -202,6 +200,7 @@ prepare_release_pr() {
     echo "would commit: $title"
     echo "would push branch: $branch"
     echo "would open PR: $title with label ignore-for-release"
+    echo "manual merge after CI would publish $tag"
     return 0
   fi
 
@@ -229,53 +228,7 @@ prepare_release_pr() {
   release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
-}
-
-publish_release() {
-  local dry_run="$1"
-  local run_tests="$2"
-  local version tag
-
-  require_command git
-
-  version="$(current_version)"
-  version_valid "$version" || die "invalid current version: $version"
-  tag="v$version"
-
-  if [ "$dry_run" = true ]; then
-    echo "version: $version"
-    echo "tag: $tag"
-    echo "would require clean main branch matching origin/main"
-    echo "would require pyproject.toml and uv.lock to match"
-    echo "would require available tag: $tag"
-    if [ "$run_tests" = true ]; then
-      echo "would run local ruff, ty, and pytest checks"
-    else
-      echo "would skip local checks; tag workflow runs the release gates"
-    fi
-    echo "would create annotated tag: $tag"
-    echo "would push tag: $tag"
-    echo "tag workflow publishes to PyPI and creates the GitHub Release"
-    return 0
-  fi
-
-  assert_main_branch
-  assert_head_matches_origin_main
-  assert_clean_tree
-  assert_version_files "$version"
-  assert_tag_available "$tag"
-
-  if [ "$run_tests" = true ]; then
-    run_local_checks
-  else
-    echo "skip local checks; tag workflow runs the release gates"
-  fi
-
-  git -C "$ROOT" tag -a "$tag" -m "Release $tag"
-  git -C "$ROOT" push origin "$tag"
-
-  echo "published $tag"
-  echo "GitHub Actions will publish kensa==$version to PyPI and create the GitHub Release."
+  echo "update docs/changelog.mdx, wait for CI, then merge manually to publish"
 }
 
 main() {
@@ -302,7 +255,6 @@ main() {
 
   case "$action" in
     patch|minor|major) prepare_release_pr "$action" "$dry_run" "$run_tests" ;;
-    publish) publish_release "$dry_run" "$run_tests" ;;
     "")
       usage >&2
       return 2
@@ -314,4 +266,6 @@ main() {
   esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

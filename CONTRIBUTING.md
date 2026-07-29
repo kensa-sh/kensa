@@ -141,12 +141,12 @@ Maintainers release from a clean, CI-green `main` checkout:
 ```bash
 ./scripts/release.sh patch --dry-run
 ./scripts/release.sh patch
-./scripts/release.sh publish
 ```
 
-Use `minor` or `major` when appropriate. The bump command opens a version-bump PR. After that PR
-merges, `publish` pushes the release tag. The tag workflow publishes to PyPI and creates the GitHub
-Release with generated notes.
+Use `minor` or `major` when appropriate. The bump command opens a version-bump PR with a checklist
+to update `docs/changelog.mdx`. Update the changelog in that PR, wait for CI to pass, then merge the
+PR manually. Merging runs the release workflow, which creates the release tag, publishes to PyPI,
+and creates the GitHub Release with generated notes.
 
 ## Code Conventions
 
