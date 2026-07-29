@@ -8,8 +8,8 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
+from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
 from kensa.errors import FailureCategory, TrialFailure
-from kensa.scoring import run_summary
 
 RunStatus: TypeAlias = Literal["pass", "fail", "error", "skipped", "provisional"]
 AggregateVerdict: TypeAlias = Literal["pass", "fail", "flaky", "error", "partial"]
@@ -44,7 +44,7 @@ class RunInterruption(ResultModel):
     message: str
     nodeid: str | None = None
     case_id: str | None = None
-    trial_index: int | None = Field(default=None, ge=0)
+    trial_index: int | None = Field(default=None, ge=1)
     phase: TrialPhase | None = None
 
 
@@ -52,7 +52,7 @@ class TrialResult(ResultModel):
     nodeid: str = Field(min_length=1)
     group_id: str = Field(min_length=1)
     case_id: str = Field(min_length=1)
-    trial_index: int = Field(ge=0)
+    trial_index: int = Field(ge=1)
     configured_trials: int = Field(ge=1)
     status: RunStatus
     case: dict[str, JsonValue]
@@ -66,6 +66,14 @@ class TrialResult(ResultModel):
 
     @model_validator(mode="after")
     def _validate_failure(self) -> TrialResult:
+        if "id" in self.case:
+            case_id = self.case["id"]
+            if not isinstance(case_id, str):
+                raise ValueError("case.id must be a string")
+            if case_id != self.case_id:
+                raise ValueError("case.id must match case_id")
+        if self.trial_index > self.configured_trials:
+            raise ValueError("trial_index cannot exceed configured_trials")
         requires_failure = self.status in {"fail", "error", "skipped"}
         if requires_failure != (self.failure is not None):
             expectation = "one failure" if requires_failure else "failure=None"
@@ -145,6 +153,8 @@ class RunResult(ResultModel):
     def _validate_contract(self) -> RunResult:
         if self.complete and self.interruption is not None:
             raise ValueError("complete result cannot contain an interruption")
+        if self.complete and any(trial.status == "provisional" for trial in self.trials):
+            raise ValueError("complete result cannot contain provisional trials")
 
         nodeids = [trial.nodeid for trial in self.trials]
         if len(nodeids) != len(set(nodeids)):
@@ -153,6 +163,14 @@ class RunResult(ResultModel):
         trial_keys = [(trial.group_id, trial.trial_index) for trial in self.trials]
         if len(trial_keys) != len(set(trial_keys)):
             raise ValueError("trials contain duplicate group and trial indexes")
+
+        configured_trials_by_group: dict[str, int] = {}
+        for trial in self.trials:
+            configured_trials = configured_trials_by_group.setdefault(
+                trial.group_id, trial.configured_trials
+            )
+            if trial.configured_trials != configured_trials:
+                raise ValueError("trials in one group have inconsistent configured_trials")
 
         expected_order = sorted(
             self.trials,
@@ -168,18 +186,13 @@ class RunResult(ResultModel):
             ):
                 raise ValueError("aggregate contains a trial with mismatched identifiers")
 
-        from kensa.artifacts import aggregate_trials, trial_result_to_metadata
-
-        internal_trials = [trial_result_to_metadata(trial) for trial in self.trials]
-        expected_aggregates = [
-            aggregate.to_dict() for aggregate in aggregate_trials(internal_trials)
-        ]
+        trial_payloads = [trial.model_dump(mode="json") for trial in self.trials]
+        expected_aggregates = derive_v1_aggregates(trial_payloads)
         actual_aggregates = [aggregate.model_dump(mode="json") for aggregate in self.aggregates]
         if actual_aggregates != expected_aggregates:
             raise ValueError("aggregates do not match top-level trials")
 
-        trial_payloads = [trial.model_dump(mode="json") for trial in self.trials]
-        expected_summary = run_summary({"trials": trial_payloads})
+        expected_summary = derive_v1_summary(trial_payloads)
         if self.summary.model_dump(mode="json") != expected_summary:
             raise ValueError("summary does not match top-level trials")
         return self
@@ -214,6 +227,11 @@ def load_run_result(path: str | Path) -> RunResult:
         location = ".".join(str(part) for part in error["loc"])
         cause = f"{location}: {error['msg']}" if location else str(error["msg"])
         raise ValueError(f"Invalid Kensa result artifact {result_path}: {cause}") from exc
+    except Exception as exc:
+        cause = str(exc).strip() or type(exc).__name__
+        raise ValueError(
+            f"Invalid Kensa result artifact {result_path}: derivation failed: {cause}"
+        ) from exc
 
 
 __all__ = [

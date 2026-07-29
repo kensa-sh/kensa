@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
 from kensa._smoke import is_smoke_trial
 from kensa.results import RunResult, TrialResult
 from kensa.runtime import TrialMetadata
-from kensa.scoring import run_summary
 
 
 @dataclass
@@ -120,16 +120,22 @@ def write_run_artifacts(
     interruption: dict[str, Any] | None = None,
 ) -> list[KensaAggregate]:
     ordered_trials = sorted(trials, key=trial_sort_key)
+    trial_payloads = [
+        TrialResult.model_validate_json(json.dumps(trial.to_dict(), allow_nan=False)).model_dump(
+            mode="json"
+        )
+        for trial in ordered_trials
+    ]
     aggregates = aggregate_trials(ordered_trials)
     payload = {
         "schema_version": "kensa.result.v1",
         "run_id": run_id,
         "complete": complete,
         "interruption": interruption,
-        "trials": [trial.to_dict() for trial in ordered_trials],
-        "aggregates": [aggregate.to_dict() for aggregate in aggregates],
+        "trials": trial_payloads,
+        "aggregates": derive_v1_aggregates(trial_payloads),
+        "summary": derive_v1_summary(trial_payloads),
     }
-    payload["summary"] = run_summary(payload)
     result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
     _write_text_atomic(result_path, result.model_dump_json(indent=2))
     _write_trace_artifact(run_id, ordered_trials, artifact_dir)

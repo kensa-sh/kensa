@@ -187,6 +187,16 @@ def test_cost_latency_reports_complete_costs() -> None:
     }
 
 
+@pytest.mark.parametrize("llm_turns", [[], 10**400])
+def test_cost_latency_ignores_invalid_llm_turn_values(llm_turns: Any) -> None:
+    trial = _trial(status="pass")
+    trial["trace"]["llm_turns"] = llm_turns
+
+    summary = cost_latency([trial])
+
+    assert summary["mean_llm_turns"] == 0.0
+
+
 def test_cost_latency_never_presents_partial_cost_as_total() -> None:
     partial = cost_latency(
         [

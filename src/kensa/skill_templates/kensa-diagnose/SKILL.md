@@ -38,17 +38,14 @@ source of truth. Do not add revision-mismatch analysis or reconstruct the source
 
 For each selected result:
 
-1. Load the artifact with `kensa.results.load_run_result()`. Require
-   `schema_version: "kensa.result.v1"`; the public loader rejects malformed, unsupported,
-   unversioned, unknown-field, and internally inconsistent artifacts without returning partial
-   data. If loading raises `ValueError`, include its path-specific cause and report the diagnosis
+1. Load the `kensa.result.v1` artifact with `kensa.results.load_run_result()`, which rejects invalid
+   or unsupported data. On `ValueError`, include the path-specific cause and report the diagnosis
    as inconclusive.
-2. Validate the fields needed for the diagnosis. The stable contract includes
+2. Use the stable contract fields:
    `complete`, `interruption`, `aggregates`, and trial records with `status`, structured `failure`,
    `output`, `judges`, and embedded trace metadata. Passing and provisional trials require
    `failure: null`; failed, errored, and skipped trials require one failure with `category`, `kind`,
-   `message`, and JSON `evidence`. If JSON or a required field is malformed, name the invalid
-   contract field and report the diagnosis as inconclusive.
+   `message`, and JSON `evidence`.
 3. Record the run ID and whether the run is complete, interrupted, failed, flaky, or errored.
 4. Inventory every case and trial, including status, failure category and kind, failure message and
    evidence, output, judge failures, and available embedded metadata. An errored trial with no

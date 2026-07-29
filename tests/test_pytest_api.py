@@ -963,6 +963,7 @@ def test_agent(case, kensa_run):
     assert result.output["input"] == "hello"
     artifact = next(Path(".kensa/results").glob("*.json"))
     snapshot = json.loads(artifact.read_text())
+    assert snapshot["complete"] is False
     assert snapshot["trials"][0]["status"] == "provisional"
 """
     )
