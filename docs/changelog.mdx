@@ -11,6 +11,26 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.18.0
+
+Trials now carry structured failure provenance so agent behavior is separated from eval-system failures.
+
+- **Breaking:** trial artifacts replace the legacy `error` and `error_kind` fields with one validated `failure` object containing a category, kind, message, and JSON evidence.
+- Reliability, latency, and cost metrics include only passes, assertion failures, and errors attributed to the agent; excluded errors still fail the eval gate and are reported by category.
+- `KensaEvalError`, `TrialFailure`, and `FailureCategory` support explicit attribution, while `JudgeResult.require()` distinguishes negative verdicts from judge execution and contract errors.
+
+[View the 0.18.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.18.0).
+
+## 0.17.0
+
+Eval adapters can now attach structured evidence from target-owned agents without Kensa importing, invoking, or connecting to them.
+
+- `AgentRunEvidence` records execution attestation, ordered trajectory events, provider trace references, observed state, and independent trajectory and state completeness.
+- `attach_agent_run()` snapshots evidence during the active case operation and preserves it across result, trace, failure, and timeout artifacts.
+- External tool and LLM events feed the existing trace, turn, and cost accessors; target state remains separate under `result.trace.agent_runs`.
+
+[View the 0.17.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.17.0).
+
 ## 0.16.1
 
 Eval reports now quantify reliability and make incomplete cost data explicit.
