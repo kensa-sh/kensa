@@ -41,7 +41,7 @@ def test_refund_policy(case, kensa_run):
         input=case.input,
         trace=result.trace,
     )
-    assert verdict.passed, verdict.reasoning
+    verdict.require()
 ```
 
 Three pieces do the work: the `kensa` marker sets trials, the `case` parameter carries the input,
@@ -164,14 +164,68 @@ Kensa aggregates the trials per case at session end:
 Aggregates preserve the requested `configured_trials`; `total` excludes skips, and skips alone do
 not make an aggregate partial.
 
+### Structured failure provenance
+
+Every failed, errored, or skipped trial contains one structured `failure`; passing and provisional
+trials contain `"failure": null`. Kensa rejects unknown statuses, legacy `error` or `error_kind`
+fields, and status/failure mismatches when reconstructing an artifact.
+
+Eval authors can explicitly attribute a failure at the boundary that knows its owner:
+
+```python
+from kensa.pytest import KensaEvalError
+
+
+raise KensaEvalError(
+    "Simulator omitted the required objective.",
+    category="simulator",
+    kind="contract",
+    evidence={"objective": "dispute the charge"},
+)
+```
+
+`KensaEvalError`, `TrialFailure`, and the `FailureCategory` type are public from `kensa.pytest`.
+Evidence must be strict JSON and is deep-snapshotted separately from the human-readable message.
+The categories are:
+
+| Category | Meaning |
+|---|---|
+| `agent` | The target agent failed during owned execution |
+| `simulator` | The simulator contract, execution, or timeout failed |
+| `judge` | Judge execution, timeout, or result validation failed |
+| `configuration` | Eval or LLM configuration is invalid |
+| `infrastructure` | An explicitly attributed external dependency or environment failed |
+| `harness` | The eval adapter, case contract, pytest lifecycle, or Kensa harness failed |
+| `unknown` | No boundary supplied trustworthy ownership |
+
+Automatic classification uses typed exceptions before wrapper ownership. A reachable
+`KensaEvalError` wins first, then `LLMConfigurationError`, then `KensaCaseError`. Kensa follows an
+explicit Python cause, otherwise an unsuppressed context, and traverses exception groups from left
+to right without parsing exception text.
+
+Responder failures use `ConversationError` ownership. Simulator contract, execution, and timeout
+failures are `simulator`; agent execution and timeout failures are `agent`; an invalid agent
+response is `harness/agent_contract`. Direct assertions are `agent/assertion`. Setup and teardown
+failures are `harness`; regular skips are `harness/skip`, and expected failures from either
+`pytest.mark.xfail` or `pytest.xfail()` are `harness/xfail`. Direct call timeouts and other untyped
+call exceptions are `unknown`. Starting `case.run(...)` does not change an untyped exception to an
+agent failure.
+
 ### Reliability, cost, and latency
 
 Kensa reports [τ-bench](https://arxiv.org/abs/2406.12045) `pass^k` as
 `C(passes, k) / C(trials, k)`, averaged across eligible pytest `group_id` cohorts. Each point includes
 its cohort count because fewer cohorts may qualify as `k` increases.
 
-Passes are successful; assertion failures, agent exceptions, and call timeouts are unsuccessful.
-Smoke, skipped, fixture-phase, and infrastructure trials are excluded from all summary metrics.
+Only passes, assertion failures, and errors explicitly categorized as `agent` enter reliability,
+latency, and cost populations. Smoke, skipped, provisional, simulator, judge, configuration,
+infrastructure, harness, and unknown error trials are excluded. The terminal and Markdown reports
+show the eligible-trial count and nonzero excluded-error categories. JSON `summary` includes
+zero-filled `error_counts` for every category and `excluded_error_trials`.
+
+This eligibility boundary measures agent behavior conditional on a valid adapter and harness. It
+does not weaken the gate: excluded errors still produce aggregate `error`, fail pytest, and make
+`kensa eval` exit unsuccessfully. Flaky aggregate behavior is unchanged.
 
 Cost totals appear only when at least one cost-relevant trial exists and all are priced; cost per
 pass also requires a pass. Otherwise they are `null`; `known_cost_usd` and `cost_coverage` report

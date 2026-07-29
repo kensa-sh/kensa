@@ -22,6 +22,9 @@ from kensa.artifacts import (
     write_run_artifacts,
 )
 from kensa.case import KensaCase
+from kensa.conversation import ConversationError
+from kensa.errors import KensaCaseError, KensaEvalError, TrialFailure
+from kensa.llm import LLMConfigurationError
 from kensa.runtime import (
     ActiveOperation,
     KensaTrace,
@@ -53,6 +56,134 @@ _EACH_DIST_ERROR = (
     "pytest --dist=each is incompatible with Kensa trials because it runs every trial "
     "on every worker. Use load or worksteal distribution."
 )
+
+
+def _exception_path(error: BaseException) -> list[BaseException]:
+    ordered: list[BaseException] = []
+    seen: set[int] = set()
+
+    def visit(current: BaseException) -> None:
+        identity = id(current)
+        if identity in seen:
+            return
+        seen.add(identity)
+        ordered.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            for nested in current.exceptions:
+                visit(nested)
+        chained = _active_chained_exception(current)
+        if chained is not None:
+            visit(chained)
+
+    visit(error)
+    return ordered
+
+
+def _active_chained_exception(error: BaseException) -> BaseException | None:
+    if error.__cause__ is not None:
+        return error.__cause__
+    if not error.__suppress_context__:
+        return error.__context__
+    return None
+
+
+def _first_exception(
+    errors: list[BaseException],
+    exception_type: type[BaseException],
+) -> BaseException | None:
+    return next((error for error in errors if isinstance(error, exception_type)), None)
+
+
+def _exception_message(error: BaseException, fallback: str) -> str:
+    return str(error).strip() or fallback
+
+
+def _classify_exception(
+    error: BaseException,
+    *,
+    phase: TrialPhase,
+) -> tuple[str, TrialFailure]:
+    path = _exception_path(error)
+    explicit = _first_exception(path, KensaEvalError)
+    if isinstance(explicit, KensaEvalError):
+        return "error", explicit.failure
+
+    configuration = _first_exception(path, LLMConfigurationError)
+    if isinstance(configuration, LLMConfigurationError):
+        return "error", TrialFailure(
+            category="configuration",
+            kind="llm",
+            message=_exception_message(configuration, "Invalid LLM configuration"),
+            evidence={"exception_type": type(configuration).__name__},
+        )
+
+    case_error = _first_exception(path, KensaCaseError)
+    if isinstance(case_error, KensaCaseError):
+        return "error", TrialFailure(
+            category="harness",
+            kind="case_contract",
+            message=_exception_message(case_error, "Kensa case contract failed"),
+            evidence={"exception_type": type(case_error).__name__},
+        )
+
+    if isinstance(error, ConversationError):
+        cause = _active_chained_exception(error)
+        evidence: dict[str, Any] = {
+            "source": error.source,
+            "accepted_messages": len(error.messages),
+        }
+        if cause is not None:
+            evidence["cause_type"] = type(cause).__name__
+        timed_out = any(isinstance(item, TimeoutError) for item in path[1:])
+        if error.source == "simulator":
+            category = "simulator"
+            kind = (
+                "contract" if error.kind == "contract" else "timeout" if timed_out else "execution"
+            )
+        elif error.kind == "contract":
+            category = "harness"
+            kind = "agent_contract"
+        else:
+            category = "agent"
+            kind = "timeout" if timed_out else "execution"
+        return "error", TrialFailure(
+            category=category,
+            kind=kind,
+            message=_exception_message(error, f"{error.source} {error.kind} failure"),
+            evidence=evidence,
+        )
+
+    if isinstance(error, pytest.skip.Exception):
+        return "skipped", TrialFailure(
+            category="harness",
+            kind="skip",
+            message=_exception_message(error, f"pytest {phase} skipped"),
+            evidence={"phase": phase},
+        )
+
+    if phase in {"setup", "teardown"}:
+        return "error", TrialFailure(
+            category="harness",
+            kind=phase,
+            message=_exception_message(error, f"pytest {phase} failed"),
+            evidence={"phase": phase},
+        )
+
+    if isinstance(error, AssertionError):
+        return "fail", TrialFailure(
+            category="agent",
+            kind="assertion",
+            message=_exception_message(error, "Assertion failed"),
+            evidence={"exception_type": type(error).__name__},
+        )
+
+    kind = "timeout" if isinstance(error, TimeoutError) else type(error).__name__
+    return "error", TrialFailure(
+        category="unknown",
+        kind=kind,
+        message=_exception_message(error, f"{kind} raised"),
+        evidence={"exception_type": type(error).__name__},
+    )
 
 
 class KensaSessionState:
@@ -430,22 +561,13 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
         return
 
     exc = excinfo[1]
-    if isinstance(exc, pytest.skip.Exception):
-        status = "skipped"
-        error_kind = "skip"
-    elif isinstance(exc, AssertionError):
-        status = "fail"
-        error_kind = "assertion"
-    else:
-        status = "error"
-        error_kind = "exception"
+    status, failure = _classify_exception(exc, phase="call")
     _record_trial(
         item.config,
         runtime.metadata(
             status=status,
             duration_ms=duration_ms,
-            error=str(exc),
-            error_kind=error_kind,
+            failure=failure,
         ),
     )
 
@@ -474,15 +596,27 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
             and existing.status in {"fail", "error"}
         )
         if not preserve_call_failure and (existing is None or existing.status != "skipped"):
+            wasxfail = getattr(report, "wasxfail", None)
+            if wasxfail is not None:
+                failure = TrialFailure(
+                    category="harness",
+                    kind="xfail",
+                    message=str(wasxfail).strip() or "pytest expected failure",
+                    evidence={"phase": report.when, "outcome": report.outcome},
+                )
+            else:
+                error = (
+                    call.excinfo.value
+                    if call.excinfo is not None
+                    else pytest.skip.Exception(f"pytest {report.when} skipped")
+                )
+                _, failure = _classify_exception(error, phase=report.when)
             _record_trial(
                 item.config,
                 runtime.metadata(
                     status="skipped",
                     duration_ms=existing.duration_ms if existing is not None else 0.0,
-                    error=(
-                        str(call.excinfo.value) if call.excinfo else f"pytest {report.when} skipped"
-                    ),
-                    error_kind="skip",
+                    failure=failure,
                 ),
             )
         metadata = _trial_metadata(item.config, item.nodeid)
@@ -492,15 +626,18 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
     if report.when in {"setup", "teardown"} and report.failed:
         existing = _trial_metadata(item.config, item.nodeid)
         if report.when != "setup" or existing is None or existing.status == _PROVISIONAL_STATUS:
+            error = (
+                call.excinfo.value
+                if call.excinfo is not None
+                else RuntimeError(f"pytest {report.when} failed")
+            )
+            _, failure = _classify_exception(error, phase=report.when)
             _record_trial(
                 item.config,
                 runtime.metadata(
                     status="error",
                     duration_ms=0.0,
-                    error=(
-                        str(call.excinfo.value) if call.excinfo else f"pytest {report.when} failed"
-                    ),
-                    error_kind=report.when,
+                    failure=failure,
                 ),
             )
     if report.when in {"call", "teardown"} or (report.when == "setup" and report.failed):
@@ -645,6 +782,14 @@ def _write_scoring_summary(
     terminalreporter: pytest.TerminalReporter,
     summary: dict[str, Any],
 ) -> None:
+    terminalreporter.write_line(f"Eligible agent trials: {int(summary['eligible_agent_trials'])}")
+    excluded = [
+        f"{category} {count}"
+        for category, count in summary["error_counts"].items()
+        if category != "agent" and count
+    ]
+    if excluded:
+        terminalreporter.write_line(f"Excluded errors: {' | '.join(excluded)}")
     curve = summary["pass_k_curve"]
     reliability = (
         " | ".join(

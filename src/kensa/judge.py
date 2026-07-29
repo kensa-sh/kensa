@@ -8,15 +8,17 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from kensa._serialization import json_value
+from kensa.errors import KensaEvalError
 from kensa.llm import DEFAULT_LLM_MODEL, complete, resolve_llm_config, validate_structured_result
 from kensa.models import LLMModel
 from kensa.runtime import current_runtime
 from kensa.watchdog import DEFAULT_JUDGE_TIMEOUT_S, format_timeout_s, timeout_value
 
 DEFAULT_ANTHROPIC_JUDGE_MODEL = LLMModel.CLAUDE_SONNET_4_6.value
+_JUDGE_CONTRACT_ERROR = "Judge result violates the JudgeResult contract."
 
 
 class JudgeProvider(Protocol):
@@ -41,6 +43,7 @@ class JudgeResult:
     model: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     error: bool = False
+    _contract_error: BaseException | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +55,54 @@ class JudgeResult:
             "metadata": self.metadata,
             "error": self.error,
         }
+
+    def require(self) -> JudgeResult:
+        """Require a completed positive judgment."""
+        contract_error = self._contract_error
+        if contract_error is None:
+            try:
+                _validated_judge_snapshot(self)
+            except (TypeError, ValueError) as exc:
+                contract_error = exc
+        if contract_error is not None:
+            error = KensaEvalError(
+                _JUDGE_CONTRACT_ERROR,
+                category="judge",
+                kind="contract",
+                evidence=_safe_judge_identity(self.provider, self.model),
+            )
+            raise error from contract_error
+        if self.error:
+            raise KensaEvalError(
+                self.reasoning,
+                category="judge",
+                kind="execution",
+                evidence={
+                    "provider": self.provider,
+                    "model": self.model,
+                    "metadata": json_value(self.metadata),
+                },
+            )
+        if not self.passed:
+            raise AssertionError(self.reasoning)
+        return self
+
+
+class _JudgeResultSnapshot(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        allow_inf_nan=False,
+    )
+
+    passed: bool
+    reasoning: str = Field(min_length=1)
+    evidence: list[str]
+    provider: str | None
+    model: str | None
+    metadata: dict[str, JsonValue]
+    error: bool
 
 
 class _JudgeLLMResponse(BaseModel):
@@ -98,12 +149,14 @@ def judge(
     runtime = current_runtime()
     timeout_s = runtime.judge_timeout_s if runtime is not None else DEFAULT_JUDGE_TIMEOUT_S
     if runtime is not None and runtime.no_judge:
-        result = JudgeResult(
-            passed=False,
-            reasoning="Judge skipped because --kensa-no-judge is enabled.",
-            evidence=[],
-            provider="disabled",
-            error=True,
+        result = _snapshot_judge_result(
+            JudgeResult(
+                passed=False,
+                reasoning="Judge skipped because --kensa-no-judge is enabled.",
+                evidence=[],
+                provider="disabled",
+                error=True,
+            )
         )
         runtime.record_judge(result)
         return result
@@ -148,16 +201,61 @@ def judge(
             error=True,
         )
     except Exception as exc:
+        provider_name, model = _judge_identity(provider)
         result = JudgeResult(
             passed=False,
             reasoning=f"Judge error: {exc}",
-            provider="error",
+            provider=provider_name,
+            model=model,
             error=True,
         )
 
+    result = _snapshot_judge_result(result)
     if runtime is not None:
         runtime.record_judge(result)
     return result
+
+
+def _validated_judge_snapshot(result: JudgeResult) -> _JudgeResultSnapshot:
+    snapshot = json_value(result.to_dict())
+    if not isinstance(snapshot, dict):
+        raise TypeError("Judge result must serialize to an object")
+    validated = _JudgeResultSnapshot.model_validate(snapshot)
+    json.dumps(validated.model_dump(mode="json"), allow_nan=False)
+    return validated
+
+
+def _snapshot_judge_result(result: JudgeResult) -> JudgeResult:
+    try:
+        snapshot = _validated_judge_snapshot(result)
+    except (TypeError, ValueError) as exc:
+        return JudgeResult(
+            passed=False,
+            reasoning=_JUDGE_CONTRACT_ERROR,
+            provider=result.provider if isinstance(result.provider, str) else None,
+            model=result.model if isinstance(result.model, str) else None,
+            error=True,
+            _contract_error=exc,
+        )
+    return JudgeResult(
+        passed=snapshot.passed,
+        reasoning=snapshot.reasoning,
+        evidence=snapshot.evidence,
+        provider=snapshot.provider,
+        model=snapshot.model,
+        metadata=snapshot.metadata,
+        error=snapshot.error,
+        _contract_error=result._contract_error,
+    )
+
+
+def _safe_judge_identity(provider: Any, model: Any) -> dict[str, Any]:
+    identity: dict[str, Any] = {}
+    if isinstance(provider, str):
+        identity["provider"] = provider
+    if isinstance(model, str):
+        identity["model"] = model
+    return identity
 
 
 def _judge_operation_attributes(provider: JudgeProvider) -> dict[str, Any]:

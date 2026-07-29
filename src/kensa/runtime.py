@@ -22,7 +22,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from kensa._serialization import json_value, jsonable
 from kensa._smoke import is_smoke_identity
-from kensa.errors import KensaCaseError
+from kensa.errors import KensaCaseError, TrialFailure
 
 if TYPE_CHECKING:
     from kensa.case import KensaCase
@@ -261,13 +261,20 @@ class TrialMetadata:
     status: str
     case: dict[str, Any] = field(default_factory=dict)
     output: Any = None
-    error: str | None = None
-    error_kind: str | None = None
+    failure: TrialFailure | None = None
     duration_ms: float = 0.0
     trace: dict[str, Any] = field(default_factory=dict)
     judges: list[dict[str, Any]] = field(default_factory=list)
     active_operation: dict[str, Any] | None = None
     smoke: bool = False
+
+    def __post_init__(self) -> None:
+        if self.status not in {"pass", "fail", "error", "skipped", "provisional"}:
+            raise ValueError(f"Unknown trial status: {self.status!r}")
+        requires_failure = self.status in {"fail", "error", "skipped"}
+        if requires_failure != (self.failure is not None):
+            expectation = "one failure" if requires_failure else "failure=None"
+            raise ValueError(f"Trial status {self.status!r} requires {expectation}")
 
     @property
     def is_smoke(self) -> bool:
@@ -287,8 +294,7 @@ class TrialMetadata:
             "status": self.status,
             "case": self.case,
             "output": self.output,
-            "error": self.error,
-            "error_kind": self.error_kind,
+            "failure": (self.failure.model_dump(mode="json") if self.failure is not None else None),
             "duration_ms": self.duration_ms,
             "trace": self.trace,
             "judges": self.judges,
@@ -524,8 +530,7 @@ class KensaTrialRuntime:
         *,
         status: str,
         duration_ms: float,
-        error: str | None = None,
-        error_kind: str | None = None,
+        failure: TrialFailure | None = None,
     ) -> TrialMetadata:
         return TrialMetadata(
             nodeid=self.nodeid,
@@ -536,8 +541,7 @@ class KensaTrialRuntime:
             status=status,
             case=self.case,
             output=self.output if self.output_recorded else None,
-            error=error,
-            error_kind=error_kind,
+            failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=self.trace.to_dict(),
             judges=[j.to_dict() if hasattr(j, "to_dict") else dict(j) for j in self.judges],

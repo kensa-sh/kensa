@@ -23,7 +23,7 @@ from kensa.conversation import (
     Simulator,
     Termination,
 )
-from kensa.errors import KensaTimeoutError
+from kensa.errors import FailureCategory, KensaEvalError, KensaTimeoutError, TrialFailure
 from kensa.judge import JudgeResult, judge
 from kensa.runtime import KensaTrace
 from kensa.target import (
@@ -47,10 +47,12 @@ __all__ = [
     "EffectPolicy",
     "EvidenceCompleteness",
     "ExecutionAttestation",
+    "FailureCategory",
     "JudgeResult",
     "KensaAssistantMessage",
     "KensaCase",
     "KensaDeveloperMessage",
+    "KensaEvalError",
     "KensaFunctionCall",
     "KensaMessage",
     "KensaSystemMessage",
@@ -64,6 +66,7 @@ __all__ = [
     "StateObservation",
     "Termination",
     "TraceReference",
+    "TrialFailure",
     "attach_agent_run",
     "judge",
     "kensa_case",

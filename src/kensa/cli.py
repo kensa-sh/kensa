@@ -1168,6 +1168,17 @@ def _write_markdown_report(source: Path, destination: Path) -> None:
         [
             "",
             f"Eligible agent trials: {summary['eligible_agent_trials']}",
+        ]
+    )
+    excluded = [
+        f"{category}: {count}"
+        for category, count in summary["error_counts"].items()
+        if category != "agent" and count
+    ]
+    if excluded:
+        lines.extend(["", f"Excluded errors: {', '.join(excluded)}"])
+    lines.extend(
+        [
             "",
             "## Cost and latency",
             "",

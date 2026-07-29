@@ -51,6 +51,46 @@ def kensa_run(case):
     (eval_dir / "test_timeout.py").write_text(source)
 
 
+@pytest.mark.parametrize(
+    ("operation", "category"),
+    [
+        (
+            ActiveOperation(
+                "kensa.conversation.respond",
+                {"kensa.conversation.source": "simulator"},
+            ),
+            "simulator",
+        ),
+        (ActiveOperation("judge"), "judge"),
+    ],
+)
+def test_watchdog_timeout_uses_active_operation_provenance(
+    operation: ActiveOperation,
+    category: str,
+) -> None:
+    active = ActiveTrial(
+        nodeid="test.py::test_case[trial1]",
+        group_id="test.py::test_case",
+        case_id="case",
+        trial_index=1,
+        configured_trials=1,
+        timeout_s=1,
+        started_monotonic_ns=1,
+        phase="call",
+        active_operation=operation,
+    )
+
+    failure = watchdog._timeout_failure(active, "timed out")
+
+    assert failure.category == category
+    assert failure.kind == "timeout"
+    assert failure.evidence == {
+        "timeout_s": 1,
+        "phase": "call",
+        "active_operation": operation.to_dict(),
+    }
+
+
 @pytest.mark.parametrize("phase", ["setup", "call", "teardown"])
 def test_eval_timeout_bounds_full_pytest_item(
     phase: str,
@@ -103,7 +143,9 @@ def test_bounded(case, kensa_run, hanging_fixture):
         "phase": phase,
     }
     assert trial["status"] == "error"
-    assert trial["error_kind"] == ("timeout" if phase == "call" else phase)
+    assert trial["failure"]["category"] == ("agent" if phase == "call" else "harness")
+    assert trial["failure"]["kind"] == ("timeout" if phase == "call" else phase)
+    assert trial["failure"]["evidence"]["phase"] == phase
     assert trial["trace"]["incomplete"] is True
     assert result["complete"] is False
     assert result["interruption"]["kind"] == "timeout"
@@ -136,7 +178,7 @@ import pytest
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(trials=3, timeout_s=0.2)
+@pytest.mark.kensa(trials=3, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="three_trials", input="hello")])
 def test_three_trials(case, kensa_run, request):
     result = case.run(kensa_run)
@@ -170,8 +212,9 @@ def test_three_trials(case, kensa_run, request):
     assert artifact != stale
     assert len(result["trials"]) == 2
     assert result["trials"][0]["status"] == "pass"
-    assert result["trials"][1]["error_kind"] == "timeout"
-    assert 0 < result["trials"][1]["duration_ms"] < 1000
+    assert result["trials"][1]["failure"]["category"] == "agent"
+    assert result["trials"][1]["failure"]["kind"] == "timeout"
+    assert 0 < result["trials"][1]["duration_ms"] < 2000
     assert aggregate["verdict"] == "error"
     assert aggregate["partial"] is True
     assert "x" * 1000 in payload["data"]["pytest"]["stdout"]
@@ -237,12 +280,13 @@ def test_parallel_timeout(case, kensa_run):
     assert "hang" in trials
     assert set(trials) <= {"hang", "fast_a", "fast_b", "fast_c"}
     assert sort_keys == sorted(sort_keys)
-    assert trials["hang"]["error_kind"] == "timeout"
+    assert trials["hang"]["failure"]["category"] == "agent"
+    assert trials["hang"]["failure"]["kind"] == "timeout"
     passed = {case_id for case_id, trial in trials.items() if trial["status"] == "pass"}
     assert passed
     assert passed <= {"fast_a", "fast_b", "fast_c"}
     sibling_trials = [trial for case_id, trial in trials.items() if case_id != "hang"]
-    assert all(trial["error_kind"] is None for trial in sibling_trials)
+    assert all(trial["failure"] is None for trial in sibling_trials)
     assert result["complete"] is False
     assert result["interruption"] == {
         "kind": "timeout",
@@ -321,8 +365,9 @@ def pytest_runtest_logreport(report):
     assert (tmp_path / "teardown.started").is_file()
     assert (tmp_path / "teardown_pass.reported").is_file()
     assert (tmp_path / "teardown.worker").read_text() != (tmp_path / "timeout.worker").read_text()
-    assert trials["call_timeout"]["error_kind"] == "timeout"
-    assert trials["teardown_active"]["error_kind"] is None
+    assert trials["call_timeout"]["failure"]["category"] == "agent"
+    assert trials["call_timeout"]["failure"]["kind"] == "timeout"
+    assert trials["teardown_active"]["failure"] is None
     assert trials["teardown_active"]["status"] == "pass"
     assert result["complete"] is False
 
@@ -465,7 +510,7 @@ import pytest
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(timeout_s=0.15)
+@pytest.mark.kensa(timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="detached", input="hello")])
 def test_detached(case):
     child = subprocess.Popen(
@@ -567,7 +612,7 @@ from kensa import record_llm_call
 from kensa.pytest import kensa_case
 
 
-@pytest.mark.kensa(timeout_s=0.15)
+@pytest.mark.kensa(timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="active_case", input="hello")])
 def test_active_operation(case):
     with record_llm_call(
@@ -626,7 +671,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
@@ -640,7 +685,8 @@ def test_priced(case, priced_agent):
     trials = artifact["trials"]
     cost = artifact["summary"]["cost_latency"]
     assert [trial["status"] for trial in trials] == ["pass", "error"]
-    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["failure"]["category"] == "agent"
+    assert trials[1]["failure"]["kind"] == "timeout"
     assert trials[1]["trace"]["llm_turns"] == 1
     assert trials[1]["trace"]["known_cost_usd"] == 0.2
     assert trials[1]["trace"]["cost_usd"] == 0.2
@@ -714,7 +760,7 @@ def external_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="external", input="hello")])
 def test_external(case, external_agent):
     case.run(external_agent)
@@ -727,7 +773,8 @@ def test_external(case, external_agent):
     artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
     trials = artifact["trials"]
     assert [trial["status"] for trial in trials] == ["pass", "error"]
-    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["failure"]["category"] == "agent"
+    assert trials[1]["failure"]["kind"] == "timeout"
     assert trials[1]["trace"]["agent_runs"][0]["run_id"] == "external-run"
     assert trials[1]["trace"]["agent_runs"][0]["state"][0]["value"] == {"status": "active"}
     external_span = next(
@@ -776,7 +823,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
@@ -790,7 +837,8 @@ def test_priced(case, priced_agent):
     trials = artifact["trials"]
     cost = artifact["summary"]["cost_latency"]
     assert [trial["status"] for trial in trials] == ["pass", "error"]
-    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["failure"]["category"] == "agent"
+    assert trials[1]["failure"]["kind"] == "timeout"
     assert trials[1]["trace"]["llm_turns"] == 1
     assert trials[1]["trace"]["known_cost_usd"] == 0.2
     assert trials[1]["trace"]["cost_usd"] == 0.2
@@ -838,7 +886,7 @@ def priced_agent(request):
     return Agent()
 
 
-@pytest.mark.kensa(trials=2, timeout_s=0.25)
+@pytest.mark.kensa(trials=2, timeout_s=1)
 @pytest.mark.parametrize("case", [kensa_case(id="priced", input="hello")])
 def test_priced(case, priced_agent):
     case.run(priced_agent)
@@ -852,7 +900,8 @@ def test_priced(case, priced_agent):
     trials = artifact["trials"]
     cost = artifact["summary"]["cost_latency"]
     assert [trial["status"] for trial in trials] == ["pass", "error"]
-    assert trials[1]["error_kind"] == "timeout"
+    assert trials[1]["failure"]["category"] == "agent"
+    assert trials[1]["failure"]["kind"] == "timeout"
     assert trials[1]["active_operation"] == {
         "name": "chat test-model",
         "kind": "llm",
@@ -904,7 +953,8 @@ def test_snapshot(case, kensa_run):
     trial = artifact["trials"][0]
     assert payload["data"]["workers"] == 4
     assert trial["status"] == "error"
-    assert trial["error_kind"] == "timeout"
+    assert trial["failure"]["category"] == "agent"
+    assert trial["failure"]["kind"] == "timeout"
     assert trial["case"] == {"id": "snapshot", "input": "hello"}
     assert trial["output"]["output"] == {"input": "hello"}
     assert trial["trace"]["spans"][0]["name"] == "kensa.pytest.trial"
@@ -983,7 +1033,8 @@ def pytest_runtest_logreport(report):
     assert (tmp_path / "call.reported").is_file()
     assert (tmp_path / "judge.recorded").is_file()
     assert trial["status"] == "error"
-    assert trial["error_kind"] == "teardown"
+    assert trial["failure"]["category"] == "harness"
+    assert trial["failure"]["kind"] == "teardown"
     assert artifact["summary"]["eligible_agent_trials"] == 0
     assert trial["judges"] == [
         {

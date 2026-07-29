@@ -14,8 +14,10 @@ from typing import Any, cast
 import pytest
 
 from kensa import cli, cli_output, cli_traces
+from kensa.artifacts import load_trials, trial_from_dict
 from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
 from kensa.conversation import ConversationError, ConversationResponse
+from kensa.errors import TrialFailure
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import DEFAULT_LLM_MODEL, LLMResult
 from kensa.pytest_plugin import (
@@ -48,6 +50,47 @@ from kensa.runtime import (
 )
 from kensa.tracing import JSONLSpanExporter, instrument
 from kensa.watchdog import ActiveTrial, WatchdogControl, read_control, write_control
+
+
+def test_trial_artifact_reconstruction_rejects_legacy_unknown_and_mismatched_shapes() -> None:
+    base = {
+        "nodeid": "test.py::test_agent[trial1]",
+        "group_id": "test.py::test_agent",
+        "case_id": "case",
+        "trial_index": 1,
+        "configured_trials": 1,
+        "status": "error",
+        "failure": {
+            "category": "agent",
+            "kind": "execution",
+            "message": "failed",
+            "evidence": {},
+        },
+    }
+
+    assert trial_from_dict(base).failure == TrialFailure.model_validate(base["failure"])
+    with pytest.raises(ValueError, match="legacy"):
+        trial_from_dict({**base, "error": "failed"})
+    with pytest.raises(ValueError, match="legacy"):
+        trial_from_dict({**base, "error_kind": "exception"})
+    with pytest.raises(ValueError, match="status"):
+        trial_from_dict({**base, "status": "other"})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({**base, "status": "pass"})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({**base, "failure": None})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({key: value for key, value in base.items() if key != "failure"})
+    with pytest.raises(ValueError, match="object or null"):
+        trial_from_dict({**base, "failure": "failed"})
+
+
+def test_trial_artifact_loader_rejects_non_object_rows(tmp_path: Path) -> None:
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps({"trials": [None]}))
+
+    with pytest.raises(ValueError, match="invalid trial rows"):
+        load_trials(result_path)
 
 
 def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
@@ -784,6 +827,12 @@ def test_pytest_plugin_watchdog_control_paths(
             trial_index=1,
             configured_trials=1,
             status="error",
+            failure=TrialFailure(
+                category="harness",
+                kind="setup",
+                message="setup failed",
+                evidence={"phase": "setup"},
+            ),
         )
     ]
     hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
@@ -797,7 +846,8 @@ def test_pytest_plugin_watchdog_control_paths(
     with pytest.raises(StopIteration):
         skipped_hook.send(Outcome(skipped_report))
     assert state.trials[0].status == "skipped"
-    assert state.trials[0].error_kind == "skip"
+    assert state.trials[0].failure is not None
+    assert state.trials[0].failure.kind == "skip"
 
     state.trials[0] = TrialMetadata(
         nodeid="n[trial1]",
@@ -806,6 +856,11 @@ def test_pytest_plugin_watchdog_control_paths(
         trial_index=1,
         configured_trials=1,
         status="fail",
+        failure=TrialFailure(
+            category="agent",
+            kind="assertion",
+            message="failed",
+        ),
     )
     teardown_skip = SimpleNamespace(when="teardown", failed=False, skipped=True)
     teardown_hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))

@@ -9,12 +9,164 @@ import pytest
 
 from kensa import pytest_plugin
 from kensa.case import KensaCaseError, KensaMessage, kensa_case
+from kensa.conversation import ConversationError
+from kensa.errors import KensaEvalError, TrialFailure
+from kensa.llm import LLMConfigurationError
+from kensa.pytest_plugin import _classify_exception
 from kensa.runtime import KensaTrial
 from kensa.watchdog import (
     WatchdogControl,
     read_control,
     write_control,
 )
+
+
+def _raise_from(wrapper: BaseException, cause: BaseException) -> BaseException:
+    try:
+        raise cause
+    except BaseException as active:
+        try:
+            raise wrapper from active
+        except BaseException as raised:
+            return raised
+
+
+def test_trial_failure_classification_preserves_typed_precedence() -> None:
+    explicit = KensaEvalError(
+        "simulator unavailable",
+        category="infrastructure",
+        kind="provider",
+        evidence={"provider": "test"},
+    )
+    wrapped_explicit = _raise_from(RuntimeError("outer"), explicit)
+    status, failure = _classify_exception(wrapped_explicit, phase="call")
+    assert status == "error"
+    assert failure is explicit.failure
+
+    wrapped_configuration = _raise_from(
+        RuntimeError("outer"),
+        LLMConfigurationError("missing model"),
+    )
+    assert _classify_exception(wrapped_configuration, phase="call") == (
+        "error",
+        TrialFailure(
+            category="configuration",
+            kind="llm",
+            message="missing model",
+            evidence={"exception_type": "LLMConfigurationError"},
+        ),
+    )
+
+    case_error = KensaCaseError("conflicting attached run")
+    conversation = ConversationError(
+        "agent execution failure",
+        kind="execution",
+        source="agent",
+        messages=(),
+        output=None,
+    )
+    wrapped_case = _raise_from(conversation, case_error)
+    assert _classify_exception(wrapped_case, phase="call") == (
+        "error",
+        TrialFailure(
+            category="harness",
+            kind="case_contract",
+            message="conflicting attached run",
+            evidence={"exception_type": "KensaCaseError"},
+        ),
+    )
+
+    grouped = ExceptionGroup(
+        "group",
+        [RuntimeError("first"), KensaEvalError("explicit", category="judge", kind="execution")],
+    )
+    assert _classify_exception(grouped, phase="call")[1].category == "judge"
+
+    try:
+        raise LLMConfigurationError("suppressed")
+    except LLMConfigurationError:
+        try:
+            raise RuntimeError("visible") from None
+        except RuntimeError as suppressed:
+            status, failure = _classify_exception(suppressed, phase="call")
+    assert status == "error"
+    assert failure == TrialFailure(
+        category="unknown",
+        kind="RuntimeError",
+        message="visible",
+        evidence={"exception_type": "RuntimeError"},
+    )
+
+    first = RuntimeError("cycle")
+    second = RuntimeError("nested")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert _classify_exception(first, phase="call")[1].kind == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "cause", "expected_category", "expected_kind"),
+    [
+        ("simulator", "contract", None, "simulator", "contract"),
+        ("simulator", "execution", RuntimeError("failed"), "simulator", "execution"),
+        ("simulator", "execution", TimeoutError("late"), "simulator", "timeout"),
+        ("agent", "contract", None, "harness", "agent_contract"),
+        ("agent", "execution", RuntimeError("failed"), "agent", "execution"),
+        ("agent", "execution", TimeoutError("late"), "agent", "timeout"),
+    ],
+)
+def test_trial_failure_classification_maps_conversation_ownership(
+    source: str,
+    kind: str,
+    cause: BaseException | None,
+    expected_category: str,
+    expected_kind: str,
+) -> None:
+    conversation = ConversationError(
+        f"{source} {kind}",
+        kind=cast(Any, kind),
+        source=cast(Any, source),
+        messages=({"role": "user", "content": "hello"},),
+        output={"must": "not enter evidence"},
+    )
+    error = _raise_from(conversation, cause) if cause is not None else conversation
+
+    status, failure = _classify_exception(error, phase="call")
+
+    assert status == "error"
+    assert failure.category == expected_category
+    assert failure.kind == expected_kind
+    assert failure.evidence["source"] == source
+    assert failure.evidence["accepted_messages"] == 1
+    assert "output" not in failure.evidence
+    assert failure.evidence.get("cause_type") == (
+        type(cause).__name__ if cause is not None else None
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "phase", "expected_status", "expected_category", "expected_kind"),
+    [
+        (AssertionError("failed"), "call", "fail", "agent", "assertion"),
+        (TimeoutError("late"), "call", "error", "unknown", "timeout"),
+        (RuntimeError("failed"), "call", "error", "unknown", "RuntimeError"),
+        (RuntimeError("failed"), "setup", "error", "harness", "setup"),
+        (RuntimeError("failed"), "teardown", "error", "harness", "teardown"),
+        (pytest.skip.Exception("skip"), "call", "skipped", "harness", "skip"),
+    ],
+)
+def test_trial_failure_classification_maps_pytest_lifecycle(
+    exc: BaseException,
+    phase: str,
+    expected_status: str,
+    expected_category: str,
+    expected_kind: str,
+) -> None:
+    status, failure = _classify_exception(exc, phase=cast(Any, phase))
+
+    assert status == expected_status
+    assert failure.category == expected_category
+    assert failure.kind == expected_kind
 
 
 def _run_kensa_xdist(
@@ -66,8 +218,8 @@ import pytest
 from kensa.pytest import (
     AgentEvent,
     AgentRunEvidence,
-    ConversationResponse,
     ExecutionAttestation,
+    KensaEvalError,
     StateObservation,
     attach_agent_run,
 )
@@ -105,7 +257,12 @@ def kensa_run():
                     state_completeness="complete",
                 )
             )
-            return ConversationResponse(output={"ok": True})
+            raise KensaEvalError(
+                "External provider failed.",
+                category="infrastructure",
+                kind="provider",
+                evidence={"request": {"attempt": 1}},
+            )
 
     return Agent()
 """
@@ -119,9 +276,7 @@ from kensa.pytest import kensa_case
 @pytest.mark.kensa(trials=1)
 @pytest.mark.parametrize("case", [kensa_case(id="external", input="hello")])
 def test_external(case, kensa_run):
-    result = case.run(kensa_run)
-    assert result.trace.agent_runs[0].run_id == "external-run"
-    assert result.trace.tools.names == ["external.lookup"]
+    case.run(kensa_run)
 """
     )
 
@@ -137,7 +292,7 @@ def test_external(case, kensa_run):
     else:
         result = pytester.runpytest("-q", "--kensa-write-artifacts")
 
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(failed=1)
     artifact_path = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     artifact = json.loads(artifact_path.read_text())
     trial_trace = artifact["trials"][0]["trace"]
@@ -145,6 +300,14 @@ def test_external(case, kensa_run):
         (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
     )
     trace_record = json.loads(trace_path.read_text().splitlines()[0])
+    expected_failure = {
+        "category": "infrastructure",
+        "kind": "provider",
+        "message": "External provider failed.",
+        "evidence": {"request": {"attempt": 1}},
+    }
+    assert artifact["trials"][0]["failure"] == expected_failure
+    assert trace_record["failure"] == expected_failure
     assert trial_trace["agent_runs"][0]["run_id"] == "external-run"
     assert trial_trace["agent_runs"][0]["state"][0]["value"] == {"status": "active"}
     assert trace_record["agent_runs"] == trial_trace["agent_runs"]
@@ -641,7 +804,8 @@ def test_agent(case, kensa_run, bad_teardown):
     artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
     payload = json.loads(artifact.read_text())
     assert payload["trials"][0]["status"] == "error"
-    assert payload["trials"][0]["error_kind"] == "teardown"
+    assert payload["trials"][0]["failure"]["category"] == "harness"
+    assert payload["trials"][0]["failure"]["kind"] == "teardown"
     assert payload["summary"]["eligible_agent_trials"] == 0
     assert payload["summary"]["pass_k_curve"] == []
     assert payload["summary"]["cost_latency"]["latency_mean_ms"] == 0.0
@@ -698,7 +862,70 @@ def test_agent(case, kensa_run{fixture}):
     payload = json.loads(artifact.read_text())
     assert len(payload["trials"]) == 1
     assert payload["trials"][0]["status"] == "skipped"
-    assert payload["trials"][0]["error_kind"] == "skip"
+    assert payload["trials"][0]["failure"]["category"] == "harness"
+    assert payload["trials"][0]["failure"]["kind"] == "skip"
+    assert payload["aggregates"] == []
+    assert payload["summary"]["eligible_agent_trials"] == 0
+    assert payload["summary"]["pass_k_curve"] == []
+
+
+def test_xfails_use_harness_provenance_and_are_excluded_from_scoring(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.pytest import ConversationResponse
+
+
+@pytest.fixture
+def kensa_run():
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": True})
+    return Agent()
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.xfail(reason="marked reason")
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="marked", input="hello")])
+def test_marked(case, kensa_run):
+    case.run(kensa_run)
+    raise AssertionError("marked failure")
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="imperative", input="hello")])
+def test_imperative(case, kensa_run):
+    case.run(kensa_run)
+    pytest.xfail("imperative reason")
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(xfailed=2)
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    payload = json.loads(artifact.read_text())
+    trials = {trial["case_id"]: trial for trial in payload["trials"]}
+    assert set(trials) == {"marked", "imperative"}
+    for case_id, reason in {
+        "marked": "marked reason",
+        "imperative": "imperative reason",
+    }.items():
+        assert trials[case_id]["status"] == "skipped"
+        assert trials[case_id]["failure"] == {
+            "category": "harness",
+            "kind": "xfail",
+            "message": reason,
+            "evidence": {"phase": "call", "outcome": "skipped"},
+        }
     assert payload["aggregates"] == []
     assert payload["summary"]["eligible_agent_trials"] == 0
     assert payload["summary"]["pass_k_curve"] == []
@@ -847,8 +1074,12 @@ def test_agent(case, failing_setup):
     payload = json.loads(artifact.read_text())
     trial = payload["trials"][0]
     assert trial["status"] == "error"
-    assert trial["error_kind"] == "setup"
-    assert trial["error"] == "setup failed after case run"
+    assert trial["failure"] == {
+        "category": "harness",
+        "kind": "setup",
+        "message": "setup failed after case run",
+        "evidence": {"phase": "setup"},
+    }
     assert trial["case"] == {"id": "case_a", "input": "hello"}
     assert trial["output"]["output"] == {"input": "hello"}
     assert payload["summary"]["eligible_agent_trials"] == 0
@@ -894,7 +1125,7 @@ def judge_in_teardown(request):
         for trial in json.loads(artifact.read_text())["trials"]
         if trial["nodeid"] == request.node.nodeid
     )
-    for field in ("status", "duration_ms", "error", "error_kind"):
+    for field in ("status", "duration_ms", "failure"):
         assert after[field] == before[field]
     assert len(after["judges"]) == len(before["judges"]) + 1
 """
@@ -929,8 +1160,12 @@ def test_fail(case, kensa_run, judge_in_teardown):
     assert passed["status"] == "pass"
     assert len(passed["judges"]) == 1
     assert failed["status"] == "fail"
-    assert failed["error"] == "call failed\nassert False"
-    assert failed["error_kind"] == "assertion"
+    assert failed["failure"] == {
+        "category": "agent",
+        "kind": "assertion",
+        "message": "call failed\nassert False",
+        "evidence": {"exception_type": "AssertionError"},
+    }
     assert len(failed["judges"]) == 1
 
 
@@ -1025,7 +1260,8 @@ def test_agent(case, kensa_run):
     payload = json.loads(artifact.read_text())
     assert payload["trials"][0]["status"] == "fail"
     assert payload["trials"][0]["output"]["output"] == {"input": "hello"}
-    assert payload["trials"][0]["error_kind"] == "assertion"
+    assert payload["trials"][0]["failure"]["category"] == "agent"
+    assert payload["trials"][0]["failure"]["kind"] == "assertion"
 
 
 def test_case_run_rejects_second_call(pytester: pytest.Pytester) -> None:
@@ -1324,9 +1560,11 @@ def test_agent(case, kensa_run, conditional_lifecycle):
     trials = {trial["case_id"]: trial for trial in payload["trials"]}
     assert trials["case_a"]["status"] == "pass"
     assert trials["case_b"]["status"] == "error"
-    assert trials["case_b"]["error_kind"] == "teardown"
+    assert trials["case_b"]["failure"]["category"] == "harness"
+    assert trials["case_b"]["failure"]["kind"] == "teardown"
     assert trials["case_c"]["status"] == "error"
-    assert trials["case_c"]["error_kind"] == "setup"
+    assert trials["case_c"]["failure"]["category"] == "harness"
+    assert trials["case_c"]["failure"]["kind"] == "setup"
     aggregates = {aggregate["case_id"]: aggregate for aggregate in payload["aggregates"]}
     assert aggregates["case_a"]["verdict"] == "pass"
     assert aggregates["case_b"]["verdict"] == "error"
@@ -1384,7 +1622,7 @@ def test_agent(case, kensa_run, crash_in_teardown):
     payload = json.loads(artifact.read_text())
     assert len(payload["trials"]) == 1
     assert payload["trials"][0]["status"] == "pass"
-    assert payload["trials"][0]["error_kind"] is None
+    assert payload["trials"][0]["failure"] is None
     assert payload["aggregates"][0]["verdict"] == "pass"
     assert payload["aggregates"][0]["partial"] is False
     assert payload["complete"] is False
@@ -1547,7 +1785,8 @@ def test_agent(case):
     payload = json.loads(artifact.read_text())
     trials = {trial["case_id"]: trial for trial in payload["trials"]}
     assert set(trials) < {f"case_{letter}" for letter in "abcdefgh"}
-    assert trials["case_a"]["error_kind"] == "assertion"
+    assert trials["case_a"]["failure"]["category"] == "agent"
+    assert trials["case_a"]["failure"]["kind"] == "assertion"
     assert payload["complete"] is False
     assert payload["interruption"]["kind"] == "pytest_stopped"
 
@@ -1741,6 +1980,7 @@ def test_controller_normalizes_worker_trial_payload() -> None:
         "trial_index": 1,
         "configured_trials": 1,
         "status": "pass",
+        "failure": None,
         "case": [],
         "trace": [],
         "judges": {},

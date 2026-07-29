@@ -9,6 +9,7 @@ import pytest
 from kensa import cli
 from kensa._smoke import is_smoke_aggregate, is_smoke_identity, is_smoke_trial
 from kensa.artifacts import aggregate_trials, write_run_artifacts
+from kensa.errors import TrialFailure
 from kensa.pytest_plugin import _write_scoring_summary
 from kensa.runtime import TrialMetadata
 from kensa.scoring import (
@@ -31,7 +32,8 @@ def _trial(
     cost_available: bool | None = True,
     smoke: bool | None = False,
     case_smoke: bool = False,
-    error_kind: str | None = None,
+    failure_kind: str | None = None,
+    failure_category: str | None = None,
 ) -> dict[str, Any]:
     case: dict[str, Any] = {"id": case_id}
     if case_smoke:
@@ -43,18 +45,93 @@ def _trial(
     }
     if cost_available is not None:
         trace["cost_available"] = cost_available
+    category = failure_category
+    if category is None and status in {"fail", "error"}:
+        category = "agent"
+    elif category is None and status == "skipped":
+        category = "harness"
     trial: dict[str, Any] = {
         "case": case,
         "case_id": case_id,
         "group_id": group_id or case_id,
         "status": status,
-        "error_kind": error_kind,
+        "failure": (
+            {
+                "category": category,
+                "kind": failure_kind
+                or (
+                    "assertion"
+                    if status == "fail"
+                    else "skip"
+                    if status == "skipped"
+                    else "execution"
+                ),
+                "message": "trial failed",
+                "evidence": {},
+            }
+            if category is not None
+            else None
+        ),
         "duration_ms": duration_ms,
         "trace": trace,
     }
     if smoke is not None:
         trial["smoke"] = smoke
     return trial
+
+
+def test_run_summary_excludes_non_agent_errors_without_weakening_health() -> None:
+    categories = [
+        "agent",
+        "simulator",
+        "judge",
+        "configuration",
+        "infrastructure",
+        "harness",
+        "unknown",
+    ]
+    trials = [
+        _trial(status="pass", group_id="cohort", duration_ms=10, cost_usd=0.1),
+        _trial(status="fail", group_id="cohort", duration_ms=20, cost_usd=0.2),
+        *[
+            _trial(
+                status="error",
+                group_id="cohort",
+                duration_ms=30 + index,
+                cost_usd=0.3 + index,
+                failure_category=category,
+            )
+            for index, category in enumerate(categories)
+        ],
+    ]
+
+    summary = run_summary({"trials": trials})
+
+    assert summary["eligible_agent_trials"] == 3
+    assert summary["excluded_error_trials"] == 6
+    assert summary["error_counts"] == {
+        "agent": 1,
+        "simulator": 1,
+        "judge": 1,
+        "configuration": 1,
+        "infrastructure": 1,
+        "harness": 1,
+        "unknown": 1,
+    }
+    assert summary["pass_k_cohorts"] == [
+        {
+            "group_id": "cohort",
+            "case_id": "case-a",
+            "passed": 1,
+            "total": 3,
+        }
+    ]
+    assert summary["cost_latency"]["latency_mean_ms"] == 20
+    assert summary["cost_latency"]["known_cost_usd"] == pytest.approx(0.6)
+
+    invalid = run_summary({"trials": [{"status": "error", "failure": None}]})
+    assert invalid["eligible_agent_trials"] == 0
+    assert invalid["excluded_error_trials"] == 1
 
 
 def test_pass_hat_k_returns_known_reliability_values() -> None:
@@ -166,7 +243,7 @@ def test_cost_latency_treats_active_llm_timeout_as_unknown_cost() -> None:
         cost_usd=None,
         llm_turns=0,
         cost_available=False,
-        error_kind="timeout",
+        failure_kind="timeout",
     )
     timed_out["active_operation"] = {
         "name": "llm.call",
@@ -250,12 +327,12 @@ def test_run_summary_counts_agent_errors_and_timeouts_as_failures() -> None:
         {
             "trials": [
                 _trial(status="pass", group_id="agent"),
-                _trial(status="error", group_id="agent", error_kind="exception"),
-                _trial(status="error", group_id="agent", error_kind="timeout"),
+                _trial(status="error", group_id="agent", failure_kind="execution"),
+                _trial(status="error", group_id="agent", failure_kind="timeout"),
                 _trial(
                     status="error",
                     group_id="agent",
-                    error_kind="infrastructure",
+                    failure_category="infrastructure",
                 ),
                 _trial(status="skipped", group_id="agent"),
             ]
@@ -286,7 +363,12 @@ def test_aggregate_trials_excludes_skipped_trials() -> None:
         trial_index=1,
         configured_trials=2,
         status="skipped",
-        error_kind="skip",
+        failure=TrialFailure(
+            category="harness",
+            kind="skip",
+            message="skipped",
+            evidence={"phase": "call"},
+        ),
     )
     passed = TrialMetadata(
         nodeid="test_eval.py::test_agent[trial2-case-a]",
@@ -319,13 +401,15 @@ def test_run_summary_excludes_setup_and_teardown_from_all_metrics() -> None:
                     status="error",
                     duration_ms=0,
                     cost_usd=0.2,
-                    error_kind="setup",
+                    failure_category="harness",
+                    failure_kind="setup",
                 ),
                 _trial(
                     status="error",
                     duration_ms=0,
                     cost_usd=0.3,
-                    error_kind="teardown",
+                    failure_category="harness",
+                    failure_kind="teardown",
                 ),
             ]
         }
@@ -419,8 +503,25 @@ def test_terminal_reports_cohort_population_and_cost_coverage() -> None:
     )
     _write_scoring_summary(cast(Any, terminal), partial)
 
+    assert "Eligible agent trials: 3" in terminal.lines
+    assert not any(line.startswith("Excluded errors:") for line in terminal.lines)
     assert "Reliability: pass^1 100.0% (2 cohorts) | pass^2 100.0% (1 cohort)" in terminal.lines
     assert "Cost: partial $0.1000 known | 1/2 fully priced trials" in terminal.lines
+
+    excluded_terminal = Terminal()
+    _write_scoring_summary(
+        cast(Any, excluded_terminal),
+        run_summary(
+            {
+                "trials": [
+                    _trial(status="pass"),
+                    _trial(status="error", failure_category="simulator"),
+                ]
+            }
+        ),
+    )
+    assert "Eligible agent trials: 1" in excluded_terminal.lines
+    assert "Excluded errors: simulator 1" in excluded_terminal.lines
 
     _write_scoring_summary(
         cast(Any, terminal),
@@ -440,6 +541,16 @@ def test_run_summary_empty_trials_returns_zero_metrics() -> None:
         "pass_k_curve": [],
         "pass_k_cohorts": [],
         "eligible_agent_trials": 0,
+        "error_counts": {
+            "agent": 0,
+            "simulator": 0,
+            "judge": 0,
+            "configuration": 0,
+            "infrastructure": 0,
+            "harness": 0,
+            "unknown": 0,
+        },
+        "excluded_error_trials": 0,
         "cost_latency": {
             "latency_p50_ms": 0.0,
             "latency_p95_ms": 0.0,
@@ -479,7 +590,20 @@ def test_artifact_and_markdown_reports_include_run_summary(tmp_path: Path) -> No
                     "cost_available": True,
                     "llm_turns": 3,
                 },
-            )
+            ),
+            TrialMetadata(
+                nodeid="test_eval.py::test_agent[trial1-case-b]",
+                group_id="test_eval.py::test_agent[case-b]",
+                case_id="case-b",
+                trial_index=1,
+                configured_trials=1,
+                status="error",
+                failure=TrialFailure(
+                    category="simulator",
+                    kind="execution",
+                    message="simulator unavailable",
+                ),
+            ),
         ],
         result_path=result_path,
         artifact_dir=tmp_path,
@@ -499,6 +623,8 @@ def test_artifact_and_markdown_reports_include_run_summary(tmp_path: Path) -> No
     assert "Latency p50: 125ms" in markdown
     assert "Total cost: $0.0200" in markdown
     assert "Cost coverage: 1/1 fully priced trials" in markdown
+    assert "Eligible agent trials: 1" in markdown
+    assert "Excluded errors: simulator: 1" in markdown
 
 
 def test_artifact_marks_legacy_smoke_and_markdown_reports_partial_cost(
@@ -536,6 +662,11 @@ def test_artifact_marks_legacy_smoke_and_markdown_reports_partial_cost(
                 trial_index=2,
                 configured_trials=2,
                 status="fail",
+                failure=TrialFailure(
+                    category="agent",
+                    kind="assertion",
+                    message="failed",
+                ),
                 trace={
                     "cost_usd": None,
                     "cost_available": False,
