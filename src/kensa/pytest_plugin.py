@@ -719,12 +719,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
 
 
 def _write_artifacts(state: KensaSessionState) -> None:
+    complete = state.complete and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials)
     state.aggregates = write_run_artifacts(
         run_id=state.run_id,
         trials=state.trials,
         result_path=state.result_path,
         artifact_dir=state.artifact_dir,
-        complete=state.complete,
+        complete=complete,
         interruption=state.interruption,
     )
 

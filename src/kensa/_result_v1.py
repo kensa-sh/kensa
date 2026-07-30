@@ -1,4 +1,4 @@
-"""Reliability, cost, and latency scoring for Kensa eval artifacts."""
+"""Frozen derivation rules for kensa.result.v1 artifacts."""
 
 from __future__ import annotations
 
@@ -6,9 +6,8 @@ import math
 import statistics
 from typing import Any
 
-from kensa._smoke import is_smoke_trial
-
 Json = dict[str, Any]
+
 _FAILURE_CATEGORIES = (
     "agent",
     "simulator",
@@ -20,24 +19,114 @@ _FAILURE_CATEGORIES = (
 )
 
 
-def pass_hat_k(successes: int, total: int, k: int) -> float | None:
-    """Estimate the chance that all k sampled trials pass."""
-    if k <= 0 or total < k:
-        return None
-    if successes < k:
-        return 0.0
-    return math.comb(successes, k) / math.comb(total, k)
+def derive_v1_aggregates(trials: list[Json]) -> list[Json]:
+    groups: dict[str, list[Json]] = {}
+    for trial in trials:
+        groups.setdefault(trial["group_id"], []).append(trial)
+
+    aggregates: list[Json] = []
+    for group_id, group_trials in sorted(groups.items()):
+        all_trials = sorted(group_trials, key=lambda trial: trial["trial_index"])
+        ordered = [trial for trial in all_trials if trial["status"] != "skipped"]
+        if not ordered:
+            continue
+
+        total = len(ordered)
+        passed = sum(trial["status"] == "pass" for trial in ordered)
+        errored = sum(trial["status"] == "error" for trial in ordered)
+        failed = sum(trial["status"] == "fail" for trial in ordered)
+        skipped = len(all_trials) - total
+        configured = max(trial["configured_trials"] for trial in all_trials)
+        partial = total + skipped < configured
+        timed_out = any(_failure_kind(trial) == "timeout" for trial in ordered)
+        if timed_out:
+            verdict = "error"
+        elif partial:
+            verdict = "partial"
+        elif errored:
+            verdict = "error"
+        elif passed == total:
+            verdict = "pass"
+        elif failed == total:
+            verdict = "fail"
+        else:
+            verdict = "flaky"
+
+        aggregates.append(
+            {
+                "group_id": group_id,
+                "case_id": ordered[0]["case_id"],
+                "configured_trials": configured,
+                "total": total,
+                "passed": passed,
+                "failed": failed,
+                "errored": errored,
+                "skipped": skipped,
+                "partial": partial,
+                "verdict": verdict,
+                "trials": ordered,
+                "smoke": any(trial["smoke"] for trial in all_trials),
+            }
+        )
+    return aggregates
 
 
-def pass_k_curve(per_cohort: list[tuple[int, int]]) -> list[Json]:
-    """Average pass^k across case cohorts with enough trials."""
+def derive_v1_summary(trials: list[Json]) -> Json:
+    scored_trials = [trial for trial in trials if not trial["smoke"]]
+    eligible_trials = [
+        trial
+        for trial in scored_trials
+        if trial["status"] in {"pass", "fail"}
+        or (trial["status"] == "error" and _failure_category(trial) == "agent")
+    ]
+    error_counts = dict.fromkeys(_FAILURE_CATEGORIES, 0)
+    for trial in scored_trials:
+        if trial["status"] != "error":
+            continue
+        category = _failure_category(trial)
+        if category is not None:
+            error_counts[category] += 1
+
+    cohorts: dict[str, Json] = {}
+    for trial in eligible_trials:
+        case_id = _trial_case_id(trial)
+        group_id = str(trial.get("group_id") or case_id)
+        cohort = cohorts.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "case_id": case_id,
+                "passed": 0,
+                "total": 0,
+            },
+        )
+        cohort["total"] += 1
+        cohort["passed"] += trial["status"] == "pass"
+
+    cohort_values = list(cohorts.values())
+    per_cohort = [(cohort["passed"], cohort["total"]) for cohort in cohort_values]
+    return {
+        "pass_k_curve": _pass_k_curve(per_cohort),
+        "pass_k_cohorts": cohort_values,
+        "eligible_agent_trials": sum(cohort["total"] for cohort in cohort_values),
+        "error_counts": error_counts,
+        "excluded_error_trials": sum(
+            trial["status"] == "error" and _failure_category(trial) != "agent"
+            for trial in scored_trials
+        ),
+        "cost_latency": _cost_latency(eligible_trials),
+    }
+
+
+def _pass_k_curve(per_cohort: list[tuple[int, int]]) -> list[Json]:
     if not per_cohort:
         return []
+
     curve: list[Json] = []
     for k in range(1, max(total for _, total in per_cohort) + 1):
         values = [
             value
-            for value in (pass_hat_k(passed, total, k) for passed, total in per_cohort)
+            for value in (_pass_hat_k(passed, total, k) for passed, total in per_cohort)
             if value is not None
         ]
         if values:
@@ -45,8 +134,15 @@ def pass_k_curve(per_cohort: list[tuple[int, int]]) -> list[Json]:
     return curve
 
 
-def cost_latency(trials: list[Json]) -> Json:
-    """Summarize recorded trial cost, latency, and LLM turns."""
+def _pass_hat_k(successes: int, total: int, k: int) -> float | None:
+    if k <= 0 or total < k:
+        return None
+    if successes < k:
+        return 0.0
+    return math.comb(successes, k) / math.comb(total, k)
+
+
+def _cost_latency(trials: list[Json]) -> Json:
     durations = [
         float(trial["duration_ms"]) for trial in trials if trial.get("duration_ms") is not None
     ]
@@ -60,7 +156,7 @@ def cost_latency(trials: list[Json]) -> Json:
     cost_complete = cost_relevant_trials > 0 and cost_known_trials == cost_relevant_trials
     known_cost = sum(known_costs)
     total_cost = known_cost if cost_complete else None
-    agent_passes = sum(1 for trial in trials if trial.get("status") == "pass")
+    agent_passes = sum(trial["status"] == "pass" for trial in trials)
     return {
         "latency_p50_ms": statistics.median(durations) if durations else 0.0,
         "latency_p95_ms": _percentile(durations, 95),
@@ -83,9 +179,7 @@ def cost_latency(trials: list[Json]) -> Json:
 
 
 def _cost_observation(trial: Json) -> tuple[bool, bool, float | None]:
-    trace = trial.get("trace")
-    if not isinstance(trace, dict):
-        return False, False, None
+    trace = trial["trace"]
     cost = _finite_cost(trace.get("cost_usd"))
     known_cost = _finite_cost(trace.get("known_cost_usd"))
     turns = _finite_float(trace.get("llm_turns"))
@@ -115,6 +209,7 @@ def _cost_observation(trial: Json) -> tuple[bool, bool, float | None]:
         return True, False, known_cost
     if "known_cost_usd" in trace:
         return True, False, known_cost
+
     legacy_cost = cost if cost not in {None, 0.0} else None
     return True, legacy_cost is not None, legacy_cost
 
@@ -137,9 +232,7 @@ def _finite_float(value: Any) -> float | None:
 def _trace_values(trials: list[Json], key: str) -> list[float]:
     values: list[float] = []
     for trial in trials:
-        trace = trial.get("trace")
-        if not isinstance(trace, dict):
-            continue
+        trace = trial["trace"]
         value = _finite_float(trace.get(key))
         if value is not None:
             values.append(value)
@@ -156,71 +249,13 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[min(index, len(ordered) - 1)]
 
 
-def run_summary(data: Json) -> Json:
-    """Summarize reliability and performance for one eval artifact."""
-    scored_trials = _scored_trials(data)
-    trials = [
-        trial
-        for trial in scored_trials
-        if trial.get("status") in {"pass", "fail"}
-        or (trial.get("status") == "error" and _failure_category(trial) == "agent")
-    ]
-    error_counts = dict.fromkeys(_FAILURE_CATEGORIES, 0)
-    for trial in scored_trials:
-        if trial.get("status") != "error":
-            continue
-        category = _failure_category(trial)
-        if category is not None:
-            error_counts[category] += 1
-    excluded_error_trials = sum(
-        trial.get("status") == "error" and _failure_category(trial) != "agent"
-        for trial in scored_trials
-    )
-    cohorts: dict[str, Json] = {}
-    for trial in trials:
-        case_id = _trial_case_id(trial)
-        group_id = _trial_group_id(trial, case_id=case_id)
-        cohort = cohorts.setdefault(
-            group_id,
-            {
-                "group_id": group_id,
-                "case_id": case_id,
-                "passed": 0,
-                "total": 0,
-            },
-        )
-        cohort["total"] += 1
-        cohort["passed"] += trial.get("status") == "pass"
-
-    cohort_values = list(cohorts.values())
-    per_cohort = [(cohort["passed"], cohort["total"]) for cohort in cohort_values]
-    return {
-        "pass_k_curve": pass_k_curve(per_cohort),
-        "pass_k_cohorts": cohort_values,
-        "eligible_agent_trials": sum(cohort["total"] for cohort in cohort_values),
-        "error_counts": error_counts,
-        "excluded_error_trials": excluded_error_trials,
-        "cost_latency": cost_latency(trials),
-    }
-
-
 def _failure_category(trial: Json) -> str | None:
+    return trial["failure"]["category"]
+
+
+def _failure_kind(trial: Json) -> Any:
     failure = trial.get("failure")
-    if not isinstance(failure, dict):
-        return None
-    category = failure.get("category")
-    return category if category in _FAILURE_CATEGORIES else None
-
-
-def _scored_trials(data: Json) -> list[Json]:
-    rows = data.get("trials")
-    if not isinstance(rows, list):
-        return []
-    return [trial for trial in rows if isinstance(trial, dict) and not is_smoke_trial(trial)]
-
-
-def _trial_group_id(trial: Json, *, case_id: str) -> str:
-    return str(trial.get("group_id") or case_id)
+    return failure.get("kind") if isinstance(failure, dict) else None
 
 
 def _trial_case_id(trial: Json) -> str:
@@ -229,4 +264,4 @@ def _trial_case_id(trial: Json) -> str:
     return str(case_id or trial.get("case_id") or trial.get("group_id") or "unknown")
 
 
-__all__ = ["cost_latency", "pass_hat_k", "pass_k_curve", "run_summary"]
+__all__ = ["derive_v1_aggregates", "derive_v1_summary"]

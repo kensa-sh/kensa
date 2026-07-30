@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
 from kensa._smoke import is_smoke_trial
-from kensa.errors import TrialFailure
+from kensa.results import RunResult, TrialResult
 from kensa.runtime import TrialMetadata
-from kensa.scoring import run_summary
 
 
 @dataclass
@@ -110,16 +110,6 @@ def upsert_trial(trials: list[TrialMetadata], metadata: TrialMetadata) -> None:
     trials.append(metadata)
 
 
-def load_trials(result_path: Path) -> list[TrialMetadata]:
-    payload = json.loads(result_path.read_text())
-    rows = payload.get("trials", []) if isinstance(payload, dict) else []
-    if not isinstance(rows, list):
-        raise ValueError(f"Kensa result artifact has invalid trials: {result_path}")
-    if not all(isinstance(row, dict) for row in rows):
-        raise ValueError(f"Kensa result artifact has invalid trial rows: {result_path}")
-    return [trial_from_dict(row) for row in rows]
-
-
 def write_run_artifacts(
     *,
     run_id: str,
@@ -129,17 +119,26 @@ def write_run_artifacts(
     complete: bool = True,
     interruption: dict[str, Any] | None = None,
 ) -> list[KensaAggregate]:
-    aggregates = aggregate_trials(trials)
+    ordered_trials = sorted(trials, key=trial_sort_key)
+    trial_payloads = [
+        TrialResult.model_validate_json(json.dumps(trial.to_dict(), allow_nan=False)).model_dump(
+            mode="json"
+        )
+        for trial in ordered_trials
+    ]
+    aggregates = aggregate_trials(ordered_trials)
     payload = {
+        "schema_version": "kensa.result.v1",
         "run_id": run_id,
         "complete": complete,
         "interruption": interruption,
-        "trials": [trial.to_dict() for trial in trials],
-        "aggregates": [aggregate.to_dict() for aggregate in aggregates],
+        "trials": trial_payloads,
+        "aggregates": derive_v1_aggregates(trial_payloads),
+        "summary": derive_v1_summary(trial_payloads),
     }
-    payload["summary"] = run_summary(payload)
-    write_json_atomic(result_path, payload)
-    _write_trace_artifact(run_id, trials, artifact_dir)
+    result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
+    _write_text_atomic(result_path, result.model_dump_json(indent=2))
+    _write_trace_artifact(run_id, ordered_trials, artifact_dir)
     return aggregates
 
 
@@ -182,39 +181,26 @@ def _trial_trace_record(run_id: str, trial: TrialMetadata) -> dict[str, Any]:
 
 
 def trial_from_dict(row: dict[str, Any]) -> TrialMetadata:
-    legacy_fields = {"error", "error_kind"} & row.keys()
-    if legacy_fields:
-        names = ", ".join(sorted(legacy_fields))
-        raise ValueError(f"Kensa trial contains removed legacy field(s): {names}")
-    if "failure" not in row:
-        raise ValueError("Kensa trial is missing required failure field")
-    case = row.get("case")
-    trace = row.get("trace")
-    judges = row.get("judges")
-    active_operation = row.get("active_operation")
-    failure_payload = row["failure"]
-    if failure_payload is not None and not isinstance(failure_payload, dict):
-        raise ValueError("Kensa trial failure must be an object or null")
-    failure = (
-        TrialFailure.model_validate(failure_payload) if isinstance(failure_payload, dict) else None
-    )
+    result = TrialResult.model_validate_json(json.dumps(row, allow_nan=False))
+    return trial_result_to_metadata(result)
+
+
+def trial_result_to_metadata(result: TrialResult) -> TrialMetadata:
     return TrialMetadata(
-        nodeid=str(row.get("nodeid", "")),
-        group_id=str(row.get("group_id", "")),
-        case_id=str(row.get("case_id", "default")),
-        trial_index=int(row.get("trial_index", 1)),
-        configured_trials=int(row.get("configured_trials", 1)),
-        status=str(row.get("status", "")),
-        case=case if isinstance(case, dict) else {},
-        output=row.get("output"),
-        failure=failure,
-        duration_ms=float(row.get("duration_ms", 0.0)),
-        trace=trace if isinstance(trace, dict) else {},
-        judges=[judge for judge in judges if isinstance(judge, dict)]
-        if isinstance(judges, list)
-        else [],
-        active_operation=active_operation if isinstance(active_operation, dict) else None,
-        smoke=is_smoke_trial(row),
+        nodeid=result.nodeid,
+        group_id=result.group_id,
+        case_id=result.case_id,
+        trial_index=result.trial_index,
+        configured_trials=result.configured_trials,
+        status=result.status,
+        case=result.case,
+        output=result.output,
+        failure=result.failure,
+        duration_ms=result.duration_ms,
+        trace=result.trace,
+        judges=list(result.judges),
+        active_operation=result.active_operation,
+        smoke=is_smoke_trial(result.model_dump(mode="json")),
     )
 
 
@@ -240,8 +226,8 @@ def _write_text_atomic(path: Path, content: str) -> None:
 __all__ = [
     "KensaAggregate",
     "aggregate_trials",
-    "load_trials",
     "trial_from_dict",
+    "trial_result_to_metadata",
     "trial_sort_key",
     "upsert_trial",
     "write_json_atomic",

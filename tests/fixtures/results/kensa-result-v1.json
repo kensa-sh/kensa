@@ -1,0 +1,166 @@
+{
+  "schema_version": "kensa.result.v1",
+  "run_id": "compatibility-v1",
+  "complete": true,
+  "interruption": null,
+  "trials": [
+    {
+      "nodeid": "tests/evals/test_agent.py::test_agent[case-a-trial1]",
+      "group_id": "tests/evals/test_agent.py::test_agent[case-a]",
+      "case_id": "case-a",
+      "trial_index": 1,
+      "configured_trials": 1,
+      "status": "pass",
+      "case": {
+        "id": "case-a",
+        "input": [
+          "hello"
+        ]
+      },
+      "output": {
+        "answer": [
+          "world"
+        ]
+      },
+      "failure": null,
+      "duration_ms": 12.5,
+      "trace": {
+        "spans": [
+          {
+            "span_id": "span-1"
+          }
+        ],
+        "agent_runs": [
+          {
+            "run_id": "external-run"
+          }
+        ],
+        "cost_usd": 0.1,
+        "cost_available": true,
+        "llm_turns": 1
+      },
+      "judges": [
+        {
+          "passed": true,
+          "evidence": [
+            "grounded"
+          ]
+        }
+      ],
+      "active_operation": {
+        "name": "respond",
+        "kind": "llm"
+      },
+      "smoke": false
+    }
+  ],
+  "aggregates": [
+    {
+      "group_id": "tests/evals/test_agent.py::test_agent[case-a]",
+      "case_id": "case-a",
+      "configured_trials": 1,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 0,
+      "partial": false,
+      "verdict": "pass",
+      "trials": [
+        {
+          "nodeid": "tests/evals/test_agent.py::test_agent[case-a-trial1]",
+          "group_id": "tests/evals/test_agent.py::test_agent[case-a]",
+          "case_id": "case-a",
+          "trial_index": 1,
+          "configured_trials": 1,
+          "status": "pass",
+          "case": {
+            "id": "case-a",
+            "input": [
+              "hello"
+            ]
+          },
+          "output": {
+            "answer": [
+              "world"
+            ]
+          },
+          "failure": null,
+          "duration_ms": 12.5,
+          "trace": {
+            "spans": [
+              {
+                "span_id": "span-1"
+              }
+            ],
+            "agent_runs": [
+              {
+                "run_id": "external-run"
+              }
+            ],
+            "cost_usd": 0.1,
+            "cost_available": true,
+            "llm_turns": 1
+          },
+          "judges": [
+            {
+              "passed": true,
+              "evidence": [
+                "grounded"
+              ]
+            }
+          ],
+          "active_operation": {
+            "name": "respond",
+            "kind": "llm"
+          },
+          "smoke": false
+        }
+      ],
+      "smoke": false
+    }
+  ],
+  "summary": {
+    "pass_k_curve": [
+      {
+        "k": 1,
+        "value": 1.0,
+        "cohorts": 1
+      }
+    ],
+    "pass_k_cohorts": [
+      {
+        "group_id": "tests/evals/test_agent.py::test_agent[case-a]",
+        "case_id": "case-a",
+        "passed": 1,
+        "total": 1
+      }
+    ],
+    "eligible_agent_trials": 1,
+    "error_counts": {
+      "agent": 0,
+      "simulator": 0,
+      "judge": 0,
+      "configuration": 0,
+      "infrastructure": 0,
+      "harness": 0,
+      "unknown": 0
+    },
+    "excluded_error_trials": 0,
+    "cost_latency": {
+      "latency_p50_ms": 12.5,
+      "latency_p95_ms": 12.5,
+      "latency_mean_ms": 12.5,
+      "total_cost_usd": 0.1,
+      "known_cost_usd": 0.1,
+      "cost_per_pass_usd": 0.1,
+      "mean_llm_turns": 1.0,
+      "cost_known_trials": 1,
+      "cost_relevant_trials": 1,
+      "cost_coverage": 1.0,
+      "has_cost": true,
+      "cost_complete": true,
+      "cost_partial": false
+    }
+  }
+}

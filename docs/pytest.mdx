@@ -231,6 +231,20 @@ Cost totals appear only when at least one cost-relevant trial exists and all are
 pass also requires a pass. Otherwise they are `null`; `known_cost_usd` and `cost_coverage` report
 partial data. JSON artifacts expose these metrics under `summary`.
 
+### Versioned result artifacts
+
+All result artifacts use the strict `kensa.result.v1` schema, including initial and interrupted
+snapshots. Load them through the public API:
+
+```python
+from kensa.results import RunResult, load_run_result
+
+result: RunResult = load_run_result(".kensa/results/run-123.json")
+```
+
+Invalid or unsupported artifacts raise a path-specific `ValueError`; the loader never returns
+partial data or accepts legacy schemas.
+
 ## Plugin options
 
 The plugin adds these pytest options:

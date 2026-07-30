@@ -38,17 +38,19 @@ source of truth. Do not add revision-mismatch analysis or reconstruct the source
 
 For each selected result:
 
-1. Validate the JSON and the fields needed for the diagnosis. The stable contract includes
+1. Load the `kensa.result.v1` artifact with `kensa.results.load_run_result()`, which rejects invalid
+   or unsupported data. On `ValueError`, include the path-specific cause and report the diagnosis
+   as inconclusive.
+2. Use the stable contract fields:
    `complete`, `interruption`, `aggregates`, and trial records with `status`, structured `failure`,
    `output`, `judges`, and embedded trace metadata. Passing and provisional trials require
    `failure: null`; failed, errored, and skipped trials require one failure with `category`, `kind`,
-   `message`, and JSON `evidence`. If JSON or a required field is malformed, name the invalid
-   contract field and report the diagnosis as inconclusive.
-2. Record the run ID and whether the run is complete, interrupted, failed, flaky, or errored.
-3. Inventory every case and trial, including status, failure category and kind, failure message and
+   `message`, and JSON `evidence`.
+3. Record the run ID and whether the run is complete, interrupted, failed, flaky, or errored.
+4. Inventory every case and trial, including status, failure category and kind, failure message and
    evidence, output, judge failures, and available embedded metadata. An errored trial with no
    output supports only claims based on its structured `failure`.
-4. For an incomplete or interrupted run, diagnose available trials, state the coverage limit, and
+5. For an incomplete or interrupted run, diagnose available trials, state the coverage limit, and
    do not treat partial aggregates as a complete verdict.
 
 ## Analyze Failure Modes

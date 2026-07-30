@@ -13,7 +13,6 @@ from typing import Any, cast
 import pytest
 
 from kensa import cli, watchdog
-from kensa.artifacts import load_trials
 from kensa.cli import main
 from kensa.runtime import ActiveOperation
 from kensa.watchdog import (
@@ -772,6 +771,7 @@ def test_external(case, external_agent):
     payload = json.loads(capsys.readouterr().out)
     artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
     trials = artifact["trials"]
+    assert artifact["schema_version"] == "kensa.result.v1"
     assert [trial["status"] for trial in trials] == ["pass", "error"]
     assert trials[1]["failure"]["category"] == "agent"
     assert trials[1]["failure"]["kind"] == "timeout"
@@ -1162,7 +1162,7 @@ def test_terminal_timeout(case):
     assert "Artifact: .kensa/results/" in captured.out
 
 
-def test_watchdog_rejects_invalid_control_and_artifact(
+def test_watchdog_rejects_invalid_control(
     tmp_path: Path,
 ) -> None:
     control_path = tmp_path / "control.json"
@@ -1173,11 +1173,6 @@ def test_watchdog_rejects_invalid_control_and_artifact(
         watchdog._trial_phase({})
     with pytest.raises(ValueError, match="active operation kind"):
         watchdog._operation_kind("invalid")
-
-    result_path = tmp_path / "result.json"
-    result_path.write_text('{"trials": {}}')
-    with pytest.raises(ValueError, match="invalid trials"):
-        load_trials(result_path)
 
 
 def test_worker_control_paths_are_isolated_and_removed(tmp_path: Path) -> None:
