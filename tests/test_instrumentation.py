@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,85 @@ def test_instrument_exports_finished_otel_spans_to_jsonl(tmp_path: Path) -> None
     assert "instrumentation_scope" in rows[-1]
     assert rows[-1]["events"] == []
     assert rows[-1]["links"] == []
+
+
+def test_record_tool_call_captures_precomputed_and_in_context_results(tmp_path: Path) -> None:
+    kensa.instrument(tmp_path)
+    arguments = {"customer": {"id": "cus_1"}}
+    result = {"found": True}
+
+    with record_tool_call("lookup_customer", arguments=arguments) as tool_call:
+        tool_call.set_result(result)
+        arguments["customer"]["id"] = "mutated"
+        result["found"] = False
+    with record_tool_call("explicit_null", arguments=None, result=None):
+        pass
+
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    captured = rows[-2]["attributes"]
+    explicit_null = rows[-1]["attributes"]
+    assert json.loads(captured["kensa.tool.args"]) == {"customer": {"id": "cus_1"}}
+    assert json.loads(captured["kensa.tool.result"]) == {"found": True}
+    assert json.loads(explicit_null["kensa.tool.args"]) is None
+    assert json.loads(explicit_null["kensa.tool.result"]) is None
+
+
+def test_record_tool_call_rejects_duplicate_result_capture(tmp_path: Path) -> None:
+    kensa.instrument(tmp_path)
+
+    with (
+        record_tool_call("precomputed", result={"first": True}) as tool_call,
+        pytest.raises(RuntimeError, match="already recorded"),
+    ):
+        tool_call.set_result({"second": True})
+    with record_tool_call("in_context") as tool_call:
+        tool_call.set_result({"first": True})
+        with pytest.raises(RuntimeError, match="already recorded"):
+            tool_call.set_result({"second": True})
+
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    assert json.loads(rows[-2]["attributes"]["kensa.tool.result"]) == {"first": True}
+    assert json.loads(rows[-1]["attributes"]["kensa.tool.result"]) == {"first": True}
+
+
+@pytest.mark.parametrize(
+    ("boundary", "payload"),
+    [
+        ("arguments", object()),
+        ("arguments", {"value": math.nan}),
+        ("result", object()),
+        ("result", {"value": math.inf}),
+    ],
+)
+def test_record_tool_call_rejects_invalid_initial_payloads(
+    boundary: str,
+    payload: Any,
+) -> None:
+    kwargs = {boundary: payload}
+
+    with (
+        pytest.raises(TypeError, match=boundary),
+        record_tool_call("invalid", **kwargs),
+    ):
+        pytest.fail("invalid payload entered the tool body")
+
+
+def test_record_tool_call_rejects_invalid_set_result_without_lossy_evidence(
+    tmp_path: Path,
+) -> None:
+    kensa.instrument(tmp_path)
+
+    def capture_invalid_result() -> None:
+        with record_tool_call("invalid_result", arguments={"safe": True}) as tool_call:
+            tool_call.set_result(object())
+
+    with pytest.raises(TypeError, match="set_result"):
+        capture_invalid_result()
+
+    row = json.loads((tmp_path / "spans.jsonl").read_text().splitlines()[-1])
+    assert row["status"] == "error"
+    assert "kensa.tool.result" not in row["attributes"]
+    assert "object at" not in json.dumps(row["attributes"])
 
 
 def test_record_llm_call_exports_llm_span(tmp_path: Path) -> None:

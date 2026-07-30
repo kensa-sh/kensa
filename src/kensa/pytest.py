@@ -25,7 +25,7 @@ from kensa.conversation import (
 )
 from kensa.errors import FailureCategory, KensaEvalError, KensaTimeoutError, TrialFailure
 from kensa.judge import JudgeResult, judge
-from kensa.runtime import KensaTrace
+from kensa.runtime import KensaTrace, ToolCallEvidence
 from kensa.target import (
     AgentEvent,
     AgentRunEvidence,
@@ -65,6 +65,7 @@ __all__ = [
     "Simulator",
     "StateObservation",
     "Termination",
+    "ToolCallEvidence",
     "TraceReference",
     "TrialFailure",
     "attach_agent_run",
