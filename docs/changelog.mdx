@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.19.1
+
+Tool-call traces now expose structured evidence for precise assertions over arguments, results, ordering, and execution status.
+
+- `ToolCallEvidence` provides immutable normalized records with sequence, name, arguments, result, capture-presence flags, status, span ID, and duration.
+- `result.trace.tools.matching(...)` and `.called(...)` filter calls by recursive argument and result subsets plus status, while existing name assertions remain available.
+- `record_tool_call()` accepts strict JSON arguments and results, supports capturing a result inside the tool context, and persists normalized `tool_calls` alongside the existing `tools` list.
+
+[View the 0.19.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.19.1).
+
 ## 0.19.0
 
 Run-result artifacts now have a strict, versioned public contract for reliable downstream tooling.
