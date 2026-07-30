@@ -11,11 +11,19 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Never, Protocol, cast
 
 from opentelemetry import trace
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from kensa._serialization import json_value
 from kensa.case import KensaCase, KensaMessage
-from kensa.errors import KensaCaseError
+from kensa.errors import KensaCaseError, KensaEvalError
 from kensa.llm import (
     LLMConfigurationError,
     LLMModelInput,
@@ -101,6 +109,38 @@ class CaseResult(BaseModel):
             trace = KensaTrace()
             object.__setattr__(self, "_kensa_trace", trace)
             return trace
+
+
+class SimulatorValidationResult(BaseModel):
+    """One deterministic verdict on a completed simulated conversation."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        allow_inf_nan=False,
+    )
+
+    passed: bool
+    reason: str | None = None
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
+
+    _validate_reason = field_validator("reason")(_nonblank)
+
+    @field_validator("evidence")
+    @classmethod
+    def _isolate_evidence(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return deepcopy(value)
+
+    @model_validator(mode="after")
+    def _require_failed_reason(self) -> SimulatorValidationResult:
+        if not self.passed and self.reason is None:
+            raise ValueError("failed validation requires a reason")
+        return self
+
+
+class SimulatorResultValidator(Protocol):
+    def __call__(self, result: CaseResult) -> SimulatorValidationResult: ...
 
 
 class ConversationError(RuntimeError):
@@ -241,11 +281,13 @@ def _run_conversation(
     agent: ConversationAgent,
     *,
     simulator: Simulator | None,
+    simulator_validator: SimulatorResultValidator | None,
     max_turns: int | None,
     starts_with: Literal["simulator", "agent"] | None,
 ) -> CaseResult | Awaitable[CaseResult]:
     """Execute direct or simulated conversation semantics for one case."""
 
+    _validate_simulator_validator_entry(simulator, simulator_validator)
     state = _State(messages=_initial_messages(case))
     _publish_snapshot(state)
     agent_respond = _responder(agent, "agent")
@@ -286,6 +328,99 @@ def _run_conversation(
         max_turns=bound,
         starts_with=first,
     )
+
+
+def _validate_simulator_validator_entry(
+    simulator: Simulator | None,
+    simulator_validator: SimulatorResultValidator | None,
+) -> None:
+    if simulator_validator is None:
+        return
+    if simulator is None:
+        raise KensaCaseError("simulator_validator requires a simulator")
+    if not callable(simulator_validator):
+        raise KensaCaseError("simulator_validator must be callable")
+    call = type(simulator_validator).__call__
+    if inspect.iscoroutinefunction(simulator_validator) or inspect.iscoroutinefunction(call):
+        raise KensaCaseError("simulator_validator must be synchronous")
+
+
+def _validate_simulator_result(
+    result: CaseResult,
+    simulator_validator: SimulatorResultValidator,
+) -> CaseResult:
+    snapshot = result.model_copy(deep=True)
+    object.__setattr__(snapshot, "_kensa_trace", deepcopy(result.trace))
+    try:
+        validation = simulator_validator(snapshot)
+    except ValidationError as exc:
+        if exc.title == SimulatorValidationResult.__name__:
+            _raise_validator_contract(str(exc), exc)
+        _raise_validator_execution(exc)
+    except Exception as exc:
+        _raise_validator_execution(exc)
+
+    if inspect.isawaitable(validation):
+        if inspect.iscoroutine(validation):
+            validation.close()
+        _raise_validator_contract(
+            "simulator_validator must return SimulatorValidationResult synchronously"
+        )
+    if not isinstance(validation, SimulatorValidationResult):
+        _raise_validator_contract(
+            "simulator_validator must return SimulatorValidationResult, "
+            f"not {type(validation).__name__}"
+        )
+    try:
+        isolated = SimulatorValidationResult.model_validate(
+            {
+                "passed": validation.passed,
+                "reason": validation.reason,
+                "evidence": validation.evidence,
+            }
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        _raise_validator_contract(str(exc), exc)
+
+    if isolated.passed:
+        return result
+    reason = cast(str, isolated.reason)
+    raise KensaEvalError(
+        reason,
+        category="simulator",
+        kind="result_validation",
+        evidence={
+            "stage": "post_conversation",
+            "message_count": len(result.messages),
+            "termination": result.termination.model_dump(mode="json"),
+            "details": isolated.evidence,
+        },
+    )
+
+
+def _raise_validator_contract(message: str, cause: Exception | None = None) -> Never:
+    error = KensaEvalError(
+        f"Simulator validator contract failure: {message}",
+        category="harness",
+        kind="simulator_validator_contract",
+        evidence=({"exception_type": type(cause).__name__} if cause is not None else {}),
+    )
+    if cause is None:
+        raise error from None
+    raise error from cause
+
+
+def _raise_validator_execution(cause: Exception) -> Never:
+    detail = str(cause).strip()
+    message = "Simulator validator execution failure"
+    if detail:
+        message = f"{message}: {detail}"
+    raise KensaEvalError(
+        message,
+        category="harness",
+        kind="simulator_validator_execution",
+        evidence={"exception_type": type(cause).__name__},
+    ) from cause
 
 
 async def _run_simulated(
@@ -550,5 +685,7 @@ __all__ = [
     "ConversationResponse",
     "LLMSimulator",
     "Simulator",
+    "SimulatorResultValidator",
+    "SimulatorValidationResult",
     "Termination",
 ]

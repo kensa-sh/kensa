@@ -208,6 +208,227 @@ def _assistant_tool_message(*tool_calls: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("xdist", [False, True])
+def test_simulator_result_validation_failure_preserves_final_artifacts_and_scoring(
+    pytester: pytest.Pytester,
+    xdist: bool,
+) -> None:
+    pytester.makepyfile(
+        test_eval=f"""
+import json
+from pathlib import Path
+
+import pytest
+from kensa.pytest import (
+    ConversationResponse,
+    SimulatorValidationResult,
+    kensa_case,
+)
+
+
+class Agent:
+    def respond(self, messages):
+        return ConversationResponse(
+            content="final answer",
+            output={{"status": "complete"}},
+            termination_reason="resolved",
+        )
+
+
+class Simulator:
+    def respond(self, messages):
+        return ConversationResponse(content="unused")
+
+
+DETAILS = {{"missing_statements": ["required statement"]}}
+VALIDATION = SimulatorValidationResult(
+    passed=False,
+    reason="Simulator omitted required scenario statements.",
+    evidence=DETAILS,
+)
+DETAILS["missing_statements"].append("mutated alias")
+
+
+def validate(result):
+    Path("validator-calls.txt").open("a").write("called\\n")
+    assert result.output == {{"status": "complete"}}
+    assert result.termination.reason == "resolved"
+    assert any(span.name == "kensa.pytest.trial" for span in result.trace.spans)
+    if {not xdist!r}:
+        artifact = next(Path(".kensa/results").glob("*.json"))
+        snapshot = json.loads(artifact.read_text())
+        trial = snapshot["trials"][0]
+        assert trial["status"] == "provisional"
+        assert trial["output"]["termination"] == {{"source": "agent", "reason": "resolved"}}
+        assert any(
+            span["name"] == "kensa.conversation.respond"
+            for span in trial["trace"]["spans"]
+        )
+    return VALIDATION
+
+
+@pytest.mark.asyncio
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="validation", input="hello")])
+async def test_validation(case):
+    await case.run(
+        Agent(),
+        simulator=Simulator(),
+        simulator_validator=validate,
+        starts_with="agent",
+    )
+"""
+    )
+
+    if xdist:
+        result = _run_kensa_xdist(
+            pytester,
+            "-q",
+            "-n",
+            "2",
+            "--dist=load",
+            workers=2,
+        )
+    else:
+        result = _run_kensa_xdist(pytester, "-q", workers=1)
+
+    result.assert_outcomes(failed=1)
+    assert (Path(str(pytester.path)) / "validator-calls.txt").read_text().splitlines() == ["called"]
+    artifact_path = Path(str(pytester.path)) / ".kensa" / "results" / "test-run.json"
+    artifact = json.loads(artifact_path.read_text())
+    trial = artifact["trials"][0]
+    expected_output = {
+        "messages": [{"role": "assistant", "content": "final answer"}],
+        "output": {"status": "complete"},
+        "termination": {"source": "agent", "reason": "resolved"},
+    }
+    expected_failure = {
+        "category": "simulator",
+        "kind": "result_validation",
+        "message": "Simulator omitted required scenario statements.",
+        "evidence": {
+            "stage": "post_conversation",
+            "message_count": 1,
+            "termination": {"source": "agent", "reason": "resolved"},
+            "details": {"missing_statements": ["required statement"]},
+        },
+    }
+    assert trial["status"] == "error"
+    assert trial["output"] == expected_output
+    assert trial["failure"] == expected_failure
+    assert any(span["name"] == "kensa.pytest.trial" for span in trial["trace"]["spans"])
+    assert any(span["name"] == "kensa.conversation.respond" for span in trial["trace"]["spans"])
+    assert artifact["aggregates"][0]["verdict"] == "error"
+    assert artifact["summary"]["eligible_agent_trials"] == 0
+    assert artifact["summary"]["excluded_error_trials"] == 1
+    assert artifact["summary"]["error_counts"]["simulator"] == 1
+    assert artifact["summary"]["pass_k_curve"] == []
+    assert artifact["summary"]["cost_latency"]["latency_mean_ms"] == 0.0
+    assert artifact["summary"]["cost_latency"]["known_cost_usd"] == 0.0
+
+    trace_path = next(
+        (Path(str(pytester.path)) / ".kensa" / "traces" / "runs").glob("*/trials.jsonl")
+    )
+    trace_record = json.loads(trace_path.read_text().splitlines()[0])
+    assert trace_record["output"] == expected_output
+    assert trace_record["failure"] == expected_failure
+    assert trace_record["spans"] == trial["trace"]["spans"]
+
+
+def test_simulator_validator_contract_and_execution_failures_are_harness_owned(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import (
+    ConversationResponse,
+    KensaEvalError,
+    SimulatorValidationResult,
+    kensa_case,
+)
+
+
+class Agent:
+    def respond(self, messages):
+        return ConversationResponse(content="final", termination_reason="done")
+
+
+class Simulator:
+    def respond(self, messages):
+        return ConversationResponse(content="unused")
+
+
+def invalid_return(result):
+    return True
+
+
+def invalid_model(result):
+    return SimulatorValidationResult(passed=False, reason=" ")
+
+
+def assertion(result):
+    raise AssertionError("application assertion")
+
+
+def ordinary(result):
+    raise RuntimeError("application failure")
+
+
+def explicit(result):
+    raise KensaEvalError("application attribution", category="agent", kind="assertion")
+
+
+@pytest.mark.asyncio
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize(
+    ("case", "validator"),
+    [
+        (kensa_case(id="invalid_return", input="x"), invalid_return),
+        (kensa_case(id="invalid_model", input="x"), invalid_model),
+        (kensa_case(id="assertion", input="x"), assertion),
+        (kensa_case(id="ordinary", input="x"), ordinary),
+        (kensa_case(id="explicit", input="x"), explicit),
+    ],
+)
+async def test_validation_ownership(case, validator):
+    await case.run(
+        Agent(),
+        simulator=Simulator(),
+        simulator_validator=validator,
+        starts_with="agent",
+    )
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(failed=5)
+    artifact_path = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    artifact = json.loads(artifact_path.read_text())
+    trials = {trial["case_id"]: trial for trial in artifact["trials"]}
+    assert set(trials) == {
+        "invalid_return",
+        "invalid_model",
+        "assertion",
+        "ordinary",
+        "explicit",
+    }
+    for case_id in ("invalid_return", "invalid_model"):
+        assert trials[case_id]["failure"]["category"] == "harness"
+        assert trials[case_id]["failure"]["kind"] == "simulator_validator_contract"
+    for case_id in ("assertion", "ordinary", "explicit"):
+        assert trials[case_id]["failure"]["category"] == "harness"
+        assert trials[case_id]["failure"]["kind"] == "simulator_validator_execution"
+    for trial in trials.values():
+        assert trial["status"] == "error"
+        assert trial["output"]["messages"] == [{"role": "assistant", "content": "final"}]
+        assert trial["output"]["termination"] == {"source": "agent", "reason": "done"}
+    assert artifact["summary"]["eligible_agent_trials"] == 0
+    assert artifact["summary"]["excluded_error_trials"] == 5
+    assert artifact["summary"]["error_counts"]["harness"] == 5
+
+
+@pytest.mark.parametrize("xdist", [False, True])
 def test_external_evidence_survives_result_and_trace_artifacts(
     pytester: pytest.Pytester,
     xdist: bool,

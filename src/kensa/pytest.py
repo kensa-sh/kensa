@@ -21,6 +21,8 @@ from kensa.conversation import (
     ConversationResponse,
     LLMSimulator,
     Simulator,
+    SimulatorResultValidator,
+    SimulatorValidationResult,
     Termination,
 )
 from kensa.errors import FailureCategory, KensaEvalError, KensaTimeoutError, TrialFailure
@@ -63,6 +65,8 @@ __all__ = [
     "KensaUserMessage",
     "LLMSimulator",
     "Simulator",
+    "SimulatorResultValidator",
+    "SimulatorValidationResult",
     "StateObservation",
     "Termination",
     "TraceReference",

@@ -139,6 +139,63 @@ Any object with `respond(messages)` returning `ConversationResponse` can be a cu
 Kensa assigns generated roles, keeps agent `output` separate from visible `content`, excludes private
 system and tool context from simulator history, and never retries a responder.
 
+### Validate the completed simulation
+
+Use `simulator_validator` for a deterministic postcondition on the completed simulated
+conversation:
+
+```python
+from kensa.pytest import CaseResult, SimulatorValidationResult
+
+
+def validate_scenario(result: CaseResult) -> SimulatorValidationResult:
+    required = "I still need the order ID."
+    transcript = "\n".join(
+        str(message.get("content") or "")
+        for message in result.messages
+    )
+    missing = [] if required in transcript else [required]
+    return SimulatorValidationResult(
+        passed=not missing,
+        reason=(
+            None
+            if not missing
+            else "Simulator omitted required scenario statements."
+        ),
+        evidence={"missing_statements": missing},
+    )
+
+
+async def test_refund_dialogue(case, kensa_run, simulator):
+    result = await case.run(
+        kensa_run,
+        simulator=simulator,
+        simulator_validator=validate_scenario,
+        max_turns=6,
+    )
+```
+
+Kensa calls the validator once after normal simulator, agent, or `max_turns` termination. The
+callback receives an isolated `CaseResult` containing the final messages, output, termination, and
+complete trace. Mutation inside the callback cannot change the returned result or trial artifact.
+Responder failures, cancellations, and process interruptions skip validation.
+
+Validators must be synchronous, deterministic callables. Kensa does not await, retry, invoke per
+turn, or treat them as LLM judges. `SimulatorValidationResult` is strict and frozen. A failed result
+requires a nonblank `reason`; `evidence` accepts only finite JSON values and is copied when the
+result is constructed.
+
+A failed predicate is always recorded as `simulator/result_validation`. Kensa adds
+`stage`, `message_count`, and final `termination` around the application details without copying
+the transcript into failure evidence. Invalid return values and invalid validation results are
+`harness/simulator_validator_contract`; exceptions from validator code, including assertions and
+application-raised `KensaEvalError` values, are `harness/simulator_validator_execution`.
+Applications cannot choose those ownership categories.
+
+Simulator validation failures remain strict errors: they produce aggregate `error`, fail pytest,
+and make `kensa eval` exit unsuccessfully. They are excluded from agent reliability, latency, and
+cost populations, with their count reported under simulator and excluded errors.
+
 ## Trials and verdicts
 
 Each case expands into one pytest item per trial:

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         ConversationAgent,
         ConversationResponse,
         Simulator,
+        SimulatorResultValidator,
     )
 
 _MISSING = object()
@@ -144,6 +145,7 @@ class KensaCase:
         agent: ConversationAgent,
         *,
         simulator: Simulator,
+        simulator_validator: SimulatorResultValidator | None = None,
         max_turns: int | None = None,
         starts_with: Literal["simulator", "agent"] | None = None,
     ) -> Awaitable[CaseResult]: ...
@@ -183,26 +185,34 @@ class KensaCase:
         agent: ConversationAgent,
         *,
         simulator: Simulator | None = None,
+        simulator_validator: SimulatorResultValidator | None = None,
         max_turns: int | None = None,
         starts_with: Literal["simulator", "agent"] | None = None,
     ) -> CaseResult | Awaitable[CaseResult]:
         """Run this case through one conversation agent and optional simulator."""
 
-        from kensa.conversation import _run_conversation
+        from kensa.conversation import _run_conversation, _validate_simulator_result
 
         def _run() -> CaseResult | Awaitable[CaseResult]:
             return _run_conversation(
                 self,
                 agent,
                 simulator=simulator,
+                simulator_validator=simulator_validator,
                 max_turns=max_turns,
                 starts_with=starts_with,
             )
 
         runtime = current_runtime()
-        if runtime is not None:
-            return runtime.run_case(self, _run)
-        return _run()
+        result = runtime.run_case(self, _run) if runtime is not None else _run()
+        if simulator_validator is None:
+            return result
+
+        async def _validate_result() -> CaseResult:
+            value = await cast("Awaitable[CaseResult]", result)
+            return _validate_simulator_result(value, simulator_validator)
+
+        return _validate_result()
 
     def __repr__(self) -> str:
         return self.id

@@ -20,9 +20,18 @@ from kensa.conversation import (
     ConversationResponse,
     LLMSimulator,
     Simulator,
+    SimulatorResultValidator,
+    SimulatorValidationResult,
     Termination,
 )
+from kensa.errors import KensaEvalError
 from kensa.llm import LLMConfigurationError, LLMProviderError, LLMResult
+from kensa.pytest import (
+    SimulatorResultValidator as PublicSimulatorResultValidator,
+)
+from kensa.pytest import (
+    SimulatorValidationResult as PublicSimulatorValidationResult,
+)
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
 
 
@@ -67,6 +76,9 @@ if TYPE_CHECKING:
         def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
             return ConversationResponse(termination_reason="done")
 
+    def _static_validator(result: CaseResult) -> SimulatorValidationResult:
+        return SimulatorValidationResult(passed=bool(result.termination.reason))
+
     _static_case = kensa_case(id="typing", input="x")
     assert_type(_static_case.run(_StaticSyncAgent()), CaseResult)
     assert_type(_static_case.run(_StaticAsyncAgent()), Awaitable[CaseResult])
@@ -75,8 +87,17 @@ if TYPE_CHECKING:
         CaseResult | Awaitable[CaseResult],
     )
     assert_type(
-        _static_case.run(_StaticSyncAgent(), simulator=_StaticSimulator()),
+        _static_case.run(
+            _StaticSyncAgent(),
+            simulator=_StaticSimulator(),
+            simulator_validator=_static_validator,
+        ),
         Awaitable[CaseResult],
+    )
+    _static_validator_protocol: SimulatorResultValidator = _static_validator
+    _static_case.run(  # ty: ignore[no-matching-overload]
+        _StaticSyncAgent(),
+        simulator_validator=_static_validator_protocol,
     )
 
 
@@ -88,9 +109,13 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         "ConversationResponse",
         "LLMSimulator",
         "Simulator",
+        "SimulatorResultValidator",
+        "SimulatorValidationResult",
         "Termination",
     ]
     assert ConversationAgent is not Simulator
+    assert PublicSimulatorResultValidator is SimulatorResultValidator
+    assert PublicSimulatorValidationResult is SimulatorValidationResult
     assert "openai" not in inspect.getsource(conversation).lower()
     assert "anthropic" not in inspect.getsource(conversation).lower()
 
@@ -180,6 +205,41 @@ def test_public_conversation_contract_is_minimal_and_provider_neutral() -> None:
         ConversationResponse(termination_reason="\t")
     with pytest.raises(ValidationError):
         Termination(source="engine", reason=" ")
+
+
+def test_simulator_validation_result_is_strict_frozen_and_isolated() -> None:
+    source: dict[str, Any] = {"nested": [1]}
+    result = SimulatorValidationResult(
+        passed=False,
+        reason="Required statement was missing.",
+        evidence=source,
+    )
+
+    assert set(SimulatorValidationResult.model_fields) == {
+        "passed",
+        "reason",
+        "evidence",
+    }
+    assert result.evidence == {"nested": [1]}
+    source["nested"].append(2)
+    assert result.evidence == {"nested": [1]}
+    with pytest.raises(ValidationError, match="frozen"):
+        cast(Any, result).passed = True
+
+    assert SimulatorValidationResult(passed=True).reason is None
+    assert SimulatorValidationResult(passed=True, reason="Optional context.").passed
+    for values in (
+        {"passed": 1},
+        {"passed": False, "reason": None},
+        {"passed": False, "reason": " "},
+        {"passed": True, "reason": "\t"},
+        {"passed": True, "unknown": "field"},
+        {"passed": True, "evidence": {"value": object()}},
+        {"passed": True, "evidence": {"value": math.nan}},
+        {"passed": True, "evidence": {"value": [math.inf]}},
+    ):
+        with pytest.raises(ValidationError):
+            SimulatorValidationResult.model_validate(values)
 
 
 @pytest.mark.parametrize(
@@ -765,6 +825,354 @@ async def test_simulator_cancellation_propagates_without_calling_agent() -> None
 
     assert simulator.calls == 1
     assert agent.calls == 0
+
+
+@pytest.mark.parametrize(
+    "validator",
+    [
+        object(),
+        (lambda result: SimulatorValidationResult(passed=True)),
+    ],
+)
+def test_simulator_validator_entry_contract_precedes_responders(validator: Any) -> None:
+    agent = ScriptedResponder(ConversationResponse(termination_reason="done"))
+    simulator = ScriptedResponder(ConversationResponse(termination_reason="done"))
+
+    if callable(validator):
+        with pytest.raises(KensaCaseError, match="requires a simulator"):
+            kensa_case(id="validator_without_simulator", input="x").run(  # ty: ignore[no-matching-overload]
+                agent,
+                simulator_validator=validator,
+            )
+    else:
+        with pytest.raises(KensaCaseError, match="callable"):
+            kensa_case(id="invalid_validator", input="x").run(
+                agent,
+                simulator=simulator,
+                simulator_validator=validator,
+            )
+
+    assert agent.calls == 0
+    assert simulator.calls == 0
+
+
+@pytest.mark.parametrize("as_callable_object", [False, True])
+def test_async_simulator_validators_are_rejected_before_responders(
+    as_callable_object: bool,
+) -> None:
+    async def validator(result: CaseResult) -> SimulatorValidationResult:
+        return SimulatorValidationResult(passed=bool(result.messages))
+
+    class AsyncValidator:
+        async def __call__(self, result: CaseResult) -> SimulatorValidationResult:
+            return SimulatorValidationResult(passed=bool(result.messages))
+
+    agent = ScriptedResponder(ConversationResponse(termination_reason="done"))
+    simulator = ScriptedResponder(ConversationResponse(termination_reason="done"))
+
+    with pytest.raises(KensaCaseError, match="synchronous"):
+        kensa_case(id="async_validator", input="x").run(
+            agent,
+            simulator=simulator,
+            simulator_validator=cast(
+                Any,
+                AsyncValidator() if as_callable_object else validator,
+            ),
+        )
+
+    assert agent.calls == 0
+    assert simulator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_simulator_validator_runs_once_for_each_normal_termination() -> None:
+    scenarios = [
+        (
+            ScriptedResponder(ConversationResponse(termination_reason="agent_done")),
+            ScriptedResponder(ConversationResponse(content="unused")),
+            "agent",
+            2,
+            Termination(source="agent", reason="agent_done"),
+        ),
+        (
+            ScriptedResponder(ConversationResponse(content="unused")),
+            ScriptedResponder(ConversationResponse(termination_reason="simulator_done")),
+            "simulator",
+            2,
+            Termination(source="simulator", reason="simulator_done"),
+        ),
+        (
+            ScriptedResponder(ConversationResponse(content="final")),
+            ScriptedResponder(ConversationResponse(content="request")),
+            "simulator",
+            1,
+            Termination(source="engine", reason="max_turns"),
+        ),
+    ]
+
+    def validator_for(observed: list[CaseResult]) -> SimulatorResultValidator:
+        def validator(result: CaseResult) -> SimulatorValidationResult:
+            observed.append(result)
+            return SimulatorValidationResult(passed=True)
+
+        return validator
+
+    for agent, simulator, starts_with, max_turns, termination in scenarios:
+        observed: list[CaseResult] = []
+        result = await kensa_case(id=termination.reason, input="x").run(
+            agent,
+            simulator=simulator,
+            simulator_validator=validator_for(observed),
+            starts_with=cast(Any, starts_with),
+            max_turns=max_turns,
+        )
+
+        assert result.termination == termination
+        assert len(observed) == 1
+        assert observed[0] is not result
+        assert observed[0].model_dump() == result.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_responder_non_normal_exits_never_invoke_simulator_validator() -> None:
+    calls = 0
+
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        nonlocal calls
+        calls += 1
+        return SimulatorValidationResult(passed=True)
+
+    for agent, simulator in (
+        (
+            ScriptedResponder(RuntimeError("agent failed")),
+            ScriptedResponder(ConversationResponse(content="accepted")),
+        ),
+        (
+            ScriptedResponder(ConversationResponse(content="unused")),
+            ScriptedResponder(RuntimeError("simulator failed")),
+        ),
+    ):
+        with pytest.raises(ConversationError):
+            await kensa_case(id="failed", input="x").run(
+                agent,
+                simulator=simulator,
+                simulator_validator=validator,
+                max_turns=1,
+            )
+
+    class CancelledAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await kensa_case(id="cancelled", input="x").run(
+            CancelledAgent(),
+            simulator=ScriptedResponder(ConversationResponse(content="accepted")),
+            simulator_validator=validator,
+            max_turns=1,
+        )
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [True, None, {}, object()])
+async def test_invalid_simulator_validator_return_is_harness_contract(invalid: Any) -> None:
+    def validator(result: CaseResult) -> Any:
+        del result
+        return invalid
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="invalid_return", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.category == "harness"
+    assert raised.value.failure.kind == "simulator_validator_contract"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_async_simulator_validator_return_is_closed_and_rejected() -> None:
+    returned: list[Any] = []
+
+    def validator(result: CaseResult) -> Any:
+        del result
+
+        async def validation() -> SimulatorValidationResult:
+            return SimulatorValidationResult(passed=True)
+
+        coroutine = validation()
+        returned.append(coroutine)
+        return coroutine
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="dynamic_async_validator", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.kind == "simulator_validator_contract"
+    assert inspect.getcoroutinestate(returned[0]) == inspect.CORO_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_invalid_simulator_validation_construction_is_harness_contract() -> None:
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        del result
+        return SimulatorValidationResult(passed=False, reason=" ")
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="invalid_model", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.category == "harness"
+    assert raised.value.failure.kind == "simulator_validator_contract"
+    assert isinstance(raised.value.__cause__, ValidationError)
+
+
+@pytest.mark.asyncio
+async def test_mutated_simulator_validation_result_is_harness_contract() -> None:
+    validation = SimulatorValidationResult(passed=True, evidence={"items": []})
+    cast(dict[str, Any], validation.evidence)["items"] = object()
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="mutated_model", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=lambda result: validation,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.kind == "simulator_validator_contract"
+    assert isinstance(raised.value.__cause__, ValidationError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("validator failed"),
+        AssertionError("validator asserted"),
+        KensaEvalError("application attribution", category="agent", kind="assertion"),
+    ],
+)
+async def test_simulator_validator_exceptions_are_harness_execution(error: Exception) -> None:
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        del result
+        raise error
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="validator_error", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.category == "harness"
+    assert raised.value.failure.kind == "simulator_validator_execution"
+    assert raised.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_unrelated_validation_error_is_harness_execution() -> None:
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        del result
+        Value.model_validate({"items": ["invalid"]})
+        raise AssertionError("unreachable")
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="unrelated_validation_error", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value.failure.kind == "simulator_validator_execution"
+    assert isinstance(raised.value.__cause__, ValidationError)
+
+
+@pytest.mark.asyncio
+async def test_simulator_validator_process_interruption_propagates() -> None:
+    interruption = _ProcessInterruption()
+
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        del result
+        raise interruption
+
+    with pytest.raises(_ProcessInterruption) as raised:
+        await kensa_case(id="validator_interruption", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert raised.value is interruption
+
+
+@pytest.mark.asyncio
+async def test_simulator_validator_observes_isolated_final_result_and_trace() -> None:
+    snapshots: list[Any] = []
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_simulator_validator_observes_isolated_final_result_and_trace",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        snapshot_callback=lambda state: snapshots.append(deepcopy(state.output)),
+    )
+    observed_span_names: list[str] = []
+
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        assert result.termination == Termination(source="agent", reason="done")
+        observed_span_names.extend(span.name for span in result.trace.spans)
+        cast(dict[str, list[int]], result.output)["nested"].append(2)
+        cast(dict[str, Any], result.messages[0])["content"] = "mutated"
+        result.trace.spans[0].attributes["mutated"] = True
+        return SimulatorValidationResult(passed=True)
+
+    token = set_current_runtime(runtime)
+    try:
+        result = await kensa_case(id="isolated", input="x").run(
+            ScriptedResponder(
+                ConversationResponse(
+                    content="final",
+                    output={"nested": [1]},
+                    termination_reason="done",
+                )
+            ),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+    finally:
+        reset_current_runtime(token)
+
+    assert result.output == {"nested": [1]}
+    assert result.messages == ({"role": "assistant", "content": "final"},)
+    assert "kensa.pytest.trial" in observed_span_names
+    assert "kensa.conversation.respond" in observed_span_names
+    assert not any("mutated" in span.attributes for span in result.trace.spans)
+    assert (
+        runtime.output
+        == snapshots[-1]
+        == {
+            "messages": [{"role": "assistant", "content": "final"}],
+            "output": {"nested": [1]},
+            "termination": {"source": "agent", "reason": "done"},
+        }
+    )
 
 
 def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:

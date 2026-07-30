@@ -972,6 +972,69 @@ def test_snapshot(case, kensa_run):
     ]
 
 
+def test_validator_watchdog_timeout_preserves_final_conversation_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_eval(
+        tmp_path,
+        """import time
+
+import pytest
+from kensa.pytest import ConversationResponse, kensa_case
+
+
+class Agent:
+    def respond(self, messages):
+        return ConversationResponse(
+            content="final",
+            output={"status": "complete"},
+            termination_reason="done",
+        )
+
+
+class Simulator:
+    def respond(self, messages):
+        return ConversationResponse(content="unused")
+
+
+def validate(result):
+    assert result.termination.reason == "done"
+    assert any(span.name == "kensa.pytest.trial" for span in result.trace.spans)
+    time.sleep(60)
+
+
+@pytest.mark.asyncio
+@pytest.mark.kensa(trials=1, timeout_s=0.5)
+@pytest.mark.parametrize("case", [kensa_case(id="validator_timeout", input="hello")])
+async def test_validator_timeout(case):
+    await case.run(
+        Agent(),
+        simulator=Simulator(),
+        simulator_validator=validate,
+        starts_with="agent",
+    )
+""",
+    )
+
+    assert main(["eval", "--workers", "1", "--json", "tests/evals"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(Path(payload["data"]["artifact"]).read_text())
+    trial = artifact["trials"][0]
+    assert trial["status"] == "error"
+    assert trial["failure"]["kind"] == "timeout"
+    assert trial["output"] == {
+        "messages": [{"role": "assistant", "content": "final"}],
+        "output": {"status": "complete"},
+        "termination": {"source": "agent", "reason": "done"},
+    }
+    assert any(span["name"] == "kensa.pytest.trial" for span in trial["trace"]["spans"])
+    assert any(span["name"] == "kensa.conversation.respond" for span in trial["trace"]["spans"])
+
+
 def test_parallel_timeout_prefers_teardown_snapshot_over_reported_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
