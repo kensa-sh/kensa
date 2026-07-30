@@ -13,13 +13,36 @@ from typing import Any, Literal
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import Span, SpanKind
+from pydantic import ConfigDict, JsonValue, TypeAdapter
 
 from kensa._serialization import jsonable
 from kensa.runtime import OperationKind, current_runtime
 from kensa.traces import write_trace_manifest
 
 GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_completion"]
+_MISSING_TOOL_PAYLOAD = object()
+_JSON_VALUE_ADAPTER = TypeAdapter(
+    JsonValue,
+    config=ConfigDict(strict=True, allow_inf_nan=False),
+)
+
+
+class _ToolCallCapture:
+    def __init__(self, span: Span, *, result_recorded: bool) -> None:
+        self._span = span
+        self._result_recorded = result_recorded
+
+    def set_result(self, result: Any) -> None:
+        """Record one result produced inside the tool context."""
+        if self._result_recorded:
+            raise RuntimeError("record_tool_call result is already recorded")
+        encoded = _encode_tool_payload(
+            result,
+            boundary="record_tool_call().set_result(...)",
+        )
+        self._span.set_attribute("kensa.tool.result", encoded)
+        self._result_recorded = True
 
 
 class JSONLSpanExporter(SpanExporter):
@@ -237,7 +260,7 @@ def _record_span(
     operation_attributes: dict[str, Any],
     operation_kind: OperationKind,
     span_kind: SpanKind = SpanKind.INTERNAL,
-) -> Iterator[None]:
+) -> Iterator[Span]:
     tracer = trace.get_tracer("kensa.app")
     runtime = current_runtime()
     operation = (
@@ -251,26 +274,72 @@ def _record_span(
             name,
             kind=span_kind,
             attributes=span_attributes,
-        ),
+        ) as span,
     ):
-        yield
+        yield span
 
 
 @contextmanager
-def record_tool_call(name: str, **attributes: Any) -> Iterator[None]:
+def record_tool_call(
+    name: str,
+    *,
+    arguments: Any = _MISSING_TOOL_PAYLOAD,
+    result: Any = _MISSING_TOOL_PAYLOAD,
+    **attributes: Any,
+) -> Iterator[_ToolCallCapture]:
+    encoded_arguments = (
+        None
+        if arguments is _MISSING_TOOL_PAYLOAD
+        else _encode_tool_payload(
+            arguments,
+            boundary="record_tool_call(arguments=...)",
+        )
+    )
+    encoded_result = (
+        None
+        if result is _MISSING_TOOL_PAYLOAD
+        else _encode_tool_payload(
+            result,
+            boundary="record_tool_call(result=...)",
+        )
+    )
     operation_attributes = _flatten_attributes(attributes)
-    attrs = {
-        "kensa.span.kind": "tool",
-        "kensa.tool.name": name,
-    }
-    attrs.update(operation_attributes)
+    attrs = dict(operation_attributes)
+    attrs.update(
+        {
+            "kensa.span.kind": "tool",
+            "kensa.tool.name": name,
+        }
+    )
+    if encoded_arguments is not None:
+        attrs["kensa.tool.args"] = encoded_arguments
+        operation_attributes["arguments"] = json.loads(encoded_arguments)
+    if encoded_result is not None:
+        attrs["kensa.tool.result"] = encoded_result
+        operation_attributes["result"] = json.loads(encoded_result)
     with _record_span(
         name,
         span_attributes=attrs,
         operation_attributes=operation_attributes,
         operation_kind="tool",
-    ):
-        yield
+    ) as span:
+        yield _ToolCallCapture(
+            span,
+            result_recorded=result is not _MISSING_TOOL_PAYLOAD,
+        )
+
+
+def _encode_tool_payload(value: Any, *, boundary: str) -> str:
+    try:
+        snapshot = _JSON_VALUE_ADAPTER.validate_python(value)
+        return json.dumps(
+            snapshot,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{boundary} must be a strict JSON value: {exc}") from exc
 
 
 @contextmanager

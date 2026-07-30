@@ -77,14 +77,42 @@ If you do not have an observability provider, instrument your agent and let Kens
 ```python
 from kensa import instrument, record_tool_call, record_llm_call, record_span
 
-instrument()  # set up OpenTelemetry span capture
+instrument()
 
-with record_tool_call("lookup_customer"):
-    customer = lookup(order_id)
+with record_tool_call(
+    "lookup_customer",
+    arguments={
+        "customer_id": "cus_123",
+        "include": {"charges": True},
+    },
+) as tool_call:
+    customer = lookup_customer("cus_123")
+    tool_call.set_result({"found": True, "customer": customer})
 
 with record_llm_call(provider="openai", model="gpt-5.4-mini"):
     reply = client.responses.create(...)
 ```
+
+Use `result=` when the result already exists before the context:
+
+```python
+with record_tool_call(
+    "read_cache",
+    arguments={"key": "customer:cus_123"},
+    result={"hit": True},
+):
+    pass
+```
+
+Arguments and results must be strict JSON values. Kensa validates and snapshots them before
+writing canonical `kensa.tool.args` and `kensa.tool.result` span attributes, so later caller
+mutation cannot change the evidence. `set_result(...)` records at most one result. Supplying
+`result=` and then calling `set_result(...)`, or calling `set_result(...)` twice, raises
+`RuntimeError`.
+
+If the tool body raises before recording a result, the original exception and traceback escape
+unchanged. The tool call remains observable with `status == "error"` and
+`result_recorded is False`.
 
 During `kensa eval`, these context managers preserve the current operation when a trial times out.
 

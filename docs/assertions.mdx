@@ -21,32 +21,72 @@ Successful runs expose the collected trace as `result.trace`.
 
 ### Tool calls
 
-`result.trace.tools` answers questions about which tools were invoked:
+`result.trace.tools` answers questions about which tools were invoked and what JSON evidence each
+call recorded:
 
 ```python
 def test_refund(case, kensa_run):
     result = case.run(kensa_run)
 
-    # All listed tools were called (set membership, order-free)
     assert result.trace.tools.include(["lookup_customer"])
-
-    # None of these tools were called (safety check)
     assert result.trace.tools.exclude(["issue_refund", "delete_account"])
-
-    # Called in this relative order (other tools may interleave)
     assert result.trace.tools.order(["search_flights", "book_flight"])
-
-    # No tool was called twice
     assert result.trace.tools.no_repeats()
+
+    calls = result.trace.tools.matching(
+        "lookup_customer",
+        arguments={"include": {"charges": True}},
+        result={"found": True},
+    )
+    assert calls
+    assert calls[0].sequence == 0
+    assert calls[0].status == "ok"
+    assert result.trace.tools.called(
+        "lookup_customer",
+        arguments={"customer_id": "cus_123"},
+    )
 ```
 
 | Member | Returns | Checks |
 |---|---|---|
+| `tools.calls` | `tuple[ToolCallEvidence, ...]` | Immutable normalized calls in trace order |
 | `tools.names` | `list[str]` | Tool names in call order |
+| `tools.matching(name, ...)` | `tuple[ToolCallEvidence, ...]` | Every call matching the supplied argument, result, and status filters |
+| `tools.called(name, ...)` | `bool` | Whether at least one call matches the supplied filters |
 | `tools.include(names)` | `bool` | Every listed tool was called |
 | `tools.exclude(names)` | `bool` | None of the listed tools were called |
 | `tools.order(names)` | `bool` | Listed tools appear in this relative order |
 | `tools.no_repeats()` | `bool` | No tool was called more than once |
+
+Argument and result filters are recursive JSON object subsets. Every expected key must exist.
+Nested objects use the same subset rule. Arrays and scalar values require exact JSON type and value
+equality, so `true` does not match `1`, and array order and length matter. Observed objects may have
+extra keys.
+
+Omit `arguments`, `result`, or `status` to leave that field unfiltered. Supplying an empty object
+matches a recorded object, but never a missing payload or a recorded scalar or array. Filters must
+be mappings; inspect `tools.calls` directly for exact scalar or array assertions.
+
+Missing and explicit JSON null are separate facts:
+
+```python
+missing_call = result.trace.tools.calls[0]
+null_call = result.trace.tools.calls[1]
+
+assert missing_call.arguments is None
+assert missing_call.arguments_recorded is False
+
+assert null_call.arguments is None
+assert null_call.arguments_recorded is True
+```
+
+Repeated names produce separate calls with separate zero-based `sequence` values.
+`matching(...)` returns all matching calls. Independent assertions do not reserve or assign a call,
+so the same observed call can satisfy more than one assertion.
+
+Kensa reports captured facts only. A successful tool span can return any application payload,
+including a field named `status`; Kensa does not infer whether that payload means the business
+operation succeeded.
 
 ### Resource bounds
 

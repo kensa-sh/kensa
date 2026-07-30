@@ -784,6 +784,76 @@ def test_external_events_feed_existing_trace_accessors(
     assert runtime.trace.duration_ms == pytest.approx(0.000009)
 
 
+def test_external_tool_payloads_share_merged_call_order_and_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_spans = [
+        KensaSpan(
+            name="local-equal",
+            kind="tool",
+            tool_name="local",
+            span_id="local-equal",
+            start_time_unix_nano=5,
+            attributes={
+                "kensa.tool.args": '{"customer_id": "cus_1"}',
+                "kensa.tool.result": '{"found": true}',
+            },
+        ),
+        KensaSpan(
+            name="local-missing-time",
+            kind="tool",
+            tool_name="local-missing-time",
+            span_id="local-missing-time",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "collect_spans", lambda trace_id: local_spans)
+    evidence = _evidence(
+        events=(
+            _event(
+                event_id="external-equal",
+                sequence=1,
+                kind="tool",
+                name="external",
+                started_at_ns=5,
+                input={"customer_id": "cus_1"},
+                output={"found": True},
+            ),
+            _event(
+                event_id="external-missing-time",
+                sequence=2,
+                kind="tool",
+                name="external-null",
+                input=None,
+                output=None,
+            ),
+        ),
+    )
+    runtime = _runtime()
+
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(
+            kensa_case(id="tool-calls", input="hello"),
+            lambda: (attach_agent_run(evidence), "done")[1],
+        )
+    finally:
+        reset_current_runtime(token)
+
+    calls = runtime.trace.tools.calls
+    assert [call.name for call in calls] == [
+        "local",
+        "external",
+        "local-missing-time",
+        "external-null",
+    ]
+    assert calls[0].arguments == calls[1].arguments == {"customer_id": "cus_1"}
+    assert calls[0].result == calls[1].result == {"found": True}
+    assert calls[3].arguments is None
+    assert calls[3].result is None
+    assert calls[3].arguments_recorded is True
+    assert calls[3].result_recorded is True
+
+
 def test_external_evidence_ignores_unrepresentable_cost() -> None:
     runtime = _runtime()
     evidence = _evidence(
