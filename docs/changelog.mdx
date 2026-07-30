@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.19.0
+
+Run-result artifacts now have a strict, versioned public contract for reliable downstream tooling.
+
+- **Breaking:** every initial, incremental, interrupted, and completed result artifact now uses `schema_version: "kensa.result.v1"`; unversioned, unsupported, legacy, or internally inconsistent artifacts are rejected.
+- `kensa.results` exposes immutable typed models plus `load_run_result()` for loading complete, interrupted, and initial snapshots with path-specific validation errors.
+- Writes normalize and deterministically order trials, derive aggregates and summaries from the same v1 data, validate before atomic replacement, and preserve full evidence during watchdog recovery.
+
+[View the 0.19.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.19.0).
+
 ## 0.18.0
 
 Trials now carry structured failure provenance so agent behavior is separated from eval-system failures.
