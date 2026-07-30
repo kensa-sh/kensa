@@ -1021,6 +1021,37 @@ async def test_dynamic_async_simulator_validator_return_is_closed_and_rejected()
 
 
 @pytest.mark.asyncio
+async def test_dynamic_async_simulator_validator_task_is_cancelled_and_rejected() -> None:
+    returned: list[asyncio.Task[SimulatorValidationResult]] = []
+    ran = False
+
+    def validator(result: CaseResult) -> Any:
+        del result
+
+        async def validation() -> SimulatorValidationResult:
+            nonlocal ran
+            ran = True
+            return SimulatorValidationResult(passed=True)
+
+        task = asyncio.create_task(validation())
+        returned.append(task)
+        return task
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="dynamic_async_validator_task", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    await asyncio.sleep(0)
+    assert raised.value.failure.kind == "simulator_validator_contract"
+    assert returned[0].cancelled()
+    assert not ran
+
+
+@pytest.mark.asyncio
 async def test_invalid_simulator_validation_construction_is_harness_contract() -> None:
     def validator(result: CaseResult) -> SimulatorValidationResult:
         del result
@@ -1078,6 +1109,32 @@ async def test_simulator_validator_exceptions_are_harness_execution(error: Excep
             starts_with="agent",
         )
 
+    assert raised.value.failure.category == "harness"
+    assert raised.value.failure.kind == "simulator_validator_execution"
+    assert raised.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_simulator_validator_exception_with_invalid_string_is_harness_execution() -> None:
+    class InvalidStringError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("string conversion failed")
+
+    error = InvalidStringError()
+
+    def validator(result: CaseResult) -> SimulatorValidationResult:
+        del result
+        raise error
+
+    with pytest.raises(KensaEvalError) as raised:
+        await kensa_case(id="invalid_exception_string", input="x").run(
+            ScriptedResponder(ConversationResponse(termination_reason="done")),
+            simulator=ScriptedResponder(ConversationResponse(content="unused")),
+            simulator_validator=validator,
+            starts_with="agent",
+        )
+
+    assert str(raised.value) == "Simulator validator execution failure"
     assert raised.value.failure.category == "harness"
     assert raised.value.failure.kind == "simulator_validator_execution"
     assert raised.value.__cause__ is error

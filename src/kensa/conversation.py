@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 from collections.abc import Awaitable, Callable, Iterator
@@ -363,6 +364,8 @@ def _validate_simulator_result(
     if inspect.isawaitable(validation):
         if inspect.iscoroutine(validation):
             validation.close()
+        elif isinstance(validation, asyncio.Future):
+            validation.cancel()
         _raise_validator_contract(
             "simulator_validator must return SimulatorValidationResult synchronously"
         )
@@ -411,7 +414,10 @@ def _raise_validator_contract(message: str, cause: Exception | None = None) -> N
 
 
 def _raise_validator_execution(cause: Exception) -> Never:
-    detail = str(cause).strip()
+    try:
+        detail = str(cause).strip()
+    except Exception:
+        detail = ""
     message = "Simulator validator execution failure"
     if detail:
         message = f"{message}: {detail}"
