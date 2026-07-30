@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import traceback
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,8 +19,15 @@ from kensa.conversation import ConversationResponse, LLMSimulator, Termination
 from kensa.errors import KensaEvalError, TrialFailure
 from kensa.judge import JudgeResult, judge, set_judge_provider
 from kensa.llm import LLMResult
-from kensa.pytest import CaseResult
-from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
+from kensa.pytest import CaseResult, ToolCallEvidence
+from kensa.runtime import (
+    KensaSpan,
+    KensaTrace,
+    KensaTrial,
+    KensaTrialRuntime,
+    reset_current_runtime,
+    set_current_runtime,
+)
 from kensa.target import (
     AgentEvent,
     AgentRunEvidence,
@@ -28,6 +36,279 @@ from kensa.target import (
     ExecutionAttestation,
     attach_agent_run,
 )
+
+
+def test_tool_call_evidence_is_strict_frozen_and_isolated() -> None:
+    import kensa.pytest as kensa_pytest
+
+    arguments = {"nested": {"ids": [1]}}
+    result = {"found": True}
+
+    call = ToolCallEvidence(
+        sequence=0,
+        name="lookup",
+        arguments=arguments,
+        result=result,
+        arguments_recorded=True,
+        result_recorded=True,
+        status="ok",
+        span_id="span-1",
+        duration_ms=1.5,
+    )
+    arguments["nested"]["ids"].append(2)
+    result["found"] = False
+
+    assert "ToolCallEvidence" in kensa_pytest.__all__
+    assert call.arguments == {"nested": {"ids": [1]}}
+    assert call.result == {"found": True}
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        call.status = "error"
+    with pytest.raises(ValidationError):
+        ToolCallEvidence.model_validate(
+            {
+                **call.model_dump(),
+                "sequence": True,
+            }
+        )
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ToolCallEvidence.model_validate(
+            {
+                **call.model_dump(),
+                "unexpected": True,
+            }
+        )
+
+
+def test_tool_calls_normalize_payload_sources_presence_order_and_serialization() -> None:
+    trace_view = KensaTrace()
+    trace_view.replace(
+        [
+            KensaSpan(name="llm", kind="llm"),
+            KensaSpan(name="missing", kind="tool", tool_name="missing", span_id="span-0"),
+            KensaSpan(
+                name="canonical",
+                kind="tool",
+                tool_name="lookup",
+                span_id="span-1",
+                start_time_unix_nano=10,
+                end_time_unix_nano=2_000_010,
+                attributes={
+                    "kensa.tool.args": "null",
+                    "kensa.tool.result": '{"found": true}',
+                    "arguments": '{"ignored": true}',
+                    "result": '{"ignored": true}',
+                },
+            ),
+            KensaSpan(
+                name="attached",
+                kind="tool",
+                tool_name="lookup",
+                span_id="span-2",
+                status="error",
+                attributes={
+                    "kensa.evidence.source": "agent_run",
+                    "input": {"nested": {"value": 1}},
+                    "output": None,
+                    "arguments": '{"ignored": true}',
+                    "result": '{"ignored": true}',
+                },
+            ),
+            KensaSpan(
+                name="legacy",
+                kind="tool",
+                tool_name="legacy",
+                span_id=None,
+                attributes={
+                    "arguments": '{"nested": {"value": 1}}',
+                    "result": "NaN",
+                },
+            ),
+        ]
+    )
+
+    calls = trace_view.tools.calls
+
+    assert isinstance(calls, tuple)
+    assert [call.sequence for call in calls] == list(range(len(calls)))
+    assert (
+        trace_view.tools.names
+        == [call.name for call in calls]
+        == [
+            "missing",
+            "lookup",
+            "lookup",
+            "legacy",
+        ]
+    )
+    assert calls[0].arguments is None
+    assert calls[0].result is None
+    assert calls[0].arguments_recorded is False
+    assert calls[0].result_recorded is False
+    assert calls[1].arguments is None
+    assert calls[1].arguments_recorded is True
+    assert calls[1].result == {"found": True}
+    assert calls[1].result_recorded is True
+    assert calls[1].duration_ms == 2.0
+    assert calls[2].arguments == {"nested": {"value": 1}}
+    assert calls[2].result is None
+    assert calls[2].result_recorded is True
+    assert calls[2].status == "error"
+    assert calls[3].arguments == {"nested": {"value": 1}}
+    assert calls[3].result == "NaN"
+    assert trace_view.tools.include(["lookup", "legacy"])
+    assert trace_view.tools.exclude(["other"])
+    assert trace_view.tools.order(["missing", "lookup", "legacy"])
+    assert not trace_view.tools.no_repeats()
+
+    serialized = trace_view.to_dict()
+    assert serialized["tools"] == trace_view.tools.names
+    assert serialized["tool_calls"] == [call.model_dump(mode="json") for call in calls]
+
+    trace_view.replace(list(trace_view.spans))
+    assert trace_view.tools.calls == calls
+    assert [call.sequence for call in trace_view.tools.calls] == list(range(len(calls)))
+
+
+def test_tool_call_matching_uses_recursive_json_subset_rules() -> None:
+    trace_view = KensaTrace()
+    trace_view.replace(
+        [
+            KensaSpan(
+                name="first",
+                kind="tool",
+                tool_name="lookup",
+                status="ok",
+                attributes={
+                    "arguments": {
+                        "nested": {"value": 1, "extra": "kept"},
+                        "items": [{"id": 1}],
+                        "flag": True,
+                    },
+                    "result": {"found": True, "count": 1},
+                },
+            ),
+            KensaSpan(
+                name="second",
+                kind="tool",
+                tool_name="lookup",
+                status="error",
+                attributes={
+                    "arguments": {"nested": {"value": 2}},
+                    "result": {"found": False},
+                },
+            ),
+            KensaSpan(name="missing", kind="tool", tool_name="lookup"),
+            KensaSpan(
+                name="scalar",
+                kind="tool",
+                tool_name="lookup",
+                attributes={"arguments": "not-json"},
+            ),
+        ]
+    )
+
+    first, second, missing, scalar = trace_view.tools.calls
+
+    assert trace_view.tools.matching("lookup") == (first, second, missing, scalar)
+    assert trace_view.tools.matching(
+        "lookup",
+        arguments={"nested": {"value": 1}},
+    ) == (first,)
+    assert trace_view.tools.matching("lookup", arguments={}) == (first, second)
+    assert trace_view.tools.matching(
+        "lookup",
+        arguments={"items": [{"id": 1}]},
+    ) == (first,)
+    assert (
+        trace_view.tools.matching(
+            "lookup",
+            arguments={"items": [{"id": 1, "extra": True}]},
+        )
+        == ()
+    )
+    assert trace_view.tools.matching("lookup", arguments={"items": []}) == ()
+    assert trace_view.tools.matching("lookup", arguments={"flag": 1}) == ()
+    assert trace_view.tools.matching("lookup", result={"found": True}) == (first,)
+    assert trace_view.tools.matching("lookup", status="error") == (second,)
+    assert trace_view.tools.called(
+        "lookup",
+        arguments={"nested": {"value": 2}},
+        result={"found": False},
+        status="error",
+    )
+    assert not trace_view.tools.called("lookup", result={"missing": True})
+
+    with pytest.raises(TypeError, match="arguments"):
+        trace_view.tools.matching("lookup", arguments=cast(Any, []))
+    with pytest.raises(TypeError, match="result"):
+        trace_view.tools.called("lookup", result=cast(Any, "found"))
+    with pytest.raises(TypeError, match="strict JSON object"):
+        trace_view.tools.matching(
+            "lookup",
+            arguments=cast(Any, {"invalid": object()}),
+        )
+
+
+def test_recorded_tool_call_snapshots_live_evidence_and_preserves_tool_error() -> None:
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+    )
+    arguments = {"customer": {"id": "cus_1"}}
+    result = {"found": True}
+
+    def successful_operation() -> str:
+        with record_tool_call("lookup", arguments=arguments) as tool_call:
+            tool_call.set_result(result)
+            arguments["customer"]["id"] = "mutated"
+            result["found"] = False
+        return "done"
+
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(kensa_case(id="success", input="hello"), successful_operation)
+    finally:
+        reset_current_runtime(token)
+
+    call = runtime.trace.tools.calls[0]
+    assert call.arguments == {"customer": {"id": "cus_1"}}
+    assert call.result == {"found": True}
+    assert call.status == "ok"
+
+    failed_runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+    )
+    error = RuntimeError("tool failed")
+
+    def failed_operation() -> None:
+        with record_tool_call("lookup", arguments={"customer_id": "cus_1"}):
+            raise error
+
+    token = set_current_runtime(failed_runtime)
+    try:
+        with pytest.raises(RuntimeError, match="tool failed") as raised:
+            failed_runtime.run_case(
+                kensa_case(id="failure", input="hello"),
+                failed_operation,
+            )
+    finally:
+        reset_current_runtime(token)
+
+    assert raised.value is error
+    assert any(
+        frame.name == "failed_operation" for frame in traceback.extract_tb(error.__traceback__)
+    )
+    failed_call = failed_runtime.trace.tools.calls[0]
+    assert failed_call.status == "error"
+    assert failed_call.result is None
+    assert failed_call.result_recorded is False
 
 
 def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -> None:

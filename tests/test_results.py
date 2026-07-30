@@ -176,6 +176,29 @@ def test_loader_preserves_complete_trial_evidence(tmp_path: Path) -> None:
     assert loaded.active_operation == trial.active_operation
 
 
+def test_result_v1_accepts_additive_structured_tool_calls(tmp_path: Path) -> None:
+    trial = _trial()
+    tool_call = {
+        "sequence": 0,
+        "name": "lookup",
+        "arguments": {"customer_id": "cus_1"},
+        "result": {"found": True},
+        "arguments_recorded": True,
+        "result_recorded": True,
+        "status": "ok",
+        "span_id": "span-1",
+        "duration_ms": 1.5,
+    }
+    trial.trace["tools"] = ["lookup"]
+    trial.trace["tool_calls"] = [tool_call]
+
+    result = load_run_result(_write(tmp_path, trials=[trial]))
+
+    assert result.schema_version == "kensa.result.v1"
+    assert result.trials[0].trace["tools"] == ["lookup"]
+    assert result.trials[0].trace["tool_calls"] == [tool_call]
+
+
 def test_loader_keeps_checked_in_v1_artifact_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

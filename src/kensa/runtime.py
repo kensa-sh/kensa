@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import math
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock, get_ident
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -19,6 +20,7 @@ from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerPro
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from kensa._serialization import json_value, jsonable
 from kensa._smoke import is_smoke_identity
@@ -50,6 +52,10 @@ _GEN_AI_LLM_ATTRIBUTES = frozenset(
         "gen_ai.usage.output_tokens",
         "gen_ai.usage.prompt_tokens",
     }
+)
+_JSON_OBJECT_ADAPTER = TypeAdapter(
+    dict[str, JsonValue],
+    config=ConfigDict(strict=True, allow_inf_nan=False),
 )
 
 
@@ -147,6 +153,27 @@ class KensaSpan:
         }
 
 
+class ToolCallEvidence(BaseModel):
+    """Immutable normalized evidence for one observed tool call."""
+
+    model_config = ConfigDict(
+        strict=True,
+        frozen=True,
+        extra="forbid",
+        allow_inf_nan=False,
+    )
+
+    sequence: Annotated[int, Field(ge=0)]
+    name: str
+    arguments: JsonValue | None
+    result: JsonValue | None
+    arguments_recorded: bool
+    result_recorded: bool
+    status: str
+    span_id: str | None
+    duration_ms: Annotated[float, Field(ge=0)]
+
+
 class KensaTraceTools:
     """Tool-call assertions for a trial trace."""
 
@@ -154,9 +181,63 @@ class KensaTraceTools:
         self._trace = trace
 
     @property
+    def calls(self) -> tuple[ToolCallEvidence, ...]:
+        """Return normalized tool calls in merged trace order."""
+        tool_spans = [
+            span for span in self._trace.spans if span.tool_name or span.kind.lower() == "tool"
+        ]
+        return tuple(
+            _normalize_tool_call(span, sequence) for sequence, span in enumerate(tool_spans)
+        )
+
+    @property
     def names(self) -> list[str]:
         """Return observed tool names in trace order, including repeats."""
-        return [span.tool_name for span in self._trace.spans if span.tool_name]
+        return [call.name for call in self.calls]
+
+    def matching(
+        self,
+        name: str,
+        *,
+        arguments: Mapping[str, JsonValue] | None = None,
+        result: Mapping[str, JsonValue] | None = None,
+        status: str | None = None,
+    ) -> tuple[ToolCallEvidence, ...]:
+        """Return calls satisfying the supplied recursive object subsets."""
+        arguments_subset = _validate_tool_subset(arguments, boundary="arguments")
+        result_subset = _validate_tool_subset(result, boundary="result")
+        return tuple(
+            call
+            for call in self.calls
+            if call.name == name
+            and (status is None or call.status == status)
+            and (
+                arguments_subset is None
+                or (call.arguments_recorded and _mapping_subset(call.arguments, arguments_subset))
+            )
+            and (
+                result_subset is None
+                or (call.result_recorded and _mapping_subset(call.result, result_subset))
+            )
+        )
+
+    def called(
+        self,
+        name: str,
+        *,
+        arguments: Mapping[str, JsonValue] | None = None,
+        result: Mapping[str, JsonValue] | None = None,
+        status: str | None = None,
+    ) -> bool:
+        """Return whether any call satisfies the supplied filters."""
+        return bool(
+            self.matching(
+                name,
+                arguments=arguments,
+                result=result,
+                status=status,
+            )
+        )
 
     def include(self, tool_names: list[str]) -> bool:
         """Return whether every listed tool appears at least once."""
@@ -237,10 +318,12 @@ class KensaTrace:
 
     def to_dict(self) -> dict[str, Any]:
         known_cost_usd = self.known_cost_usd
+        tool_calls = self.tools.calls
         return {
             "spans": [span.to_dict() for span in self.spans],
             "agent_runs": [run.model_dump(mode="json") for run in self.agent_runs],
-            "tools": self.tools.names,
+            "tools": [call.name for call in tool_calls],
+            "tool_calls": [call.model_dump(mode="json") for call in tool_calls],
             "cost_usd": self.cost_usd,
             "known_cost_usd": known_cost_usd,
             "cost_available": self.cost_available,
@@ -249,6 +332,111 @@ class KensaTrace:
             "incomplete": self.incomplete,
             "incomplete_reason": self.incomplete_reason,
         }
+
+
+def _normalize_tool_call(span: KensaSpan, sequence: int) -> ToolCallEvidence:
+    arguments, arguments_recorded = _tool_payload(
+        span,
+        canonical="kensa.tool.args",
+        attached="input",
+        flat="arguments",
+    )
+    result, result_recorded = _tool_payload(
+        span,
+        canonical="kensa.tool.result",
+        attached="output",
+        flat="result",
+    )
+    return ToolCallEvidence(
+        sequence=sequence,
+        name=span.tool_name or span.name,
+        arguments=arguments,
+        result=result,
+        arguments_recorded=arguments_recorded,
+        result_recorded=result_recorded,
+        status=span.status,
+        span_id=span.span_id,
+        duration_ms=span.duration_ms,
+    )
+
+
+def _tool_payload(
+    span: KensaSpan,
+    *,
+    canonical: str,
+    attached: str,
+    flat: str,
+) -> tuple[Any, bool]:
+    attributes = span.attributes
+    if canonical in attributes:
+        value = attributes[canonical]
+    elif attributes.get("kensa.evidence.source") == "agent_run" and attached in attributes:
+        value = attributes[attached]
+    elif flat in attributes:
+        value = attributes[flat]
+    else:
+        return None, False
+    return _decode_json_once(value), True
+
+
+def _decode_json_once(value: Any) -> Any:
+    if not isinstance(value, str):
+        return deepcopy(value)
+    try:
+        return json.loads(value, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"{value} is not valid JSON")
+
+
+def _validate_tool_subset(
+    value: Mapping[str, JsonValue] | None,
+    *,
+    boundary: str,
+) -> dict[str, JsonValue] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{boundary} filter must be a mapping")
+    try:
+        return _JSON_OBJECT_ADAPTER.validate_python(dict(value))
+    except ValidationError as exc:
+        raise TypeError(f"{boundary} filter must be a strict JSON object: {exc}") from exc
+
+
+def _mapping_subset(observed: JsonValue | None, expected: dict[str, JsonValue]) -> bool:
+    if not isinstance(observed, dict):
+        return False
+    for key, expected_value in expected.items():
+        if key not in observed:
+            return False
+        observed_value = observed[key]
+        if isinstance(expected_value, dict):
+            if not _mapping_subset(observed_value, expected_value):
+                return False
+        elif not _json_values_equal(observed_value, expected_value):
+            return False
+    return True
+
+
+def _json_values_equal(observed: JsonValue, expected: JsonValue) -> bool:
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        if not isinstance(observed, dict) or observed.keys() != expected.keys():
+            return False
+        return all(_json_values_equal(observed[key], value) for key, value in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(observed, list) or len(observed) != len(expected):
+            return False
+        return all(
+            _json_values_equal(observed_item, expected_item)
+            for observed_item, expected_item in zip(observed, expected, strict=True)
+        )
+    return observed == expected
 
 
 @dataclass
@@ -644,9 +832,9 @@ def _normalize_agent_event(run: AgentRunEvidence, event: AgentEvent) -> KensaSpa
         "kensa.agent.event.sequence",
     }:
         attributes.pop(key, None)
-    if event.input is not None:
+    if "input" in event.model_fields_set:
         attributes["input"] = deepcopy(event.input)
-    if event.output is not None:
+    if "output" in event.model_fields_set:
         attributes["output"] = deepcopy(event.output)
     attributes.update(
         {
@@ -787,6 +975,7 @@ __all__ = [
     "KensaTrial",
     "KensaTrialRuntime",
     "OperationKind",
+    "ToolCallEvidence",
     "TrialMetadata",
     "collect_spans",
     "current_runtime",
