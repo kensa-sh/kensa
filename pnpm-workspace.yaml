@@ -1,0 +1,4 @@
+packages:
+  - packages/*
+  - sdks/typescript/packages/*
+  - web

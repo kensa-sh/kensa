@@ -1,0 +1,12 @@
+{
+  "attributes": {},
+  "created_at": "2026-08-07T01:02:03.004Z",
+  "document_kind": "eval_run",
+  "duration_ms": null,
+  "ended_at": null,
+  "failure": null,
+  "id": "run_not-an-uuid",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "pass"
+}

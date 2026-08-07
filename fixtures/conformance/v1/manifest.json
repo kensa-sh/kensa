@@ -1,0 +1,68 @@
+{
+  "fixtures": [
+    {
+      "path": "valid/eval-run-minimal.json",
+      "valid": true,
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": null,
+      "expected_code": null,
+      "expected_path": null
+    },
+    {
+      "path": "valid/invocation-minimal.json",
+      "valid": true,
+      "document_kind": "invocation",
+      "expected_rejection_boundary": null,
+      "expected_code": null,
+      "expected_path": null
+    },
+    {
+      "path": "valid/span-minimal.json",
+      "valid": true,
+      "document_kind": "span",
+      "expected_rejection_boundary": null,
+      "expected_code": null,
+      "expected_path": null
+    },
+    {
+      "path": "valid/check-result-minimal.json",
+      "valid": true,
+      "document_kind": "check_result",
+      "expected_rejection_boundary": null,
+      "expected_code": null,
+      "expected_path": null
+    },
+    {
+      "path": "invalid/unknown-field.json",
+      "valid": false,
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "runtime",
+      "expected_code": "unknown_field",
+      "expected_path": ["extra"]
+    },
+    {
+      "path": "invalid/pass-with-failure.json",
+      "valid": false,
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "runtime",
+      "expected_code": "contradictory_fields",
+      "expected_path": ["failure"]
+    },
+    {
+      "path": "invalid/bad-timestamp.json",
+      "valid": false,
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "runtime",
+      "expected_code": "invalid_timestamp",
+      "expected_path": ["created_at"]
+    },
+    {
+      "path": "invalid/bad-id.json",
+      "valid": false,
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "runtime",
+      "expected_code": "invalid_identifier",
+      "expected_path": ["id"]
+    }
+  ]
+}

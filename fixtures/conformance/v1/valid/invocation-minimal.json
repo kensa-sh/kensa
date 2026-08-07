@@ -1,0 +1,28 @@
+{
+  "attributes": {},
+  "attempt": 1,
+  "case": { "id": "case-1", "input": null, "metadata": {} },
+  "document_kind": "invocation",
+  "duration_ms": null,
+  "ended_at": null,
+  "evidence_completeness": { "reason": null, "status": "complete" },
+  "failure": null,
+  "id": "inv_018f2f2e-8c70-7c31-8c70-123456789abc",
+  "output": null,
+  "output_recorded": true,
+  "provenance": {
+    "adapter": null,
+    "adapter_version": null,
+    "effects": "none",
+    "environment": null,
+    "producer": "test",
+    "producer_version": "1",
+    "revision": null,
+    "runtime": "node",
+    "runtime_version": "24"
+  },
+  "run_id": "run_018f2f2e-8c70-7c31-8c70-123456789abc",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "pass"
+}

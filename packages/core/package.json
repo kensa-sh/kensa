@@ -1,0 +1,20 @@
+{
+  "name": "@kensa/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "schema:check": "tsx src/protocol/schema-check.ts"
+  },
+  "dependencies": { "zod": "^4.0.5" },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.2.4",
+    "tsx": "^4.20.3",
+    "vitest": "^3.2.4"
+  }
+}

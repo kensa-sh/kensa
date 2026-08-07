@@ -106,6 +106,12 @@ ipython_config.py
 .pdm-python
 .pdm-build/
 
+# Node / TypeScript
+node_modules/
+.pnpm-store/
+packages/*/dist/
+coverage/
+
 # pixi
 # pixi.lock is commonly committed for applications and not for libraries.
 # pixi.lock

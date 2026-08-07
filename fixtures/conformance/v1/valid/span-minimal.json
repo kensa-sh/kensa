@@ -1,0 +1,20 @@
+{
+  "attributes": {},
+  "document_kind": "span",
+  "duration_ms": null,
+  "ended_at": null,
+  "input": null,
+  "input_recorded": false,
+  "invocation_id": "inv_018f2f2e-8c70-7c31-8c70-123456789abc",
+  "name": "test",
+  "output": null,
+  "output_recorded": false,
+  "parent_span_id": null,
+  "schema_version": "kensa.protocol.v1",
+  "span_id": "0123456789abcdef",
+  "span_kind": "internal",
+  "started_at": null,
+  "status": "unset",
+  "status_message": null,
+  "trace_id": "0123456789abcdef0123456789abcdef"
+}

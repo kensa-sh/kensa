@@ -18,4 +18,9 @@
 - [ ] `uv run pytest -q`
 - [ ] `uv run python -m coverage run -m pytest -q && uv run python -m coverage report`
 - [ ] `uv build`
+- [ ] `pnpm format:check`
+- [ ] `pnpm lint`
+- [ ] `pnpm typecheck`
+- [ ] `pnpm test:coverage`
+- [ ] `pnpm build`
 - [ ] User-facing changes include matching `docs/` updates, or are not applicable

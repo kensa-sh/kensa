@@ -1,0 +1,13 @@
+{
+  "document_kind": "check_result",
+  "duration_ms": null,
+  "ended_at": null,
+  "evidence": {},
+  "failure": null,
+  "id": "chk_018f2f2e-8c70-7c31-8c70-123456789abc",
+  "invocation_id": "inv_018f2f2e-8c70-7c31-8c70-123456789abc",
+  "name": "assertion",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "pass"
+}
