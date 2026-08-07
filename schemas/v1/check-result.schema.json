@@ -68,12 +68,16 @@
       "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "__schema4": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "__schema5": {
       "type": "string",
-      "enum": ["pass", "fail", "error", "skipped"]
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "skipped"
+      ]
     },
     "__schema6": {
       "anyOf": [
@@ -180,7 +184,12 @@
               "$ref": "#/$defs/__schema10"
             }
           },
-          "required": ["category", "kind", "message", "evidence"],
+          "required": [
+            "category",
+            "kind",
+            "message",
+            "evidence"
+          ],
           "additionalProperties": false
         },
         {

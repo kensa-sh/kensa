@@ -110,12 +110,15 @@
       ]
     },
     "__schema6": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "__schema7": {
       "type": "string",
-      "enum": ["unset", "ok", "error"]
+      "enum": [
+        "unset",
+        "ok",
+        "error"
+      ]
     },
     "__schema8": {
       "anyOf": [

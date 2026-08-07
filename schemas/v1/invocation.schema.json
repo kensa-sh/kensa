@@ -91,8 +91,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string",
-          "minLength": 1
+          "type": "string"
         },
         "input": {
           "$ref": "#/$defs/__schema5"
@@ -101,7 +100,11 @@
           "$ref": "#/$defs/__schema7"
         }
       },
-      "required": ["id", "input", "metadata"],
+      "required": [
+        "id",
+        "input",
+        "metadata"
+      ],
       "additionalProperties": false
     },
     "__schema5": {
@@ -304,7 +307,12 @@
         },
         "effects": {
           "type": "string",
-          "enum": ["none", "captured", "sandboxed", "live"]
+          "enum": [
+            "none",
+            "captured",
+            "sandboxed",
+            "live"
+          ]
         }
       },
       "required": [
@@ -321,15 +329,19 @@
       "additionalProperties": false
     },
     "__schema19": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "__schema20": {
       "type": "object",
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["complete", "pending", "partial", "unavailable"]
+          "enum": [
+            "complete",
+            "pending",
+            "partial",
+            "unavailable"
+          ]
         },
         "reason": {
           "anyOf": [
@@ -342,7 +354,10 @@
           ]
         }
       },
-      "required": ["status", "reason"],
+      "required": [
+        "status",
+        "reason"
+      ],
       "additionalProperties": false
     },
     "__schema21": {
@@ -372,7 +387,12 @@
               "$ref": "#/$defs/__schema7"
             }
           },
-          "required": ["category", "kind", "message", "evidence"],
+          "required": [
+            "category",
+            "kind",
+            "message",
+            "evidence"
+          ],
           "additionalProperties": false
         },
         {

@@ -176,7 +176,12 @@
               "$ref": "#/$defs/__schema8"
             }
           },
-          "required": ["category", "kind", "message", "evidence"],
+          "required": [
+            "category",
+            "kind",
+            "message",
+            "evidence"
+          ],
           "additionalProperties": false
         },
         {
@@ -185,8 +190,7 @@
       ]
     },
     "__schema12": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     }
   }
 }

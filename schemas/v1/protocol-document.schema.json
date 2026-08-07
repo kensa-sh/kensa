@@ -395,12 +395,16 @@
           "$ref": "#/$defs/__schema9"
         }
       },
-      "required": ["category", "kind", "message", "evidence"],
+      "required": [
+        "category",
+        "kind",
+        "message",
+        "evidence"
+      ],
       "additionalProperties": false
     },
     "__schema14": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "__schema15": {
       "type": "string",
@@ -414,8 +418,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string",
-          "minLength": 1
+          "type": "string"
         },
         "input": {
           "$ref": "#/$defs/__schema18"
@@ -424,7 +427,11 @@
           "$ref": "#/$defs/__schema9"
         }
       },
-      "required": ["id", "input", "metadata"],
+      "required": [
+        "id",
+        "input",
+        "metadata"
+      ],
       "additionalProperties": false
     },
     "__schema18": {
@@ -579,7 +586,12 @@
         },
         "effects": {
           "type": "string",
-          "enum": ["none", "captured", "sandboxed", "live"]
+          "enum": [
+            "none",
+            "captured",
+            "sandboxed",
+            "live"
+          ]
         }
       },
       "required": [
@@ -600,7 +612,12 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["complete", "pending", "partial", "unavailable"]
+          "enum": [
+            "complete",
+            "pending",
+            "partial",
+            "unavailable"
+          ]
         },
         "reason": {
           "anyOf": [
@@ -613,7 +630,10 @@
           ]
         }
       },
-      "required": ["status", "reason"],
+      "required": [
+        "status",
+        "reason"
+      ],
       "additionalProperties": false
     },
     "__schema29": {
@@ -650,7 +670,11 @@
     },
     "__schema34": {
       "type": "string",
-      "enum": ["unset", "ok", "error"]
+      "enum": [
+        "unset",
+        "ok",
+        "error"
+      ]
     },
     "__schema35": {
       "anyOf": [
@@ -728,7 +752,12 @@
     },
     "__schema45": {
       "type": "string",
-      "enum": ["pass", "fail", "error", "skipped"]
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "skipped"
+      ]
     },
     "__schema46": {
       "anyOf": [
