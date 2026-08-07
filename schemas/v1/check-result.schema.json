@@ -1,0 +1,157 @@
+{
+  "$defs": {
+    "CheckResultDocumentKind": {
+      "enum": [
+        "check_result"
+      ],
+      "type": "string"
+    },
+    "CheckResultId": {
+      "pattern": "^chk_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "CheckStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FailureCategory"
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "message": {
+          "$ref": "#/$defs/NonBlankString"
+        }
+      },
+      "required": [
+        "category",
+        "evidence",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FailureCategory": {
+      "enum": [
+        "agent",
+        "simulator",
+        "judge",
+        "configuration",
+        "infrastructure",
+        "harness",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "InvocationId": {
+      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "NonBlankString": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "enum": [
+        "kensa.protocol.v1"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "document_kind": {
+      "$ref": "#/$defs/CheckResultDocumentKind"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "failure": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Failure"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/CheckResultId"
+    },
+    "invocation_id": {
+      "$ref": "#/$defs/InvocationId"
+    },
+    "name": {
+      "$ref": "#/$defs/NonBlankString"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "$ref": "#/$defs/CheckStatus"
+    }
+  },
+  "required": [
+    "document_kind",
+    "duration_ms",
+    "ended_at",
+    "evidence",
+    "failure",
+    "id",
+    "invocation_id",
+    "name",
+    "schema_version",
+    "started_at",
+    "status"
+  ],
+  "title": "CheckResult",
+  "type": "object"
+}

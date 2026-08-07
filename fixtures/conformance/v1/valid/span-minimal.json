@@ -1,0 +1,20 @@
+{
+  "attributes": {},
+  "document_kind": "span",
+  "duration_ms": null,
+  "ended_at": null,
+  "input": null,
+  "input_recorded": false,
+  "invocation_id": "inv_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "name": "invoke",
+  "output": null,
+  "output_recorded": false,
+  "parent_span_id": null,
+  "schema_version": "kensa.protocol.v1",
+  "span_id": "00f067aa0ba902b7",
+  "span_kind": "internal",
+  "started_at": null,
+  "status": "unset",
+  "status_message": null,
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+}

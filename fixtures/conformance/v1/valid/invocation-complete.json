@@ -1,0 +1,41 @@
+{
+  "attempt": 1,
+  "attributes": {
+    "model": "example"
+  },
+  "case": {
+    "id": "checkout-happy-path",
+    "input": {
+      "prompt": "Buy milk"
+    },
+    "metadata": {
+      "priority": 1
+    }
+  },
+  "document_kind": "invocation",
+  "duration_ms": 500,
+  "ended_at": "2026-08-06T00:00:00.500Z",
+  "evidence_completeness": {
+    "reason": null,
+    "status": "complete"
+  },
+  "failure": null,
+  "id": "inv_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "output": null,
+  "output_recorded": true,
+  "provenance": {
+    "adapter": "pytest",
+    "adapter_version": "0.1.0",
+    "effects": "captured",
+    "environment": "test",
+    "producer": "kensa-python",
+    "producer_version": "0.1.0",
+    "revision": "abc123",
+    "runtime": "python",
+    "runtime_version": "3.12.0"
+  },
+  "run_id": "run_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": "2026-08-06T00:00:00.000Z",
+  "status": "pass"
+}

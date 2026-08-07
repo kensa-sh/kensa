@@ -1,0 +1,12 @@
+{
+  "attributes": {},
+  "created_at": "2026-08-06t00:00:00.000Z",
+  "document_kind": "eval_run",
+  "duration_ms": null,
+  "ended_at": null,
+  "failure": null,
+  "id": "run_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "pending"
+}

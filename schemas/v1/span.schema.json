@@ -1,0 +1,154 @@
+{
+  "$defs": {
+    "InvocationId": {
+      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "NonBlankString": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "enum": [
+        "kensa.protocol.v1"
+      ],
+      "type": "string"
+    },
+    "SpanDocumentKind": {
+      "enum": [
+        "span"
+      ],
+      "type": "string"
+    },
+    "SpanId": {
+      "pattern": "^[0-9a-f]{16}$",
+      "type": "string"
+    },
+    "SpanStatus": {
+      "enum": [
+        "unset",
+        "ok",
+        "error"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "TraceId": {
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attributes": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "document_kind": {
+      "$ref": "#/$defs/SpanDocumentKind"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "input": true,
+    "input_recorded": {
+      "type": "boolean"
+    },
+    "invocation_id": {
+      "$ref": "#/$defs/InvocationId"
+    },
+    "name": {
+      "$ref": "#/$defs/NonBlankString"
+    },
+    "output": true,
+    "output_recorded": {
+      "type": "boolean"
+    },
+    "parent_span_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SpanId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "span_id": {
+      "$ref": "#/$defs/SpanId"
+    },
+    "span_kind": {
+      "$ref": "#/$defs/NonBlankString"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "$ref": "#/$defs/SpanStatus"
+    },
+    "status_message": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "trace_id": {
+      "$ref": "#/$defs/TraceId"
+    }
+  },
+  "required": [
+    "attributes",
+    "document_kind",
+    "duration_ms",
+    "ended_at",
+    "input",
+    "input_recorded",
+    "invocation_id",
+    "name",
+    "output",
+    "output_recorded",
+    "parent_span_id",
+    "schema_version",
+    "span_id",
+    "span_kind",
+    "started_at",
+    "status",
+    "status_message",
+    "trace_id"
+  ],
+  "title": "Span",
+  "type": "object"
+}
