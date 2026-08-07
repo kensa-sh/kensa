@@ -1,4 +1,8 @@
-use kensa_core::protocol::{CheckResult, EvalRun, EvidenceCompleteness, Invocation, Span};
+use kensa_core::protocol::{
+    CheckResult, EvalRun, EvidenceCompleteness, EvidenceStatus, Failure, Invocation, Span,
+    canonical_json,
+};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 fn failure() -> Value {
@@ -93,6 +97,59 @@ fn check_result(status: &str, failure: Value) -> Value {
         "evidence": {},
         "failure": failure
     })
+}
+
+fn assert_not_serializable<T: Serialize>(value: &T) {
+    assert!(serde_json::to_value(value).is_err());
+    assert!(canonical_json(value).is_err());
+}
+
+#[test]
+fn contradictory_rust_values_cannot_produce_protocol_json() {
+    let evidence_completeness = EvidenceCompleteness {
+        status: EvidenceStatus::Complete,
+        reason: Some("unexpected".parse().unwrap()),
+    };
+    assert_not_serializable(&evidence_completeness);
+
+    let failure = serde_json::from_value::<Failure>(failure()).unwrap();
+
+    let mut eval_run = serde_json::from_value::<EvalRun>(eval_run("pass", Value::Null)).unwrap();
+    eval_run.failure = Some(failure.clone());
+    assert_not_serializable(&eval_run);
+
+    let invocation = serde_json::from_value::<Invocation>(invocation()).unwrap();
+    let mut invalid_failure = invocation.clone();
+    invalid_failure.failure = Some(failure.clone());
+    assert_not_serializable(&invalid_failure);
+
+    let mut invalid_output = invocation.clone();
+    invalid_output.output_recorded = false;
+    invalid_output.output = Some(json!({"value": 1}));
+    assert_not_serializable(&invalid_output);
+
+    let mut invalid_completeness = invocation;
+    invalid_completeness.evidence_completeness.reason = Some("unexpected".parse().unwrap());
+    assert_not_serializable(&invalid_completeness);
+
+    let span = serde_json::from_value::<Span>(span()).unwrap();
+    let mut invalid_message = span.clone();
+    invalid_message.status_message = Some("unexpected".parse().unwrap());
+    assert_not_serializable(&invalid_message);
+
+    let mut invalid_input = span.clone();
+    invalid_input.input = Some(json!({"value": 1}));
+    assert_not_serializable(&invalid_input);
+
+    let mut invalid_output = span;
+    invalid_output.output_recorded = false;
+    invalid_output.output = Some(json!({"value": 1}));
+    assert_not_serializable(&invalid_output);
+
+    let mut check_result =
+        serde_json::from_value::<CheckResult>(check_result("pass", Value::Null)).unwrap();
+    check_result.failure = Some(failure);
+    assert_not_serializable(&check_result);
 }
 
 #[test]

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
 use serde_json::Value;
 
 use super::primitives::{
@@ -10,6 +10,23 @@ use super::primitives::{
 };
 
 pub type JsonObject = BTreeMap<String, Value>;
+
+macro_rules! serialize_validated {
+    ($name:ident { $($field:ident),+ $(,)? }) => {
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                let field_count = [$(stringify!($field)),+].len();
+                let mut state = serializer.serialize_struct(stringify!($name), field_count)?;
+                $(state.serialize_field(stringify!($field), &self.$field)?;)+
+                state.end()
+            }
+        }
+    };
+}
 
 fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -133,12 +150,30 @@ pub struct ExecutionProvenance {
     pub effects: EffectPolicy,
 }
 
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceCompleteness {
     pub status: EvidenceStatus,
     pub reason: Option<NonBlankString>,
 }
+
+impl EvidenceCompleteness {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let valid = match self.status {
+            EvidenceStatus::Complete => self.reason.is_none(),
+            EvidenceStatus::Pending | EvidenceStatus::Partial | EvidenceStatus::Unavailable => {
+                self.reason.is_some()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err("reason contradicts evidence completeness status")
+        }
+    }
+}
+
+serialize_validated!(EvidenceCompleteness { status, reason });
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,25 +189,16 @@ impl<'de> Deserialize<'de> for EvidenceCompleteness {
         D: Deserializer<'de>,
     {
         let raw = RawEvidenceCompleteness::deserialize(deserializer)?;
-        let valid = match raw.status {
-            EvidenceStatus::Complete => raw.reason.is_none(),
-            EvidenceStatus::Pending | EvidenceStatus::Partial | EvidenceStatus::Unavailable => {
-                raw.reason.is_some()
-            }
-        };
-        if !valid {
-            return Err(de::Error::custom(
-                "reason contradicts evidence completeness status",
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             status: raw.status,
             reason: raw.reason,
-        })
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
     }
 }
 
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EvalRun {
     pub schema_version: SchemaVersion,
@@ -186,6 +212,36 @@ pub struct EvalRun {
     pub attributes: JsonObject,
     pub failure: Option<Failure>,
 }
+
+impl EvalRun {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let failure_required = matches!(
+            self.status,
+            EvalRunStatus::Fail
+                | EvalRunStatus::Error
+                | EvalRunStatus::Cancelled
+                | EvalRunStatus::Interrupted
+        );
+        if failure_required == self.failure.is_some() {
+            Ok(())
+        } else {
+            Err("failure contradicts eval run status")
+        }
+    }
+}
+
+serialize_validated!(EvalRun {
+    schema_version,
+    document_kind,
+    id,
+    status,
+    created_at,
+    started_at,
+    ended_at,
+    duration_ms,
+    attributes,
+    failure,
+});
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,17 +268,7 @@ impl<'de> Deserialize<'de> for EvalRun {
         D: Deserializer<'de>,
     {
         let raw = RawEvalRun::deserialize(deserializer)?;
-        let failure_required = matches!(
-            raw.status,
-            EvalRunStatus::Fail
-                | EvalRunStatus::Error
-                | EvalRunStatus::Cancelled
-                | EvalRunStatus::Interrupted
-        );
-        if failure_required != raw.failure.is_some() {
-            return Err(de::Error::custom("failure contradicts eval run status"));
-        }
-        Ok(Self {
+        let value = Self {
             schema_version: raw.schema_version,
             document_kind: raw.document_kind,
             id: raw.id,
@@ -233,11 +279,13 @@ impl<'de> Deserialize<'de> for EvalRun {
             duration_ms: raw.duration_ms,
             attributes: raw.attributes,
             failure: raw.failure,
-        })
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
     }
 }
 
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Invocation {
     pub schema_version: SchemaVersion,
@@ -257,6 +305,45 @@ pub struct Invocation {
     pub attributes: JsonObject,
     pub failure: Option<Failure>,
 }
+
+impl Invocation {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let failure_required = matches!(
+            self.status,
+            InvocationStatus::Fail
+                | InvocationStatus::Error
+                | InvocationStatus::Cancelled
+                | InvocationStatus::Skipped
+                | InvocationStatus::Interrupted
+        );
+        if failure_required != self.failure.is_some() {
+            return Err("failure contradicts invocation status");
+        }
+        if !self.output_recorded && self.output.is_some() {
+            return Err("output present when output_recorded is false");
+        }
+        self.evidence_completeness.validate()
+    }
+}
+
+serialize_validated!(Invocation {
+    schema_version,
+    document_kind,
+    id,
+    run_id,
+    case,
+    attempt,
+    status,
+    started_at,
+    ended_at,
+    duration_ms,
+    output_recorded,
+    output,
+    provenance,
+    evidence_completeness,
+    attributes,
+    failure,
+});
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -290,23 +377,7 @@ impl<'de> Deserialize<'de> for Invocation {
         D: Deserializer<'de>,
     {
         let raw = RawInvocation::deserialize(deserializer)?;
-        let failure_required = matches!(
-            raw.status,
-            InvocationStatus::Fail
-                | InvocationStatus::Error
-                | InvocationStatus::Cancelled
-                | InvocationStatus::Skipped
-                | InvocationStatus::Interrupted
-        );
-        if failure_required != raw.failure.is_some() {
-            return Err(de::Error::custom("failure contradicts invocation status"));
-        }
-        if !raw.output_recorded && raw.output.is_some() {
-            return Err(de::Error::custom(
-                "output present when output_recorded is false",
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             schema_version: raw.schema_version,
             document_kind: raw.document_kind,
             id: raw.id,
@@ -323,11 +394,13 @@ impl<'de> Deserialize<'de> for Invocation {
             evidence_completeness: raw.evidence_completeness,
             attributes: raw.attributes,
             failure: raw.failure,
-        })
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
     }
 }
 
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Span {
     pub schema_version: SchemaVersion,
@@ -349,6 +422,42 @@ pub struct Span {
     pub output: Option<Value>,
     pub attributes: JsonObject,
 }
+
+impl Span {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if matches!(self.status, SpanStatus::Error) != self.status_message.is_some() {
+            return Err("status_message contradicts span status");
+        }
+        if !self.input_recorded && self.input.is_some() {
+            return Err("input present when input_recorded is false");
+        }
+        if !self.output_recorded && self.output.is_some() {
+            return Err("output present when output_recorded is false");
+        }
+        Ok(())
+    }
+}
+
+serialize_validated!(Span {
+    schema_version,
+    document_kind,
+    invocation_id,
+    trace_id,
+    span_id,
+    parent_span_id,
+    name,
+    span_kind,
+    status,
+    status_message,
+    started_at,
+    ended_at,
+    duration_ms,
+    input_recorded,
+    input,
+    output_recorded,
+    output,
+    attributes,
+});
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -386,20 +495,7 @@ impl<'de> Deserialize<'de> for Span {
         D: Deserializer<'de>,
     {
         let raw = RawSpan::deserialize(deserializer)?;
-        if matches!(raw.status, SpanStatus::Error) != raw.status_message.is_some() {
-            return Err(de::Error::custom("status_message contradicts span status"));
-        }
-        if !raw.input_recorded && raw.input.is_some() {
-            return Err(de::Error::custom(
-                "input present when input_recorded is false",
-            ));
-        }
-        if !raw.output_recorded && raw.output.is_some() {
-            return Err(de::Error::custom(
-                "output present when output_recorded is false",
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             schema_version: raw.schema_version,
             document_kind: raw.document_kind,
             invocation_id: raw.invocation_id,
@@ -418,11 +514,13 @@ impl<'de> Deserialize<'de> for Span {
             output_recorded: raw.output_recorded,
             output: raw.output,
             attributes: raw.attributes,
-        })
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
     }
 }
 
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckResult {
     pub schema_version: SchemaVersion,
@@ -437,6 +535,34 @@ pub struct CheckResult {
     pub evidence: JsonObject,
     pub failure: Option<Failure>,
 }
+
+impl CheckResult {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let failure_required = matches!(
+            self.status,
+            CheckStatus::Fail | CheckStatus::Error | CheckStatus::Skipped
+        );
+        if failure_required == self.failure.is_some() {
+            Ok(())
+        } else {
+            Err("failure contradicts check result status")
+        }
+    }
+}
+
+serialize_validated!(CheckResult {
+    schema_version,
+    document_kind,
+    id,
+    invocation_id,
+    name,
+    status,
+    started_at,
+    ended_at,
+    duration_ms,
+    evidence,
+    failure,
+});
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -464,14 +590,7 @@ impl<'de> Deserialize<'de> for CheckResult {
         D: Deserializer<'de>,
     {
         let raw = RawCheckResult::deserialize(deserializer)?;
-        let failure_required = matches!(
-            raw.status,
-            CheckStatus::Fail | CheckStatus::Error | CheckStatus::Skipped
-        );
-        if failure_required != raw.failure.is_some() {
-            return Err(de::Error::custom("failure contradicts check result status"));
-        }
-        Ok(Self {
+        let value = Self {
             schema_version: raw.schema_version,
             document_kind: raw.document_kind,
             id: raw.id,
@@ -483,7 +602,9 @@ impl<'de> Deserialize<'de> for CheckResult {
             duration_ms: raw.duration_ms,
             evidence: raw.evidence,
             failure: raw.failure,
-        })
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
     }
 }
 
