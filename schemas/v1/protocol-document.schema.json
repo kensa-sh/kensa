@@ -1,0 +1,656 @@
+{
+  "$defs": {
+    "CaseId": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "CaseSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/CaseId"
+        },
+        "input": true,
+        "metadata": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "CheckResult": {
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": {
+          "$ref": "#/$defs/CheckResultDocumentKind"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/CheckResultId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/InvocationId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "required": [
+        "document_kind",
+        "duration_ms",
+        "ended_at",
+        "evidence",
+        "failure",
+        "id",
+        "invocation_id",
+        "name",
+        "schema_version",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "CheckResultDocumentKind": {
+      "enum": [
+        "check_result"
+      ],
+      "type": "string"
+    },
+    "CheckResultId": {
+      "pattern": "^chk_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "CheckStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "EffectPolicy": {
+      "enum": [
+        "none",
+        "captured",
+        "sandboxed",
+        "live"
+      ],
+      "type": "string"
+    },
+    "EvalRun": {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/EvalRunDocumentKind"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/EvalRunId"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/EvalRunStatus"
+        }
+      },
+      "required": [
+        "attributes",
+        "created_at",
+        "document_kind",
+        "duration_ms",
+        "ended_at",
+        "failure",
+        "id",
+        "schema_version",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "EvalRunDocumentKind": {
+      "enum": [
+        "eval_run"
+      ],
+      "type": "string"
+    },
+    "EvalRunId": {
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EvalRunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "pass",
+        "fail",
+        "error",
+        "cancelled",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "EvidenceCompleteness": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/EvidenceStatus"
+        }
+      },
+      "required": [
+        "reason",
+        "status"
+      ],
+      "type": "object"
+    },
+    "EvidenceStatus": {
+      "enum": [
+        "complete",
+        "pending",
+        "partial",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ExecutionProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effects": {
+          "$ref": "#/$defs/EffectPolicy"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "producer_version": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "runtime_version": {
+          "$ref": "#/$defs/NonBlankString"
+        }
+      },
+      "required": [
+        "adapter",
+        "adapter_version",
+        "effects",
+        "environment",
+        "producer",
+        "producer_version",
+        "revision",
+        "runtime",
+        "runtime_version"
+      ],
+      "type": "object"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FailureCategory"
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "message": {
+          "$ref": "#/$defs/NonBlankString"
+        }
+      },
+      "required": [
+        "category",
+        "evidence",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FailureCategory": {
+      "enum": [
+        "agent",
+        "simulator",
+        "judge",
+        "configuration",
+        "infrastructure",
+        "harness",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "Invocation": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "case": {
+          "$ref": "#/$defs/CaseSnapshot"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/InvocationDocumentKind"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_completeness": {
+          "$ref": "#/$defs/EvidenceCompleteness"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/InvocationId"
+        },
+        "output": true,
+        "output_recorded": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ExecutionProvenance"
+        },
+        "run_id": {
+          "$ref": "#/$defs/EvalRunId"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/InvocationStatus"
+        }
+      },
+      "required": [
+        "attempt",
+        "attributes",
+        "case",
+        "document_kind",
+        "duration_ms",
+        "ended_at",
+        "evidence_completeness",
+        "failure",
+        "id",
+        "output",
+        "output_recorded",
+        "provenance",
+        "run_id",
+        "schema_version",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "InvocationDocumentKind": {
+      "enum": [
+        "invocation"
+      ],
+      "type": "string"
+    },
+    "InvocationId": {
+      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "InvocationStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "pass",
+        "fail",
+        "error",
+        "cancelled",
+        "skipped",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "NonBlankString": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "enum": [
+        "kensa.protocol.v1"
+      ],
+      "type": "string"
+    },
+    "Span": {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/SpanDocumentKind"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": true,
+        "input_recorded": {
+          "type": "boolean"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/InvocationId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "output": true,
+        "output_recorded": {
+          "type": "boolean"
+        },
+        "parent_span_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpanId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "span_id": {
+          "$ref": "#/$defs/SpanId"
+        },
+        "span_kind": {
+          "$ref": "#/$defs/NonBlankString"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/SpanStatus"
+        },
+        "status_message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonBlankString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trace_id": {
+          "$ref": "#/$defs/TraceId"
+        }
+      },
+      "required": [
+        "attributes",
+        "document_kind",
+        "duration_ms",
+        "ended_at",
+        "input",
+        "input_recorded",
+        "invocation_id",
+        "name",
+        "output",
+        "output_recorded",
+        "parent_span_id",
+        "schema_version",
+        "span_id",
+        "span_kind",
+        "started_at",
+        "status",
+        "status_message",
+        "trace_id"
+      ],
+      "type": "object"
+    },
+    "SpanDocumentKind": {
+      "enum": [
+        "span"
+      ],
+      "type": "string"
+    },
+    "SpanId": {
+      "pattern": "^[0-9a-f]{16}$",
+      "type": "string"
+    },
+    "SpanStatus": {
+      "enum": [
+        "unset",
+        "ok",
+        "error"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "TraceId": {
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/EvalRun"
+    },
+    {
+      "$ref": "#/$defs/Invocation"
+    },
+    {
+      "$ref": "#/$defs/Span"
+    },
+    {
+      "$ref": "#/$defs/CheckResult"
+    }
+  ],
+  "title": "ProtocolDocument"
+}

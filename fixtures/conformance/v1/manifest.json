@@ -1,0 +1,235 @@
+{
+  "fixtures": [
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/failure-without-details.json",
+      "valid": false
+    },
+    {
+      "document_kind": "invocation",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/invocation-attempt-zero.json",
+      "valid": false
+    },
+    {
+      "document_kind": "invocation",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/invocation-complete-with-reason.json",
+      "valid": false
+    },
+    {
+      "document_kind": "invocation",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/invocation-error-without-failure.json",
+      "valid": false
+    },
+    {
+      "document_kind": "invocation",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/invocation-nested-unknown-field.json",
+      "valid": false
+    },
+    {
+      "document_kind": "invocation",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/invocation-output-not-recorded.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/missing-required-field.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/non-v7-run-id.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/pass-with-failure.json",
+      "valid": false
+    },
+    {
+      "document_kind": "span",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/span-error-without-message.json",
+      "valid": false
+    },
+    {
+      "document_kind": "span",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/span-input-not-recorded.json",
+      "valid": false
+    },
+    {
+      "document_kind": "span",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/span-uppercase-trace-id.json",
+      "valid": false
+    },
+    {
+      "document_kind": "span",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/span-zero-id.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/timestamp-invalid-calendar.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "rust",
+      "file": "invalid/timestamp-leap-second.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-long-fraction.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-lowercase-t.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-lowercase-z.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-missing-fraction.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-numeric-offset.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/timestamp-short-fraction.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/unknown-document-kind.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/unknown-enum.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/unknown-field.json",
+      "valid": false
+    },
+    {
+      "document_kind": "eval_run",
+      "expected_rejection_boundary": "schema",
+      "file": "invalid/unsupported-version.json",
+      "valid": false
+    },
+    {
+      "document_kind": "check_result",
+      "file": "valid/check-result-minimal.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-complete.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-configuration.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-harness.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-infrastructure.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-judge.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-simulator.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-failure-unknown.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-minimal.json",
+      "valid": true
+    },
+    {
+      "document_kind": "eval_run",
+      "file": "valid/eval-run-year-zero.json",
+      "valid": true
+    },
+    {
+      "document_kind": "invocation",
+      "file": "valid/invocation-complete.json",
+      "valid": true
+    },
+    {
+      "document_kind": "invocation",
+      "file": "valid/invocation-evidence-partial.json",
+      "valid": true
+    },
+    {
+      "document_kind": "invocation",
+      "file": "valid/invocation-evidence-pending.json",
+      "valid": true
+    },
+    {
+      "document_kind": "invocation",
+      "file": "valid/invocation-evidence-unavailable.json",
+      "valid": true
+    },
+    {
+      "document_kind": "span",
+      "file": "valid/span-complete.json",
+      "valid": true
+    },
+    {
+      "document_kind": "span",
+      "file": "valid/span-minimal.json",
+      "valid": true
+    }
+  ],
+  "schema_version": "kensa.conformance.v1"
+}
