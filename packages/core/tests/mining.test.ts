@@ -287,6 +287,17 @@ describe("trace mining contracts", () => {
         ],
       }),
     ],
+    [
+      "blank proposed check",
+      queue({
+        items: [
+          {
+            ...(queue().items as Array<Record<string, unknown>>)[0],
+            proposed_checks: [" "],
+          },
+        ],
+      }),
+    ],
   ])("rejects %s", (_label, value) => {
     expect(() => parseInspectQueue(value)).toThrow(CoreValidationError);
   });

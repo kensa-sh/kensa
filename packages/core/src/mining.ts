@@ -30,7 +30,7 @@ const inspectIdeaSchema = z.strictObject({
   failure_pattern: trimmedString,
   expected_outcome: trimmedString,
   expected_current_behavior: z.enum(expectedBehaviors),
-  proposed_checks: z.array(z.string().trim()).default([]),
+  proposed_checks: z.array(trimmedString).default([]),
   case_shape: trimmedString.nullable().default(null),
   risks: trimmedString.nullable().default(null),
 });
