@@ -44,7 +44,7 @@ from kensa.constants import (
     TRACE_IMPORTS_DIR,
     WORKFLOW_TEXT,
 )
-from kensa.engine import EngineClient
+from kensa.engine import EngineClient, KensaEngineError
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
 from kensa.models import (
@@ -868,21 +868,36 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
     artifact = artifact_dir / "results" / f"{run_id}.json"
     control_path = artifact_dir / "state" / f"{run_id}.json"
-    with EngineClient() as engine:
-        core_result = engine.build_run(
+    try:
+        with EngineClient() as engine:
+            core_result = engine.build_run(
+                run_id=run_id,
+                complete=False,
+                interruption=None,
+                trials=[],
+            )
+        write_run_artifacts(
             run_id=run_id,
-            complete=False,
-            interruption=None,
             trials=[],
+            result_path=artifact,
+            artifact_dir=artifact_dir,
+            core_result=core_result,
+            complete=False,
         )
-    write_run_artifacts(
-        run_id=run_id,
-        trials=[],
-        result_path=artifact,
-        artifact_dir=artifact_dir,
-        core_result=core_result,
-        complete=False,
-    )
+    except (KensaEngineError, ValueError) as exc:
+        message = f"Kensa engine startup failed: {exc}"
+        if json_output:
+            cli_output.print_json_envelope(
+                command="eval",
+                ok=False,
+                exit_code=2,
+                summary="Kensa eval could not start the engine.",
+                data={"paths": paths, "workers": workers, "pytest_args": pytest_args},
+                errors=[message],
+            )
+        else:
+            click.echo(message, err=True)
+        return 2
     write_control(
         control_path,
         WatchdogControl(

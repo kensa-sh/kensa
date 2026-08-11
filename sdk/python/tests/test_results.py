@@ -516,6 +516,7 @@ def test_models_are_strict_frozen_and_recursively_forbid_unknown_fields(tmp_path
         "aggregate_verdict",
         "failure_count",
         "summary_metric",
+        "boolean_number",
         "complete_interruption",
     ],
 )
@@ -553,6 +554,9 @@ def test_loader_rejects_cross_section_inconsistency(
         payload["summary"]["error_counts"]["agent"] = 1
     elif mutation == "summary_metric":
         payload["summary"]["cost_latency"]["latency_mean_ms"] = 999.0
+    elif mutation == "boolean_number":
+        payload["trials"][0]["output"] = {"value": 1}
+        payload["aggregates"][0]["trials"][0]["output"] = {"value": True}
     elif mutation == "complete_interruption":
         payload["interruption"] = {"kind": "crash", "message": "worker crashed"}
     result_path.write_text(json.dumps(payload))

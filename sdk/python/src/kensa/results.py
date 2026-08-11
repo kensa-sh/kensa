@@ -8,7 +8,7 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-from kensa.engine import EngineClient, KensaEngineError
+from kensa.engine import EngineClient, KensaEngineError, _json_values_equal
 from kensa.errors import FailureCategory, TrialFailure
 
 RunStatus: TypeAlias = Literal["pass", "fail", "error", "skipped", "provisional"]
@@ -235,7 +235,10 @@ def load_run_result(path: str | Path) -> RunResult:
         raise ValueError(
             f"Invalid Kensa result artifact {result_path}: engine verification failed: {exc}"
         ) from exc
-    if result != canonical:
+    if not _json_values_equal(
+        result.model_dump(mode="json"),
+        canonical.model_dump(mode="json"),
+    ):
         raise ValueError(
             f"Invalid Kensa result artifact {result_path}: "
             "result does not match canonical engine derivation"
