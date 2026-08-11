@@ -8,7 +8,7 @@ import pytest
 
 from kensa import cli
 from kensa._smoke import is_smoke_aggregate, is_smoke_identity, is_smoke_trial
-from kensa.artifacts import aggregate_trials, write_run_artifacts
+from kensa.artifacts import write_run_artifacts
 from kensa.errors import TrialFailure
 from kensa.pytest_plugin import _write_scoring_summary
 from kensa.runtime import TrialMetadata
@@ -363,130 +363,6 @@ def test_run_summary_counts_agent_errors_and_timeouts_as_failures() -> None:
         {"k": 2, "value": 0.0, "cohorts": 1},
         {"k": 3, "value": 0.0, "cohorts": 1},
     ]
-
-
-def test_aggregate_trials_excludes_skipped_trials() -> None:
-    skipped = TrialMetadata(
-        nodeid="test_eval.py::test_agent[trial1-case-a]",
-        group_id="test_eval.py::test_agent[case-a]",
-        case_id="case-a",
-        trial_index=1,
-        configured_trials=2,
-        status="skipped",
-        failure=TrialFailure(
-            category="harness",
-            kind="skip",
-            message="skipped",
-            evidence={"phase": "call"},
-        ),
-    )
-    passed = TrialMetadata(
-        nodeid="test_eval.py::test_agent[trial2-case-a]",
-        group_id="test_eval.py::test_agent[case-a]",
-        case_id="case-a",
-        trial_index=2,
-        configured_trials=2,
-        status="pass",
-    )
-
-    aggregates = aggregate_trials([skipped, passed])
-
-    assert len(aggregates) == 1
-    assert aggregates[0].configured_trials == 2
-    assert aggregates[0].total == 1
-    assert aggregates[0].skipped == 1
-    assert aggregates[0].partial is False
-    assert aggregates[0].verdict == "pass"
-    assert aggregates[0].trials == [passed]
-    assert aggregates[0].to_dict()["skipped"] == 1
-    assert aggregate_trials([skipped]) == []
-
-
-@pytest.mark.parametrize(
-    ("trials", "verdict"),
-    [
-        (
-            [
-                TrialMetadata(
-                    nodeid="timeout",
-                    group_id="group",
-                    case_id="case",
-                    trial_index=1,
-                    configured_trials=1,
-                    status="fail",
-                    failure=TrialFailure(
-                        category="agent",
-                        kind="timeout",
-                        message="timed out",
-                    ),
-                )
-            ],
-            "error",
-        ),
-        (
-            [
-                TrialMetadata(
-                    nodeid="partial",
-                    group_id="group",
-                    case_id="case",
-                    trial_index=1,
-                    configured_trials=2,
-                    status="pass",
-                )
-            ],
-            "partial",
-        ),
-        (
-            [
-                TrialMetadata(
-                    nodeid="failed",
-                    group_id="group",
-                    case_id="case",
-                    trial_index=1,
-                    configured_trials=1,
-                    status="fail",
-                    failure=TrialFailure(
-                        category="agent",
-                        kind="assertion",
-                        message="failed",
-                    ),
-                )
-            ],
-            "fail",
-        ),
-        (
-            [
-                TrialMetadata(
-                    nodeid="passing",
-                    group_id="group",
-                    case_id="case",
-                    trial_index=1,
-                    configured_trials=2,
-                    status="pass",
-                ),
-                TrialMetadata(
-                    nodeid="failing",
-                    group_id="group",
-                    case_id="case",
-                    trial_index=2,
-                    configured_trials=2,
-                    status="fail",
-                    failure=TrialFailure(
-                        category="agent",
-                        kind="assertion",
-                        message="failed",
-                    ),
-                ),
-            ],
-            "flaky",
-        ),
-    ],
-)
-def test_aggregate_trials_derives_legacy_fallback_verdicts(
-    trials: list[TrialMetadata],
-    verdict: str,
-) -> None:
-    assert aggregate_trials(trials)[0].verdict == verdict
 
 
 def test_run_summary_excludes_setup_and_teardown_from_all_metrics() -> None:

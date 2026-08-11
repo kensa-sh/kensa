@@ -480,7 +480,7 @@ def test_agent(case):
     assert payload["trials"][0]["failure"]["category"] == "infrastructure"
 
 
-def test_missing_default_engine_preserves_python_artifacts(
+def test_missing_default_engine_is_a_usage_error(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -491,7 +491,6 @@ def test_missing_default_engine_preserves_python_artifacts(
 
     monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
     monkeypatch.setattr(pytest_plugin, "EngineClient", MissingEngine)
-    artifact_dir = tmp_path / "artifacts"
     pytester.makepyfile(
         test_eval="""
 import pytest
@@ -511,14 +510,11 @@ def test_agent(case):
     result = pytester.runpytest(
         "-q",
         "--kensa-write-artifacts",
-        f"--kensa-artifact-dir={artifact_dir}",
+        f"--kensa-artifact-dir={tmp_path / 'artifacts'}",
     )
 
-    result.assert_outcomes(passed=1)
-    result_path = next((artifact_dir / "results").glob("*.json"))
-    payload = json.loads(result_path.read_text(encoding="utf-8"))
-    assert payload["complete"] is True
-    assert payload["trials"][0]["status"] == "pass"
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*Kensa engine startup failed: missing*"])
 
 
 def test_engine_command_uses_built_development_engine(monkeypatch: pytest.MonkeyPatch) -> None:

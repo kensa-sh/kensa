@@ -52,57 +52,6 @@ def trial_sort_key(trial: TrialMetadata) -> tuple[str, int, str]:
     return trial.group_id, trial.trial_index, trial.nodeid
 
 
-def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
-    groups: dict[str, list[TrialMetadata]] = {}
-    for trial in trials:
-        groups.setdefault(trial.group_id, []).append(trial)
-    aggregates: list[KensaAggregate] = []
-    for group_id, group_trials in sorted(groups.items()):
-        all_trials = sorted(group_trials, key=lambda trial: trial.trial_index)
-        ordered = [trial for trial in all_trials if trial.status != "skipped"]
-        if not ordered:
-            continue
-        total = len(ordered)
-        passed = sum(1 for trial in ordered if trial.status == "pass")
-        errored = sum(1 for trial in ordered if trial.status == "error")
-        failed = sum(1 for trial in ordered if trial.status == "fail")
-        skipped = len(all_trials) - total
-        configured = max(trial.configured_trials for trial in all_trials)
-        partial = total + skipped < configured
-        timed_out = any(
-            trial.failure is not None and trial.failure.kind == "timeout" for trial in ordered
-        )
-        if timed_out:
-            verdict = "error"
-        elif partial:
-            verdict = "partial"
-        elif errored:
-            verdict = "error"
-        elif passed == total:
-            verdict = "pass"
-        elif failed == total:
-            verdict = "fail"
-        else:
-            verdict = "flaky"
-        aggregates.append(
-            KensaAggregate(
-                group_id=group_id,
-                case_id=ordered[0].case_id,
-                configured_trials=configured,
-                total=total,
-                passed=passed,
-                failed=failed,
-                errored=errored,
-                partial=partial,
-                verdict=verdict,
-                trials=ordered,
-                skipped=skipped,
-                smoke=any(trial.is_smoke for trial in all_trials),
-            )
-        )
-    return aggregates
-
-
 def upsert_trial(trials: list[TrialMetadata], metadata: TrialMetadata) -> None:
     for index, existing in enumerate(trials):
         if existing.nodeid == metadata.nodeid:
@@ -263,7 +212,6 @@ def _write_text_atomic(path: Path, content: str) -> None:
 
 __all__ = [
     "KensaAggregate",
-    "aggregate_trials",
     "trial_from_dict",
     "trial_result_to_metadata",
     "trial_sort_key",

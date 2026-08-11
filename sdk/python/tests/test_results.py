@@ -199,18 +199,7 @@ def test_result_v1_accepts_additive_structured_tool_calls(tmp_path: Path) -> Non
     assert result.trials[0].trace["tool_calls"] == [tool_call]
 
 
-def test_loader_keeps_checked_in_v1_artifact_compatible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import kensa.artifacts as artifacts
-    import kensa.results as results
-
-    def reject_current_derivation(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("v1 validation used mutable derivation code")
-
-    monkeypatch.setattr(artifacts, "aggregate_trials", reject_current_derivation)
-    monkeypatch.setattr(results, "run_summary", reject_current_derivation, raising=False)
-
+def test_loader_keeps_checked_in_v1_artifact_compatible() -> None:
     result = load_run_result(_V1_RESULT_FIXTURE)
 
     assert result.run_id == "compatibility-v1"

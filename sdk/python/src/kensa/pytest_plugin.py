@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections import Counter
@@ -16,7 +15,6 @@ import pytest
 
 from kensa.artifacts import (
     KensaAggregate,
-    aggregate_trials,
     aggregates_from_core_result,
     trial_from_dict,
     trial_sort_key,
@@ -219,6 +217,7 @@ class KensaSessionState:
         self.complete = True
         self.interruption: dict[str, Any] | None = None
         self._engine: EngineClient | None = None
+        self._engine_error: KensaEngineError | None = None
         self._engine_resolved = False
         self._engine_closed = False
         self._core_result: dict[str, Any] | None = None
@@ -302,7 +301,7 @@ class KensaSessionState:
             self.interruption = {"kind": kind, "message": message, **details}
 
     @property
-    def engine(self) -> EngineClient | None:
+    def engine(self) -> EngineClient:
         if self._engine_closed:
             raise KensaEngineError("Kensa engine session is closed", code="closed")
         if not self._engine_resolved:
@@ -310,8 +309,11 @@ class KensaSessionState:
             try:
                 self._engine = EngineClient()
             except KensaEngineError as exc:
-                if os.environ.get("KENSA_ENGINE_COMMAND") is not None or exc.code != "startup":
-                    raise
+                self._engine_error = exc
+                raise
+        if self._engine_error is not None:
+            raise self._engine_error
+        assert self._engine is not None
         return self._engine
 
     def prepare_engine_shutdown(self, reason: str) -> None:
@@ -365,8 +367,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     if not any(item.get_closest_marker("kensa") is not None for item in session.items):
         return
     try:
-        engine = _state(session.config).engine
-        del engine
+        _ = _state(session.config).engine
     except KensaEngineError as exc:
         raise pytest.UsageError(f"Kensa engine startup failed: {exc}") from exc
 
@@ -851,13 +852,17 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
     core_result = _build_core_result(state)
     state.close_engine("pytest session finished", notify_engine=False)
     state.aggregates = (
-        aggregates_from_core_result(core_result, state.trials)
-        if core_result is not None
-        else aggregate_trials(state.trials)
+        aggregates_from_core_result(core_result, state.trials) if core_result is not None else []
     )
     if state.write_artifacts and (state.trials or state.control is not None):
         _write_artifacts(state)
-    if any(aggregate.verdict != "pass" for aggregate in state.aggregates):
+    preserve_exit = exitstatus in {
+        pytest.ExitCode.INTERNAL_ERROR,
+        pytest.ExitCode.USAGE_ERROR,
+    }
+    if not preserve_exit and (
+        core_result is None or any(aggregate.verdict != "pass" for aggregate in state.aggregates)
+    ):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
@@ -888,16 +893,12 @@ def _build_core_result(state: KensaSessionState) -> dict[str, Any] | None:
         return state._core_result
     try:
         engine = state.engine
-        core_result = (
-            engine.build_run(
-                run_id=state.run_id,
-                complete=state.complete
-                and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials),
-                interruption=state.interruption,
-                trials=[trial.to_dict() for trial in state.trials],
-            )
-            if engine is not None
-            else None
+        core_result = engine.build_run(
+            run_id=state.run_id,
+            complete=state.complete
+            and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials),
+            interruption=state.interruption,
+            trials=[trial.to_dict() for trial in state.trials],
         )
     except KensaEngineError as exc:
         state.mark_incomplete("engine_failure", f"{exc.code}: {exc}")
