@@ -68,6 +68,7 @@ export type EvaluationFailure = z.infer<typeof failureSchema>;
 export type EvaluationObservation = z.infer<typeof observationSchema>;
 export type EvaluationCheck = z.infer<typeof checkSchema>;
 export type EvaluationVerdict = "pass" | "fail" | "error" | "skipped";
+export type EvaluationAction = "invoke_agent" | "evaluate_check";
 
 interface AwaitingObservation {
   phase: "awaiting_observation";
@@ -99,6 +100,18 @@ export type EvaluationState =
 
 export class EvaluationTransitionError extends Error {
   readonly code = "invalid_transition";
+}
+
+export function nextAction(state: EvaluationState): EvaluationAction | null {
+  switch (state.phase) {
+    case "awaiting_observation":
+      return "invoke_agent";
+    case "awaiting_check":
+      return "evaluate_check";
+    case "complete":
+    case "cancelled":
+      return null;
+  }
 }
 
 export function startCase(input: unknown): AwaitingObservation {
