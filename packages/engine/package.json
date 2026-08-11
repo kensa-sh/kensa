@@ -5,11 +5,13 @@
   "bin": {
     "kensa-engine": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli.js",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test": "pnpm build && vitest run",
+    "test:coverage": "pnpm build && vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

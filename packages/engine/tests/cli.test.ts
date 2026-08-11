@@ -1,31 +1,45 @@
-import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { describe, expect, it } from "vitest";
+const runEngine = vi.hoisted(() => vi.fn());
 
-import { PROTOCOL_VERSION, runEngine } from "../src/index.js";
+vi.mock("../src/server.js", () => ({ runEngine }));
 
-describe("runEngine", () => {
-  it("writes one framed response for each framed request", async () => {
-    const input = new PassThrough();
-    const output = new PassThrough();
-    let body = "";
-    output.setEncoding("utf8");
-    output.on("data", (chunk: string) => {
-      body += chunk;
-    });
-    const complete = new Promise<void>((resolve) => output.on("end", resolve));
-
-    runEngine(input, output);
-    input.end(
-      `${JSON.stringify({
-        id: "request-1",
-        request: { type: "handshake", protocol_version: PROTOCOL_VERSION, client: "test" },
-      })}\n`,
-    );
-    input.on("close", () => output.end());
-    await complete;
-
-    expect(body.trim().split("\n")).toHaveLength(1);
-    expect(JSON.parse(body)).toMatchObject({ id: "request-1", ok: true });
+describe("CLI entrypoint", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    runEngine.mockReset();
+    process.exitCode = undefined;
   });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = undefined;
+  });
+
+  it("starts the engine with process stdio", async () => {
+    runEngine.mockResolvedValue(undefined);
+
+    await import("../src/cli.js");
+
+    expect(runEngine).toHaveBeenCalledWith(process.stdin, process.stdout);
+  });
+
+  it.each([
+    [new Error("stream failed"), "stream failed"],
+    ["failed", "unknown engine failure"],
+  ])(
+    "reports startup and stream failures on stderr",
+    async (error, expected) => {
+      runEngine.mockRejectedValue(error);
+      const write = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation(() => true);
+
+      await import("../src/cli.js");
+      await Promise.resolve();
+
+      expect(write).toHaveBeenCalledWith(`kensa-engine: ${expected}\n`);
+      expect(process.exitCode).toBe(1);
+    },
+  );
 });
