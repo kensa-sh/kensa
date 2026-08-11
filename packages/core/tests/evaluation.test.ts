@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ZodError } from "zod";
 
 import {
   cancelCase,
@@ -11,6 +12,10 @@ import {
   parseCheck,
   parseObservation,
   startCase,
+  type AwaitingCheck,
+  type AwaitingObservation,
+  type Cancelled,
+  type Complete,
   type EvaluationFailure,
 } from "../src/index.js";
 
@@ -62,6 +67,7 @@ describe("evaluation transitions", () => {
     });
 
     expect(complete.verdict).toBe("pass");
+    expect(complete.failure).toBeNull();
     expect(complete.observation.output).toBe("hello");
     expect(nextAction(complete)).toBeNull();
   });
@@ -77,6 +83,7 @@ describe("evaluation transitions", () => {
     );
 
     expect(complete.verdict).toBe(verdict);
+    expect(complete.failure).toEqual(failure(category));
   });
 
   it("requires failed agent observations to produce errors", () => {
@@ -92,20 +99,38 @@ describe("evaluation transitions", () => {
         failure: agentFailure,
       }),
     ).toThrow(EvaluationTransitionError);
-    expect(
+    const complete = checkCase(observed, {
+      id: "pytest",
+      outcome: "error",
+      failure: agentFailure,
+    });
+    expect(complete.verdict).toBe("error");
+    expect(complete.failure).toEqual(agentFailure);
+  });
+
+  it("rejects contradictory observation and check failures", () => {
+    const observed = observeCase(
+      startCase(testCase),
+      observation(failure("agent")),
+    );
+    expect(() =>
       checkCase(observed, {
         id: "pytest",
         outcome: "error",
-        failure: agentFailure,
-      }).verdict,
-    ).toBe("error");
+        failure: { ...failure("agent"), kind: "different" },
+      }),
+    ).toThrow(EvaluationTransitionError);
   });
 
   it("rejects invalid transitions", () => {
     const started = startCase(testCase);
-    expect(() => checkCase(started, {})).toThrow(EvaluationTransitionError);
+    expect(() => checkCase(started as unknown as AwaitingCheck, {})).toThrow(
+      EvaluationTransitionError,
+    );
     const observed = observeCase(started, observation());
-    expect(() => observeCase(observed, {})).toThrow(EvaluationTransitionError);
+    expect(() =>
+      observeCase(observed as unknown as AwaitingObservation, {}),
+    ).toThrow(EvaluationTransitionError);
   });
 
   it.each([
@@ -170,14 +195,15 @@ describe("evaluation transitions", () => {
     const cancelled = cancelCase(started, "  pytest stopped  ");
     expect(cancelled).toMatchObject({
       phase: "cancelled",
+      observation: null,
       reason: "pytest stopped",
       verdict: "error",
       failure: { category: "harness", kind: "cancelled" },
     });
     expect(nextAction(cancelled)).toBeNull();
-    expect(() => cancelCase(cancelled, "again")).toThrow(
-      EvaluationTransitionError,
-    );
+    expect(() =>
+      cancelCase(cancelled as unknown as AwaitingObservation, "again"),
+    ).toThrow(EvaluationTransitionError);
     expect(() => cancelCase(started, null)).toThrow(CoreValidationError);
     expect(() => cancelCase(started, "   ")).toThrow(CoreValidationError);
     const complete = checkCase(observeCase(started, observation()), {
@@ -185,9 +211,175 @@ describe("evaluation transitions", () => {
       outcome: "satisfied",
       failure: null,
     });
-    expect(() => cancelCase(complete, "late")).toThrow(
-      EvaluationTransitionError,
+    expect(() =>
+      cancelCase(complete as unknown as AwaitingObservation, "late"),
+    ).toThrow(EvaluationTransitionError);
+  });
+
+  it("preserves collected evidence when an evaluation is cancelled", () => {
+    const observed = observeCase(startCase(testCase), observation());
+    const cancelled = cancelCase(observed, "interrupted");
+
+    expect(cancelled.observation).toEqual(observed.observation);
+  });
+
+  it("exports phase-specific state contracts", () => {
+    const started: AwaitingObservation = startCase(testCase);
+    const observed: AwaitingCheck = observeCase(started, observation());
+    const complete: Complete = checkCase(observed, {
+      id: "pytest",
+      outcome: "satisfied",
+      failure: null,
+    });
+    const cancelled: Cancelled = cancelCase(started, "stopped");
+
+    expect([complete.phase, cancelled.phase]).toEqual([
+      "complete",
+      "cancelled",
+    ]);
+  });
+
+  it("preserves prototype-shaped metadata and failure evidence", async () => {
+    const metadata = JSON.parse(
+      '{"__proto__":{"safe":true},"constructor":1}',
+    ) as Record<string, unknown>;
+    const evidence = JSON.parse(
+      '{"__proto__":{"proof":true},"constructor":2}',
+    ) as Record<string, unknown>;
+    const parsedCase = parseCase({ ...testCase, metadata });
+    const parsedCheck = parseCheck({
+      id: "pytest",
+      outcome: "error",
+      failure: { ...failure("infrastructure"), evidence },
+    });
+
+    expect(Object.hasOwn(parsedCase.metadata, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(parsedCase.metadata)).toBe(Object.prototype);
+    expect(
+      Object.hasOwn(parsedCheck.failure?.evidence ?? {}, "__proto__"),
+    ).toBe(true);
+    expect(Object.getPrototypeOf(parsedCheck.failure?.evidence)).toBe(
+      Object.prototype,
     );
+    await expect(
+      import("../src/index.js").then(({ digestJson }) =>
+        digestJson({ evidence: parsedCheck.failure?.evidence, metadata }),
+      ),
+    ).resolves.toHaveLength(64);
+  });
+
+  it.each([
+    ["case.id", parseCase, { ...testCase }, "id"],
+    ["case.input", parseCase, { ...testCase }, "input"],
+    ["case.metadata", parseCase, { ...testCase }, "metadata"],
+    ["observation.output", parseObservation, observation(), "output"],
+    [
+      "observation.output_recorded",
+      parseObservation,
+      observation(),
+      "output_recorded",
+    ],
+    ["observation.trace", parseObservation, observation(), "trace"],
+    ["observation.failure", parseObservation, observation(), "failure"],
+    ["trace.spans", parseObservation, observation(), "trace.spans"],
+    ["trace.agent_runs", parseObservation, observation(), "trace.agent_runs"],
+    ["trace.tools", parseObservation, observation(), "trace.tools"],
+    ["trace.tool_calls", parseObservation, observation(), "trace.tool_calls"],
+    ["trace.incomplete", parseObservation, observation(), "trace.incomplete"],
+    [
+      "trace.incomplete_reason",
+      parseObservation,
+      observation(),
+      "trace.incomplete_reason",
+    ],
+    ["trace.duration_ms", parseObservation, observation(), "trace.duration_ms"],
+    ["trace.cost_usd", parseObservation, observation(), "trace.cost_usd"],
+    [
+      "trace.known_cost_usd",
+      parseObservation,
+      observation(),
+      "trace.known_cost_usd",
+    ],
+    [
+      "trace.cost_available",
+      parseObservation,
+      observation(),
+      "trace.cost_available",
+    ],
+    ["trace.llm_turns", parseObservation, observation(), "trace.llm_turns"],
+    [
+      "failure.category",
+      parseObservation,
+      observation(failure("agent")),
+      "failure.category",
+    ],
+    [
+      "failure.kind",
+      parseObservation,
+      observation(failure("agent")),
+      "failure.kind",
+    ],
+    [
+      "failure.message",
+      parseObservation,
+      observation(failure("agent")),
+      "failure.message",
+    ],
+    [
+      "failure.evidence",
+      parseObservation,
+      observation(failure("agent")),
+      "failure.evidence",
+    ],
+    [
+      "check.id",
+      parseCheck,
+      { id: "x", outcome: "satisfied", failure: null },
+      "id",
+    ],
+    [
+      "check.outcome",
+      parseCheck,
+      { id: "x", outcome: "satisfied", failure: null },
+      "outcome",
+    ],
+    [
+      "check.failure",
+      parseCheck,
+      { id: "x", outcome: "satisfied", failure: null },
+      "failure",
+    ],
+  ] as const)(
+    "rejects missing and undefined %s",
+    (_name, parse, value, path) => {
+      const missing = structuredClone(value) as Record<string, unknown>;
+      const undefinedValue = structuredClone(value) as Record<string, unknown>;
+      const segments = path.split(".");
+      const parentFor = (
+        target: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        let parent = target;
+        for (const segment of segments.slice(0, -1)) {
+          parent = parent[segment] as Record<string, unknown>;
+        }
+        return parent;
+      };
+      delete parentFor(missing)[segments.at(-1)!];
+      parentFor(undefinedValue)[segments.at(-1)!] = undefined;
+
+      expect(() => parse(missing)).toThrow(CoreValidationError);
+      expect(() => parse(undefinedValue)).toThrow(CoreValidationError);
+    },
+  );
+
+  it("accepts explicit null output when it was recorded", () => {
+    expect(
+      parseObservation({
+        ...observation(),
+        output: null,
+        output_recorded: true,
+      }).output,
+    ).toBeNull();
   });
 
   it("reports stable validation errors without exposing zod", () => {
@@ -202,6 +394,46 @@ describe("evaluation transitions", () => {
         message: "case violates the core contract",
       });
       expect((error as CoreValidationError).issues).toHaveLength(1);
+      expect((error as CoreValidationError).issues[0]).toMatchObject({
+        code: "unknown_field",
+        path: [],
+      });
     }
+  });
+
+  it.each([
+    ["custom", "constraint"],
+    ["invalid_element", "element"],
+    ["invalid_format", "format"],
+    ["invalid_key", "key"],
+    ["too_big", "maximum"],
+    ["too_small", "minimum"],
+    ["not_multiple_of", "multiple"],
+    ["invalid_type", "type"],
+    ["invalid_union", "union"],
+    ["unrecognized_keys", "unknown_field"],
+    ["invalid_value", "value"],
+  ] as const)("maps %s to the stable %s issue code", (source, expected) => {
+    const error = new CoreValidationError("invalid", {
+      issues: [{ code: source, message: "invalid", path: ["items", 1] }],
+    } as ZodError);
+
+    expect(error.issues).toEqual([
+      { code: expected, message: "invalid", path: ["items", 1] },
+    ]);
+  });
+
+  it("fails closed when validation produces an unknown issue code", () => {
+    expect(
+      () =>
+        new CoreValidationError("invalid", {
+          issues: [{ code: "future_code", message: "invalid", path: [] }],
+        } as unknown as ZodError),
+    ).toThrow(
+      expect.objectContaining({
+        code: "invalid_input",
+        message: "validation produced an unsupported issue code",
+      }),
+    );
   });
 });

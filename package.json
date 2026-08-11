@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "check:core-platform": "pnpm --filter @kensa/core check:platform",
     "format:check": "prettier --check \"packages/**/*.{ts,json}\" \"*.json\"",
     "test": "pnpm -r test",
     "test:coverage": "pnpm -r test:coverage",

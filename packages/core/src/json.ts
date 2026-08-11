@@ -1,14 +1,19 @@
 import { z } from "zod";
 
-import { parseInput } from "./errors.js";
+import { KensaCoreError, parseInput } from "./errors.js";
 
 export type JsonPrimitive = boolean | number | string | null;
-export type JsonValue =
-  JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.custom<JsonValue>(
   (value) => isJsonValue(value, new Set()),
   { message: "value is not interoperable JSON" },
+);
+
+export const jsonObjectSchema: z.ZodType<JsonObject> = z.custom<JsonObject>(
+  (value) => isJsonObject(value) && isJsonValue(value, new Set()),
+  { message: "value is not an interoperable JSON object" },
 );
 
 export function canonicalJson(value: unknown): string {
@@ -37,7 +42,7 @@ function canonicalJsonValue(value: JsonValue): string {
 }
 
 export async function digestJson(value: unknown): Promise<string> {
-  const platform = globalThis as unknown as PlatformGlobals;
+  const platform = platformGlobals();
   const bytes = new platform.TextEncoder().encode(canonicalJson(value));
   const digest = await platform.crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) =>
@@ -45,7 +50,21 @@ export async function digestJson(value: unknown): Promise<string> {
   ).join("");
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+function platformGlobals(): PlatformGlobals {
+  const platform = globalThis as unknown as Partial<PlatformGlobals>;
+  if (
+    typeof platform.TextEncoder !== "function" ||
+    typeof platform.crypto?.subtle?.digest !== "function"
+  ) {
+    throw new KensaCoreError(
+      "unsupported_platform",
+      "SHA-256 digest support is unavailable on this platform",
+    );
+  }
+  return platform as PlatformGlobals;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
@@ -68,7 +87,7 @@ function isJsonValue(value: unknown, ancestors: Set<object>): boolean {
   if (typeof value === "number") {
     return Number.isFinite(value) && isPreciselyRepresentableNumber(value);
   }
-  if (!isPlainObject(value) && !Array.isArray(value)) {
+  if (!isJsonObject(value) && !Array.isArray(value)) {
     return false;
   }
   if (ancestors.has(value)) {
