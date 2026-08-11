@@ -109,3 +109,11 @@ export {
   type SyncPointer,
   type SyncReceipt,
 } from "./sync.js";
+export {
+  bootstrapProtectionSuite,
+  verifyProtectionSuite,
+  type ProtectionBindings,
+  type ProtectionCase,
+  type ProtectionCriterion,
+  type ProtectionSuite,
+} from "./protection.js";
