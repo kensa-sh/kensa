@@ -114,8 +114,7 @@ def write_run_artifacts(
         contradictions.append("trials")
     if contradictions:
         raise ValueError(
-            "Kensa core result contradicts the requested artifact: "
-            + ", ".join(contradictions)
+            "Kensa core result contradicts the requested artifact: " + ", ".join(contradictions)
         )
     result_trials = [trial_result_to_metadata(trial) for trial in result.trials]
     aggregates = _metadata_aggregates(result, ordered_trials)

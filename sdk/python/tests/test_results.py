@@ -627,9 +627,7 @@ def test_unknown_aggregate_trial_does_not_replace_existing_artifact(tmp_path: Pa
 def test_writer_rejects_contradictory_core_results(tmp_path: Path, field: str) -> None:
     trial = _trial()
     complete = field != "interruption"
-    interruption = (
-        {"kind": "crash", "message": "requested"} if field == "interruption" else None
-    )
+    interruption = {"kind": "crash", "message": "requested"} if field == "interruption" else None
     with EngineClient() as engine:
         if field == "interruption":
             core_result = engine.build_run(
