@@ -122,6 +122,25 @@ def _raw_client(process: _Process) -> Any:
     return client
 
 
+def _trial_payload(*, nodeid: str = "node", status: str = "pass") -> dict[str, Any]:
+    return {
+        "nodeid": nodeid,
+        "group_id": nodeid,
+        "case_id": nodeid,
+        "trial_index": 1,
+        "configured_trials": 1,
+        "status": status,
+        "case": {"id": nodeid},
+        "output": None,
+        "failure": None,
+        "duration_ms": 0.0,
+        "trace": {},
+        "judges": [],
+        "active_operation": None,
+        "smoke": False,
+    }
+
+
 def _response(response: Any, *, request_id: str = "1", ok: bool = True) -> str:
     envelope = (
         {"id": request_id, "ok": True, "response": response}
@@ -575,18 +594,19 @@ def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = EngineClient()
+    canonical_engine = EngineClient()
     requests: list[dict[str, Any]] = []
 
     def request(payload: dict[str, Any]) -> dict[str, Any]:
         requests.append(payload)
         return {
             "type": "run_result",
-            "result": {
-                "run_id": "run",
-                "complete": True,
-                "interruption": None,
-                "trials": payload["trials"],
-            },
+            "result": canonical_engine.build_run(
+                run_id=payload["run_id"],
+                complete=payload["complete"],
+                interruption=payload["interruption"],
+                trials=payload["trials"],
+            ),
         }
 
     monkeypatch.setattr(client, "_request", request)
@@ -597,6 +617,7 @@ def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
         interruption=None,
         trials=[
             {
+                **_trial_payload(),
                 "trace": {
                     "spans": [
                         {
@@ -604,20 +625,20 @@ def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
                             "end_time_unix_nano": 1_786_430_000_000_000_001,
                         }
                     ]
-                }
+                },
             }
         ],
     )
 
-    assert result == {
-        "run_id": "run",
-        "complete": True,
-        "interruption": None,
-        "trials": requests[0]["trials"],
-    }
+    assert result["schema_version"] == "kensa.result.v1"
+    assert result["run_id"] == "run"
+    assert result["complete"] is True
+    assert result["interruption"] is None
+    assert result["trials"] == requests[0]["trials"]
     spans = requests[0]["trials"][0]["trace"]["spans"]
     assert spans[0]["start_time_unix_nano"] == "1786430000000000000"
     assert spans[0]["end_time_unix_nano"] == "1786430000000000001"
+    canonical_engine.close()
     client.close()
 
 
@@ -634,18 +655,17 @@ def test_engine_client_rejects_invalid_run_result_and_reset(
             trials=[],
         )
 
+    with EngineClient() as canonical_engine:
+        contradictory = canonical_engine.build_run(
+            run_id="other",
+            complete=True,
+            interruption=None,
+            trials=[],
+        )
     monkeypatch.setattr(
         client,
         "_request",
-        lambda payload: {
-            "type": "run_result",
-            "result": {
-                "run_id": "other",
-                "complete": True,
-                "interruption": None,
-                "trials": [],
-            },
-        },
+        lambda payload: {"type": "run_result", "result": contradictory},
     )
     with pytest.raises(KensaEngineError, match="contradictory run result"):
         client.build_run(
@@ -662,6 +682,116 @@ def test_engine_client_rejects_invalid_run_result_and_reset(
     )
     with pytest.raises(KensaEngineError, match="invalid reset"):
         client.reset()
+    client.close()
+
+
+@pytest.mark.parametrize("field", ["complete", "interruption", "trials"])
+def test_engine_client_rejects_type_sensitive_run_result_contradictions(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    requested_trial = _trial_payload(nodeid="requested")
+    requested_complete = field != "interruption"
+    requested_interruption = (
+        {"kind": "crash", "message": "requested"} if field == "interruption" else None
+    )
+    with EngineClient() as canonical_engine:
+        if field == "complete":
+            response_result = canonical_engine.build_run(
+                run_id="run",
+                complete=False,
+                interruption=None,
+                trials=[requested_trial],
+            )
+        elif field == "interruption":
+            response_result = canonical_engine.build_run(
+                run_id="run",
+                complete=False,
+                interruption={"kind": "crash", "message": "response"},
+                trials=[requested_trial],
+            )
+        else:
+            response_result = canonical_engine.build_run(
+                run_id="run",
+                complete=True,
+                interruption=None,
+                trials=[_trial_payload(nodeid="response")],
+            )
+    client = EngineClient()
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "run_result", "result": response_result},
+    )
+
+    with pytest.raises(KensaEngineError, match="contradictory run result"):
+        client.build_run(
+            run_id="run",
+            complete=requested_complete,
+            interruption=requested_interruption,
+            trials=[requested_trial],
+        )
+    client.close()
+
+
+@pytest.mark.parametrize("field", ["schema_version", "aggregates", "summary"])
+def test_engine_client_requires_complete_run_result_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    with EngineClient() as canonical_engine:
+        response_result = canonical_engine.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[],
+        )
+    del response_result[field]
+    client = EngineClient()
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "run_result", "result": response_result},
+    )
+
+    with pytest.raises(KensaEngineError, match="invalid run result"):
+        client.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[],
+        )
+    client.close()
+
+
+def test_engine_client_rejects_boolean_trial_values_as_integer_echoes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_trial = _trial_payload()
+    requested_trial["output"] = {"value": 1}
+    response_trial = _trial_payload()
+    response_trial["output"] = {"value": True}
+    with EngineClient() as canonical_engine:
+        response_result = canonical_engine.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[response_trial],
+        )
+    client = EngineClient()
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "run_result", "result": response_result},
+    )
+
+    with pytest.raises(KensaEngineError, match="contradictory run result"):
+        client.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[requested_trial],
+        )
     client.close()
 
 
@@ -1325,6 +1455,72 @@ def test_session_engine_close_is_non_throwing_and_terminal() -> None:
     with pytest.raises(KensaEngineError, match="session is closed") as exc_info:
         _ = state.engine
     assert exc_info.value.code == "closed"
+    with pytest.raises(KensaEngineError, match="session is closed"):
+        _ = state.recovery_engine
+
+
+def test_session_recovery_engine_failure_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    starts = 0
+
+    class MissingEngine:
+        def __init__(self) -> None:
+            nonlocal starts
+            starts += 1
+            raise KensaEngineError("missing", code="startup")
+
+    monkeypatch.setattr(pytest_plugin, "EngineClient", MissingEngine)
+    config = SimpleNamespace(getoption=lambda name: str(tmp_path) if "artifact" in name else None)
+    state = pytest_plugin.KensaSessionState(cast(Any, config))
+
+    with pytest.raises(KensaEngineError, match="missing"):
+        _ = state.recovery_engine
+    with pytest.raises(KensaEngineError, match="missing"):
+        _ = state.recovery_engine
+
+    assert starts == 1
+
+
+def test_artifact_write_does_not_spawn_repeated_engines_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recovery_starts = 0
+
+    class FailingEngine:
+        def build_run(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise KensaEngineError("failed", code="crash")
+
+    class MissingRecovery:
+        def __init__(self) -> None:
+            nonlocal recovery_starts
+            recovery_starts += 1
+            raise KensaEngineError("missing", code="startup")
+
+    monkeypatch.setattr(pytest_plugin, "EngineClient", MissingRecovery)
+    config = SimpleNamespace(getoption=lambda name: str(tmp_path) if "artifact" in name else None)
+    state = pytest_plugin.KensaSessionState(cast(Any, config))
+    state._engine = cast(Any, FailingEngine())
+    state._engine_resolved = True
+    state.trials = [
+        pytest_plugin.TrialMetadata(
+            nodeid="node",
+            group_id="group",
+            case_id="case",
+            trial_index=1,
+            configured_trials=1,
+            status="pass",
+        )
+    ]
+
+    pytest_plugin._write_artifacts(state)
+    pytest_plugin._write_artifacts(state)
+
+    assert not state.result_path.exists()
+    assert recovery_starts == 1
 
 
 def test_session_engine_close_records_reported_shutdown_error() -> None:

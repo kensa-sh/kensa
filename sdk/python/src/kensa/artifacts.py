@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from kensa._smoke import is_smoke_trial
-from kensa.engine import EngineClient, KensaEngineError
-from kensa.results import RunResult, TrialResult
+from kensa.results import RunInterruption, RunResult, TrialResult
 from kensa.runtime import TrialMetadata
 
 
@@ -66,9 +65,9 @@ def write_run_artifacts(
     trials: list[TrialMetadata],
     result_path: Path,
     artifact_dir: Path,
+    core_result: Mapping[str, Any],
     complete: bool = True,
     interruption: dict[str, Any] | None = None,
-    core_result: Mapping[str, Any] | None = None,
 ) -> list[KensaAggregate]:
     ordered_trials = sorted(trials, key=trial_sort_key)
     trial_payloads = [
@@ -77,20 +76,47 @@ def write_run_artifacts(
         )
         for trial in ordered_trials
     ]
-    if core_result is None:
-        try:
-            with EngineClient() as engine:
-                payload = engine.build_run(
-                    run_id=run_id,
-                    complete=complete,
-                    interruption=interruption,
-                    trials=trial_payloads,
-                )
-        except KensaEngineError as exc:
-            raise ValueError(f"Could not build Kensa result artifact: {exc}") from exc
-    else:
-        payload = dict(core_result)
+    payload = dict(core_result)
     result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
+    expected_interruption = (
+        RunInterruption.model_validate(interruption) if interruption is not None else None
+    )
+    expected_trials = tuple(
+        (
+            trial_payload["nodeid"],
+            trial_payload["group_id"],
+            trial_payload["case_id"],
+            trial_payload["trial_index"],
+            trial_payload["configured_trials"],
+            trial_payload["status"],
+        )
+        for trial_payload in trial_payloads
+    )
+    actual_trials = tuple(
+        (
+            trial.nodeid,
+            trial.group_id,
+            trial.case_id,
+            trial.trial_index,
+            trial.configured_trials,
+            trial.status,
+        )
+        for trial in result.trials
+    )
+    contradictions: list[str] = []
+    if result.run_id != run_id:
+        contradictions.append("run_id")
+    if result.complete is not complete:
+        contradictions.append("complete")
+    if result.interruption != expected_interruption:
+        contradictions.append("interruption")
+    if actual_trials != expected_trials:
+        contradictions.append("trials")
+    if contradictions:
+        raise ValueError(
+            "Kensa core result contradicts the requested artifact: "
+            + ", ".join(contradictions)
+        )
     _write_text_atomic(result_path, result.model_dump_json(indent=2))
     result_trials = [trial_result_to_metadata(trial) for trial in result.trials]
     _write_trace_artifact(run_id, result_trials, artifact_dir)

@@ -15,6 +15,8 @@ from pathlib import Path
 from threading import Event, Lock, Timer
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError
+
 PROTOCOL_VERSION = "kensa.engine.v1"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -236,17 +238,31 @@ class EngineClient:
         result = response.get("result")
         if response.get("type") != "run_result" or not isinstance(result, dict):
             raise KensaEngineError("Kensa engine returned an invalid run result", code="protocol")
+        from kensa.results import RunResult
+
+        try:
+            validated_result = RunResult.model_validate_json(
+                json.dumps(result, allow_nan=False)
+            ).model_dump(mode="json")
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise KensaEngineError(
+                "Kensa engine returned an invalid run result",
+                code="protocol",
+            ) from exc
         if (
-            result.get("run_id") != run_id
-            or result.get("complete") is not complete
-            or result.get("interruption") != expected_interruption
-            or result.get("trials") != expected_trials
+            validated_result["run_id"] != run_id
+            or validated_result["complete"] is not complete
+            or not _json_values_equal(
+                validated_result["interruption"],
+                expected_interruption,
+            )
+            or not _json_values_equal(validated_result["trials"], expected_trials)
         ):
             raise KensaEngineError(
                 "Kensa engine returned a contradictory run result",
                 code="protocol",
             )
-        return result
+        return validated_result
 
     def reset(self) -> int:
         with self._lock:
@@ -502,6 +518,30 @@ def _check_outcome(status: str) -> str:
         return outcomes[status]
     except KeyError as exc:
         raise KensaEngineError(f"Unknown check status: {status!r}", code="protocol") from exc
+
+
+def _json_values_equal(left: object, right: object) -> bool:
+    if (
+        isinstance(left, (int, float))
+        and not isinstance(left, bool)
+        and isinstance(right, (int, float))
+        and not isinstance(right, bool)
+    ):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        left_items = cast(dict[object, object], left)
+        right_items = cast(dict[object, object], right)
+        return left_items.keys() == right_items.keys() and all(
+            _json_values_equal(left_items[key], right_items[key]) for key in left_items
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
 
 
 def _wire_json_value(

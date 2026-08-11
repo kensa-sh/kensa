@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -36,7 +36,6 @@ from kensa.runtime import (
     reset_current_runtime,
     set_current_runtime,
 )
-from kensa.scoring import run_summary
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     ActiveTrial,
@@ -219,6 +218,9 @@ class KensaSessionState:
         self._engine: EngineClient | None = None
         self._engine_error: KensaEngineError | None = None
         self._engine_resolved = False
+        self._recovery_engine: EngineClient | None = None
+        self._recovery_engine_error: KensaEngineError | None = None
+        self._recovery_engine_resolved = False
         self._engine_closed = False
         self._core_result: dict[str, Any] | None = None
 
@@ -317,6 +319,22 @@ class KensaSessionState:
         assert self._engine is not None
         return self._engine
 
+    @property
+    def recovery_engine(self) -> EngineClient:
+        if self._engine_closed:
+            raise KensaEngineError("Kensa engine session is closed", code="closed")
+        if not self._recovery_engine_resolved:
+            self._recovery_engine_resolved = True
+            try:
+                self._recovery_engine = EngineClient()
+            except KensaEngineError as exc:
+                self._recovery_engine_error = exc
+                raise
+        if self._recovery_engine_error is not None:
+            raise self._recovery_engine_error
+        assert self._recovery_engine is not None
+        return self._recovery_engine
+
     def prepare_engine_shutdown(self, reason: str) -> None:
         engine = self._engine
         if engine is None:
@@ -339,24 +357,28 @@ class KensaSessionState:
         *,
         notify_engine: bool = True,
     ) -> None:
-        engine = self._engine
+        engines = (self._engine, self._recovery_engine)
         self._engine = None
+        self._recovery_engine = None
         self._engine_closed = True
-        if engine is None:
-            return
         failures: list[str] = []
-        if notify_engine:
+        for engine in engines:
+            if engine is None:
+                continue
+            if notify_engine:
+                try:
+                    engine.cancel_all(reason)
+                except Exception as exc:
+                    failures.append(f"cancellation failed: {exc}")
             try:
-                engine.cancel_all(reason)
+                shutdown_error = (
+                    engine.close() if notify_engine else engine.close(notify_engine=False)
+                )
             except Exception as exc:
-                failures.append(f"cancellation failed: {exc}")
-        try:
-            shutdown_error = engine.close() if notify_engine else engine.close(notify_engine=False)
-        except Exception as exc:
-            failures.append(f"shutdown failed: {exc}")
-        else:
-            if shutdown_error is not None:
-                failures.append(f"shutdown failed: {shutdown_error}")
+                failures.append(f"shutdown failed: {exc}")
+            else:
+                if shutdown_error is not None:
+                    failures.append(f"shutdown failed: {shutdown_error}")
         if failures:
             self.mark_incomplete(
                 "engine_shutdown",
@@ -875,10 +897,10 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 def _write_artifacts(state: KensaSessionState) -> None:
-    complete = state.complete and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials)
     core_result = _build_core_result(state)
-    if core_result is None and not state.complete:
-        complete = False
+    if core_result is None:
+        return
+    complete = state.complete and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials)
     state.aggregates = write_run_artifacts(
         run_id=state.run_id,
         trials=state.trials,
@@ -904,7 +926,15 @@ def _build_core_result(state: KensaSessionState) -> dict[str, Any] | None:
         )
     except KensaEngineError as exc:
         state.mark_incomplete("engine_failure", f"{exc.code}: {exc}")
-        core_result = None
+        try:
+            core_result = state.recovery_engine.build_run(
+                run_id=state.run_id,
+                complete=False,
+                interruption=state.interruption,
+                trials=[trial.to_dict() for trial in state.trials],
+            )
+        except KensaEngineError:
+            core_result = None
     state._core_result = core_result
     return core_result
 
@@ -921,13 +951,17 @@ def pytest_terminal_summary(
     if not state.trials:
         return
     terminalreporter.write_sep("=", "Kensa evaluation complete")
-    summary = run_summary({"trials": [trial.to_dict() for trial in state.trials]})
+    core_result = _build_core_result(state)
+    if core_result is None:
+        terminalreporter.write_line("Kensa engine summary unavailable")
+        return
+    summary = cast(dict[str, Any], core_result["summary"])
     if config.getoption("--kensa-report") == "json":
         terminalreporter.write_line(
             json.dumps(
                 {
                     "run_id": state.run_id,
-                    "aggregates": [aggregate.to_dict() for aggregate in state.aggregates],
+                    "aggregates": core_result["aggregates"],
                     "summary": summary,
                 },
                 indent=2,

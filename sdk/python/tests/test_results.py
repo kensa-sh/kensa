@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from kensa.artifacts import write_run_artifacts
+from kensa.engine import EngineClient
 from kensa.errors import TrialFailure
 from kensa.results import (
     AggregateResult,
@@ -67,11 +68,20 @@ def _write(
     interruption: dict[str, Any] | None = None,
 ) -> Path:
     result_path = tmp_path / "result.json"
+    selected_trials = [] if trials is None else trials
+    with EngineClient() as engine:
+        core_result = engine.build_run(
+            run_id="run-1",
+            complete=complete,
+            interruption=interruption,
+            trials=[trial.to_dict() for trial in selected_trials],
+        )
     write_run_artifacts(
         run_id="run-1",
-        trials=[] if trials is None else trials,
+        trials=selected_trials,
         result_path=result_path,
         artifact_dir=tmp_path,
+        core_result=core_result,
         complete=complete,
         interruption=interruption,
     )
@@ -569,6 +579,8 @@ def test_failed_validation_does_not_replace_existing_artifact(tmp_path: Path) ->
     result_path = _write(tmp_path, trials=[_trial()])
     original = result_path.read_bytes()
     duplicate = _trial()
+    payload = json.loads(original)
+    payload["trials"].append(payload["trials"][0])
 
     with pytest.raises(ValueError, match="duplicate"):
         write_run_artifacts(
@@ -576,6 +588,53 @@ def test_failed_validation_does_not_replace_existing_artifact(tmp_path: Path) ->
             trials=[duplicate, duplicate],
             result_path=result_path,
             artifact_dir=tmp_path,
+            core_result=payload,
         )
 
     assert result_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["run_id", "complete", "interruption", "trials"])
+def test_writer_rejects_contradictory_core_results(tmp_path: Path, field: str) -> None:
+    trial = _trial()
+    complete = field != "interruption"
+    interruption = (
+        {"kind": "crash", "message": "requested"} if field == "interruption" else None
+    )
+    with EngineClient() as engine:
+        if field == "interruption":
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=False,
+                interruption={"kind": "crash", "message": "response"},
+                trials=[trial.to_dict()],
+            )
+        elif field == "trials":
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=True,
+                interruption=None,
+                trials=[_trial(case_id="other").to_dict()],
+            )
+        else:
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=True,
+                interruption=None,
+                trials=[trial.to_dict()],
+            )
+    if field == "run_id":
+        core_result["run_id"] = "other"
+    elif field == "complete":
+        core_result["complete"] = False
+
+    with pytest.raises(ValueError, match=field):
+        write_run_artifacts(
+            run_id="run-1",
+            trials=[trial],
+            result_path=tmp_path / "result.json",
+            artifact_dir=tmp_path,
+            core_result=core_result,
+            complete=complete,
+            interruption=interruption,
+        )

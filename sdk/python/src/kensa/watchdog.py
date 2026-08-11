@@ -24,6 +24,7 @@ from kensa.artifacts import (
     write_json_atomic,
     write_run_artifacts,
 )
+from kensa.engine import EngineClient
 from kensa.errors import FailureCategory, TrialFailure
 from kensa.results import load_run_result
 from kensa.runtime import ActiveOperation, OperationKind, TrialMetadata
@@ -554,20 +555,29 @@ def _record_timeout(
         )
     upsert_trial(trials, metadata)
     trials.sort(key=trial_sort_key)
+    interruption = {
+        "kind": "timeout",
+        "message": message,
+        "nodeid": active.nodeid,
+        "case_id": active.case_id,
+        "trial_index": active.trial_index,
+        "phase": active.phase,
+    }
+    with EngineClient() as engine:
+        core_result = engine.build_run(
+            run_id=control.run_id,
+            complete=False,
+            interruption=interruption,
+            trials=[trial.to_dict() for trial in trials],
+        )
     write_run_artifacts(
         run_id=control.run_id,
         trials=trials,
         result_path=control.result_path,
         artifact_dir=control.artifact_dir,
+        core_result=core_result,
         complete=False,
-        interruption={
-            "kind": "timeout",
-            "message": message,
-            "nodeid": active.nodeid,
-            "case_id": active.case_id,
-            "trial_index": active.trial_index,
-            "phase": active.phase,
-        },
+        interruption=interruption,
     )
     return TimeoutResult(
         case_id=active.case_id,
