@@ -1,0 +1,83 @@
+---
+title: Artifact and release migration
+description: Upgrade to the TypeScript semantic core and rebuild strict result artifacts safely.
+sidebarTitle: Migration
+keywords:
+  - migration
+  - artifacts
+  - build manifest
+  - engine
+  - result schema
+---
+
+Kensa now uses one TypeScript core for evaluation semantics. Python remains the native pytest authoring surface, while the bundled engine owns normalization, aggregation, reporting, and result construction.
+
+## Python installs
+
+For a released build, keep installing Kensa through Python tooling:
+
+```bash
+uv add --dev kensa
+# or: python -m pip install kensa
+```
+
+Published wheels include a verified standalone engine. You do not install or manage Node, pnpm, or Bun. Wheels are built for:
+
+| Platform | Architectures |
+|---|---|
+| macOS | Apple silicon (`arm64`) and Intel (`x86_64`) |
+| Linux | `aarch64` and `x86_64` |
+| Windows | `x86_64` |
+
+An editable checkout is different: contributors build the development engine before running Python integration tests.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm --filter kensa-engine build
+uv sync --group dev
+uv run pytest -q
+```
+
+## Result artifacts
+
+Current results use the strict `kensa.result.v1` schema. Kensa rejects unversioned artifacts, unsupported schema versions, unknown fields, invalid aggregate membership, and values that do not reproduce the core result exactly.
+
+Do not hand-edit an old artifact into the new shape. Rebuild it from the source eval and evidence:
+
+1. Preserve the old artifact with the toolchain that created it if it is an audit record.
+2. Upgrade Kensa and rerun the owning eval with `kensa eval --json-report eval.json`.
+3. Replace derived JSON, Markdown, and terminal summaries together. They are views of the same core result.
+4. Load stored result artifacts through `load_run_result(...)`, which validates and reconstructs them through the engine.
+
+```python
+from kensa.results import load_run_result
+
+result = load_run_result(".kensa/results/run-123.json")
+```
+
+If the original eval or evidence is unavailable, keep the old artifact as an immutable legacy record. Kensa does not provide a lossy converter because it cannot recover missing provenance or prove a verdict that the current core did not derive.
+
+## Build manifests
+
+Each Python wheel contains `kensa/build-manifest.json`. Each npm package exports the same document at its `build-manifest.json` subpath, and releases attach `kensa-build-manifest.json` as a standalone asset.
+
+The manifest records:
+
+- the release and exact core, engine, Python SDK, and TypeScript SDK identities;
+- contract identities for the build manifest, engine boundary, and result artifact;
+- evaluation, evidence, mining, protection, and sync schema identities;
+- conformance fixture identities;
+- `contract_digest` for contracts and schemas, plus `digest` for the complete manifest.
+
+Downstream consumers should pin and compare the complete manifest `digest`. Use `contract_digest` to decide whether artifacts and protocol traffic share the same public contracts. Treat a mismatch as incompatible until the producer and consumer use one released manifest.
+
+Python code can read the installed manifest without relying on a repository path:
+
+```python
+import json
+from importlib.resources import files
+
+manifest = json.loads((files("kensa") / "build-manifest.json").read_text())
+```
+
+Do not infer compatibility from the Python or npm package version alone, and do not mix components selected from different manifests.

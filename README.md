@@ -7,7 +7,7 @@
   </a>
 </div>
 
-<p align="center">Kensa turns agent traces into pytest evals that run in CI.</p>
+<p align="center">Kensa turns agent traces into Python or TypeScript evals that run in CI.</p>
 
 <p align="center">
   <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kensa-sh/kensa/ci.yml?label=CI&style=flat-square" alt="CI"></a>
@@ -105,6 +105,16 @@ kensa init
 ```
 
 For projects that track dependencies with `requirements.txt`, add `kensa`, then run `kensa init`.
+
+For TypeScript projects:
+
+```bash
+pnpm add -D @kensa/sdk vitest
+```
+
+Use `kensaTest(...)` from `@kensa/sdk/vitest` to register evaluations in your Vitest suite. The
+TypeScript SDK imports the shared semantic core directly. See the
+[TypeScript guide](https://kensa.sh/typescript) for a complete example.
 
 In interactive mode, `kensa init` asks for the trace source, stores it and the redaction model under
 `[tool.kensa]` in `pyproject.toml`, and checks credentials without printing secrets.

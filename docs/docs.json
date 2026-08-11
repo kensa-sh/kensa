@@ -45,6 +45,7 @@
         "pages": [
           "introduction",
           "quickstart",
+          "journeys",
           "concepts"
         ]
       },
@@ -55,7 +56,8 @@
           "assertions",
           "judge",
           "tracing",
-          "pytest"
+          "pytest",
+          "typescript"
         ]
       },
       {
@@ -69,6 +71,7 @@
       {
         "group": "Releases",
         "pages": [
+          "migration",
           "changelog"
         ]
       }

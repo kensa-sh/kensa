@@ -10,9 +10,11 @@ keywords:
   - secrets
 ---
 
-Because evals are plain pytest files, `kensa eval` runs anywhere your Python tests already run. `kensa init` scaffolds a GitHub Actions workflow; here's a minimal version.
+Kensa evals run in the Python or TypeScript test job your repository already uses. Deterministic checks require no service account or Kensa-hosted runner.
 
-## GitHub Actions
+## Python and pytest
+
+`kensa init` scaffolds a GitHub Actions workflow. A minimal Python job installs the released wheel, which already contains the platform engine:
 
 ```yaml title=".github/workflows/kensa.yml"
 name: Kensa
@@ -31,6 +33,33 @@ jobs:
 
 A failed eval fails the pytest session, which fails the job - regressions block the PR.
 
+## TypeScript and Vitest
+
+Install `@kensa/sdk` and Vitest in the repository, then run the same command you use locally:
+
+```yaml title=".github/workflows/kensa-typescript.yml"
+name: Kensa TypeScript
+
+on: [pull_request]
+
+jobs:
+  kensa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm vitest run
+```
+
+The TypeScript SDK imports `@kensa/core` directly. It does not need Python, the standalone engine, or a local service. See [TypeScript SDK](/typescript) for the evaluation shape.
+
 ## What needs credentials
 
 | Eval uses | Needs |
@@ -39,7 +68,7 @@ A failed eval fails the pytest session, which fails the job - regressions block 
 | `judge(...)` | A provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), or `KENSA_JUDGE_RESULT` |
 | Trace imports from Langfuse | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` |
 
-Deterministic assertions run entirely locally and cost nothing, so you can gate on tool usage, output shape, cost, and latency without any secrets.
+Deterministic assertions run entirely locally, so you can gate on tool usage, output shape, cost, and latency without any secrets.
 
 If your evals call `judge(...)`, add the provider secret and (optionally) pin the model:
 

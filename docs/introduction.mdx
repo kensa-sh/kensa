@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: Kensa turns agent traces into pytest evals that run in CI.
+description: Kensa turns agent traces into Python or TypeScript evals that run in CI.
 sidebarTitle: Introduction
 keywords:
   - agent evals
@@ -10,7 +10,7 @@ keywords:
   - traces
 ---
 
-Generated from traces or written from scratch, your evals live in your repo as plain, executable pytest files. Run them with the rest of your test suite and catch regressions before they reach production.
+Generated from traces or written from scratch, your evals live in your repo as executable pytest or Vitest files. Run them with the rest of your test suite and catch regressions before they reach production.
 
 ```python
 import pytest
@@ -43,7 +43,7 @@ def test_refund_policy(case, kensa_run):
     assert verdict.passed, verdict.reasoning
 ```
 
-Nothing in this file is special: it is a pytest test that any CI already running your Python suite can run.
+This is a normal pytest test that any CI already running your Python suite can run. TypeScript projects use the same core semantics through the [TypeScript SDK](/typescript) and Vitest.
 
 <Check>Prefer the guided path? [Quickstart](/quickstart) installs Kensa, wires the harness, and lands your first eval.</Check>
 
@@ -53,6 +53,12 @@ Nothing in this file is special: it is a pytest test that any CI already running
   </Card>
   <Card title="Learn the mental model" href="/concepts" cta="Read concepts" arrow="true">
     Understand how cases, traces, assertions, judges, and trials fit together.
+  </Card>
+  <Card title="Use TypeScript and Vitest" href="/typescript" cta="Open TypeScript guide" arrow="true">
+    Define an evaluation with `@kensa/sdk` and run it in your existing Vitest suite.
+  </Card>
+  <Card title="Choose another journey" href="/journeys" cta="Compare journeys" arrow="true">
+    Start from local evidence, Python, TypeScript, CI, or a connected trace source.
   </Card>
   <Card title="Drive it from your agent" href="/skills" cta="Use the skill" arrow="true">
     The `kensa-evals` skill walks Claude Code, Codex, or Cursor through the eval lifecycle.
@@ -84,6 +90,8 @@ Nothing in this file is special: it is a pytest test that any CI already running
 | If you want to | Go to |
 |---|---|
 | Get running in a few minutes | [Quickstart](/quickstart) |
+| Choose between local, Python, TypeScript, CI, or connected paths | [Choose a journey](/journeys) |
+| Author TypeScript evals | [TypeScript SDK](/typescript) |
 | Understand the mental model | [Concepts](/concepts) |
 | Define cases and trials | [Cases](/cases) |
 | Assert on traces and output | [Assertions](/assertions) |

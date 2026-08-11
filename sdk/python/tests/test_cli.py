@@ -1675,7 +1675,10 @@ def test_readme_cli_quickstart_leads_with_setup_inspect_approve_eval_flow() -> N
 def test_readme_header_centers_banner_tagline_and_badges() -> None:
     readme = (REPO_ROOT / "README.md").read_text()
     header = readme.split("Generated from traces", 1)[0]
-    tagline = '<p align="center">Kensa turns agent traces into pytest evals that run in CI.</p>'
+    tagline = (
+        '<p align="center">Kensa turns agent traces into Python or TypeScript evals '
+        "that run in CI.</p>"
+    )
     badge_block = (
         '<p align="center">\n'
         '  <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml">'
