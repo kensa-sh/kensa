@@ -290,6 +290,12 @@ describe("protocol semantics", () => {
     expect(value).toEqual(before);
   });
 
+  it("preserves scalar ordering for integer-like object keys", () => {
+    expect(canonicalJson({ "2": "two", "10": "ten" })).toBe(
+      '{\n  "10": "ten",\n  "2": "two"\n}\n',
+    );
+  });
+
   it("rejects non-JSON values at internal artifact boundaries", () => {
     expect(() => canonicalJson(undefined)).toThrow(TypeError);
     expect(() => jsonObject([])).toThrow(TypeError);

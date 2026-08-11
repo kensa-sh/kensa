@@ -19,24 +19,33 @@ export function compareScalar(leftValue: string, rightValue: string): number {
   return left.length - right.length;
 }
 
-function compactCanonicalJson(value: JsonValue): string {
+function prettyCanonicalJson(value: JsonValue, depth = 0): string {
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return JSON.stringify(value);
   if (typeof value === "string") return JSON.stringify(value);
-  if (Array.isArray(value))
-    return `[${value.map(compactCanonicalJson).join(",")}]`;
+  const indentation = "  ".repeat(depth);
+  const childIndentation = "  ".repeat(depth + 1);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    return `[\n${value
+      .map(
+        (item) => `${childIndentation}${prettyCanonicalJson(item, depth + 1)}`,
+      )
+      .join(",\n")}\n${indentation}]`;
+  }
   const entries = Object.entries(value).sort(([left], [right]) =>
     compareScalar(left, right),
   );
-  return `{${entries
+  if (entries.length === 0) return "{}";
+  return `{\n${entries
     .map(
-      ([key, item]) => `${JSON.stringify(key)}:${compactCanonicalJson(item)}`,
+      ([key, item]) =>
+        `${childIndentation}${JSON.stringify(key)}: ${prettyCanonicalJson(item, depth + 1)}`,
     )
-    .join(",")}}`;
+    .join(",\n")}\n${indentation}}`;
 }
 
 export function canonicalJson(value: unknown): string {
   if (!isJsonValue(value)) throw new TypeError("Value is not JSON-compatible");
-  const compact = compactCanonicalJson(value);
-  return `${JSON.stringify(JSON.parse(compact) as JsonValue, null, 2)}\n`;
+  return `${prettyCanonicalJson(value)}\n`;
 }

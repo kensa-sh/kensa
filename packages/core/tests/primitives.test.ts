@@ -120,6 +120,20 @@ describe("protocol primitives", () => {
     });
     const arrayProperty: unknown[] = [];
     Object.defineProperty(arrayProperty, "extra", { value: true });
+    const outOfRangeArrayProperty: unknown[] = [true];
+    Object.defineProperty(outOfRangeArrayProperty, "4294967295", {
+      value: true,
+      enumerable: true,
+    });
+    const arrayAccessor: unknown[] = [];
+    Object.defineProperty(arrayAccessor, "0", {
+      enumerable: true,
+      get: () => {
+        throw new Error("accessor must not run");
+      },
+    });
+    const hiddenArrayItem: unknown[] = [];
+    Object.defineProperty(hiddenArrayItem, "0", { value: true });
     const arraySymbol: unknown[] = [];
     Object.defineProperty(arraySymbol, Symbol("extra"), { value: true });
     class Value {}
@@ -142,6 +156,9 @@ describe("protocol primitives", () => {
       [hidden, ["hidden"]],
       [accessor, ["value"]],
       [arrayProperty, ["extra"]],
+      [outOfRangeArrayProperty, ["4294967295"]],
+      [arrayAccessor, [0]],
+      [hiddenArrayItem, [0]],
       [arraySymbol, ["<symbol>"]],
       [{ nested: undefined }, ["nested"]],
     ];

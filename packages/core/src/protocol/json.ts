@@ -21,13 +21,23 @@ export function invalidJsonPath(
   seen.add(value);
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
-      if (!Object.hasOwn(value, index)) return [...path, index];
-      const invalid = invalidJsonPath(value[index], [...path, index], seen);
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable
+      )
+        return [...path, index];
+      const invalid = invalidJsonPath(descriptor.value, [...path, index], seen);
       if (invalid !== null) return invalid;
     }
     for (const key of Reflect.ownKeys(value)) {
       if (key === "length") continue;
-      if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key))
+      if (
+        typeof key !== "string" ||
+        !/^(0|[1-9]\d*)$/.test(key) ||
+        Number(key) >= value.length
+      )
         return [...path, typeof key === "string" ? key : "<symbol>"];
     }
     seen.delete(value);
