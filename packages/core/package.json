@@ -4,21 +4,25 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "schema:check": "tsx src/protocol/schema-check.ts",
-    "schema:generate": "tsx src/protocol/schema-check.ts --write"
+    "schema:check": "tsx scripts/artifact-check.ts",
+    "schema:generate": "tsx scripts/artifact-check.ts --write"
   },
   "dependencies": {
     "zod": "^4.0.5"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^3.2.4",
+    "ajv": "^8.20.0",
     "tsx": "^4.20.3",
     "vitest": "^3.2.4"
   }

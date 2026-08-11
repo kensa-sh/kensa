@@ -1,0 +1,22 @@
+{
+  "document_kind": "check_result",
+  "duration_ms": 100,
+  "ended_at": "2026-08-06T00:00:00.100Z",
+  "evidence": {
+    "score": 0.2
+  },
+  "failure": {
+    "category": "judge",
+    "evidence": {
+      "threshold": 0.8
+    },
+    "kind": "threshold",
+    "message": "Score below threshold"
+  },
+  "id": "chk_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "invocation_id": "inv_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "name": "quality",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": "2026-08-06T00:00:00.000Z",
+  "status": "fail"
+}

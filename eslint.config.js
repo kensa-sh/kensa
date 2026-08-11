@@ -1,12 +1,17 @@
 import eslint from "@eslint/js";
-import parser from "@typescript-eslint/parser";
+import tseslint from "@typescript-eslint/eslint-plugin";
 
 export default [
-  { ignores: ["packages/**/dist/**"] },
+  { ignores: ["packages/**/coverage/**", "packages/**/dist/**"] },
   eslint.configs.recommended,
+  ...tseslint.configs["flat/recommended-type-checked"],
   {
     files: ["packages/**/*.ts"],
-    languageOptions: { parser },
-    rules: { "no-undef": "off", "no-unused-vars": "off" },
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
   },
 ];

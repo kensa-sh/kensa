@@ -12,6 +12,7 @@ import {
   u32Schema,
 } from "./identifiers.js";
 import {
+  invalidJsonPath,
   isJsonObject,
   isJsonValue,
   type JsonObject,
@@ -163,7 +164,7 @@ function withSemantics<T extends z.ZodType>(
   schema: T,
   check: (value: z.infer<T>, ctx: z.RefinementCtx) => void,
 ): T {
-  return schema.superRefine(check) as T;
+  return schema.superRefine(check);
 }
 const requiresFailure = (status: string) =>
   ["fail", "error", "cancelled", "interrupted", "skipped"].includes(status);
@@ -203,7 +204,6 @@ const invocationSchema = withSemantics(invocationBase, (value, ctx) => {
       params: { kensaCode: "contradictory_fields" },
     });
 });
-/* c8 ignore next */
 const spanSchema = withSemantics(spanBase, (value, ctx) => {
   if ((value.status === "error") !== (value.status_message !== null))
     ctx.addIssue({
@@ -253,20 +253,42 @@ export const protocolDocumentSchema = z.discriminatedUnion("document_kind", [
   spanSchema,
   checkResultSchema,
 ]);
-export type EvalRun = z.infer<typeof evalRunSchema>;
-export type Invocation = z.infer<typeof invocationSchema>;
-export type Span = z.infer<typeof spanSchema>;
-export type CheckResult = z.infer<typeof checkResultSchema>;
-export type ProtocolDocument = z.infer<typeof protocolDocumentSchema>;
+type DeepReadonly<T> = T extends readonly (infer Item)[]
+  ? readonly DeepReadonly<Item>[]
+  : T extends object
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T;
+export type EvalRun = DeepReadonly<z.infer<typeof evalRunSchema>>;
+export type Invocation = DeepReadonly<z.infer<typeof invocationSchema>>;
+export type Span = DeepReadonly<z.infer<typeof spanSchema>>;
+export type CheckResult = DeepReadonly<z.infer<typeof checkResultSchema>>;
+export type ProtocolDocument = DeepReadonly<
+  z.infer<typeof protocolDocumentSchema>
+>;
+export type CaseSnapshot = DeepReadonly<z.infer<typeof caseSnapshotSchema>>;
+export type Failure = DeepReadonly<z.infer<typeof failureSchema>>;
+export type ExecutionProvenance = DeepReadonly<
+  z.infer<typeof provenanceSchema>
+>;
+export type EvidenceCompleteness = DeepReadonly<
+  z.infer<typeof completenessSchema>
+>;
+export type FailureCategory = z.infer<typeof failureCategorySchema>;
+export type EffectPolicy = z.infer<typeof effectPolicySchema>;
+export type EvidenceStatus = z.infer<typeof evidenceStatusSchema>;
+export type EvalRunStatus = EvalRun["status"];
+export type InvocationStatus = Invocation["status"];
+export type SpanStatus = Span["status"];
+export type CheckStatus = CheckResult["status"];
 
-/* c8 ignore next */
 function errorCode(issue: z.core.$ZodIssue): ProtocolErrorCode {
+  const params: unknown =
+    "params" in issue
+      ? (issue as { readonly params?: unknown }).params
+      : undefined;
   const custom =
-    "params" in issue &&
-    typeof issue.params === "object" &&
-    issue.params !== null &&
-    "kensaCode" in issue.params
-      ? issue.params.kensaCode
+    typeof params === "object" && params !== null && "kensaCode" in params
+      ? params.kensaCode
       : undefined;
   if (custom === "contradictory_fields" || custom === "invalid_json_value")
     return custom;
@@ -276,16 +298,38 @@ function errorCode(issue: z.core.$ZodIssue): ProtocolErrorCode {
   if (path.some((part) => part === "id" || part.endsWith("_id")))
     return "invalid_identifier";
   if (issue.code === "unrecognized_keys") return "unknown_field";
-  if (issue.code === "invalid_value") return "invalid_literal";
-  if (issue.code === "too_big" || issue.code === "not_multiple_of")
+  if (
+    issue.code === "invalid_value" ||
+    path.at(-1) === "schema_version" ||
+    path.at(-1) === "document_kind"
+  )
+    return "invalid_literal";
+  if (
+    path.at(-1) === "duration_ms" ||
+    path.at(-1) === "attempt" ||
+    issue.code === "too_big" ||
+    issue.code === "too_small" ||
+    issue.code === "not_multiple_of"
+  )
     return "unsafe_integer";
   return "invalid_type";
 }
-/* c8 ignore next */
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
+  const invalidPath = invalidJsonPath(value);
+  if (invalidPath !== null) {
+    const topLevelField = invalidPath.length === 1 ? invalidPath[0] : undefined;
+    throw new ProtocolError(
+      "runtime",
+      topLevelField === "duration_ms" || topLevelField === "attempt"
+        ? "unsafe_integer"
+        : "invalid_json_value",
+      invalidPath,
+      "Value is not JSON-compatible",
+    );
+  }
   const result = schema.safeParse(value);
   if (result.success) return result.data;
-  const issue = result.error.issues[0]!;
+  const issue = result.error.issues.reduce((first) => first);
   const issuePath =
     issue.code === "unrecognized_keys" &&
     "keys" in issue &&
@@ -296,11 +340,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   throw new ProtocolError(
     "runtime",
     errorCode(issue),
-    /* c8 ignore next 5 */
-    issuePath.filter(
-      (part): part is string | number =>
-        typeof part === "string" || typeof part === "number",
-    ),
+    issuePath.map(String),
     issue.message,
   );
 }
@@ -313,16 +353,16 @@ export const parseCheckResult = (value: unknown): CheckResult =>
   parse(checkResultSchema, value);
 export const parseProtocolDocument = (value: unknown): ProtocolDocument =>
   parse(protocolDocumentSchema, value);
-/* c8 ignore next */
 export function parseProtocolJson(
   input: string | Uint8Array,
 ): ProtocolDocument {
   try {
     const text =
-      typeof input === "string" ? input : new TextDecoder().decode(input);
+      typeof input === "string"
+        ? input
+        : new TextDecoder("utf-8", { fatal: true }).decode(input);
     return parseProtocolDocument(JSON.parse(text) as unknown);
   } catch (error) {
-    /* c8 ignore next */
     if (error instanceof ProtocolError) throw error;
     throw new ProtocolError("syntax", "invalid_json", [], "Invalid JSON");
   }

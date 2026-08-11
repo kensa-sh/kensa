@@ -1,0 +1,18 @@
+{
+  "document_kind": "check_result",
+  "duration_ms": null,
+  "ended_at": null,
+  "evidence": {},
+  "failure": {
+    "category": "configuration",
+    "evidence": {},
+    "kind": "disabled",
+    "message": "Check disabled"
+  },
+  "id": "chk_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "invocation_id": "inv_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "name": "quality",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "skipped"
+}

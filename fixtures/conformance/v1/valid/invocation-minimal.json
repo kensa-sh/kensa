@@ -1,11 +1,18 @@
 {
-  "attributes": {},
   "attempt": 1,
-  "case": { "id": "case-1", "input": null, "metadata": {} },
+  "attributes": {},
+  "case": {
+    "id": "case-1",
+    "input": null,
+    "metadata": {}
+  },
   "document_kind": "invocation",
   "duration_ms": null,
   "ended_at": null,
-  "evidence_completeness": { "reason": null, "status": "complete" },
+  "evidence_completeness": {
+    "reason": null,
+    "status": "complete"
+  },
   "failure": null,
   "id": "inv_018f2f2e-8c70-7c31-8c70-123456789abc",
   "output": null,

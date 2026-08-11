@@ -1,0 +1,40 @@
+{
+  "attempt": 1,
+  "attributes": {},
+  "case": {
+    "id": "case-unavailable",
+    "input": false,
+    "metadata": {}
+  },
+  "document_kind": "invocation",
+  "duration_ms": null,
+  "ended_at": null,
+  "evidence_completeness": {
+    "reason": "Exporter unavailable",
+    "status": "unavailable"
+  },
+  "failure": {
+    "category": "infrastructure",
+    "evidence": {},
+    "kind": "exporter_unavailable",
+    "message": "Exporter was unavailable"
+  },
+  "id": "inv_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "output": null,
+  "output_recorded": false,
+  "provenance": {
+    "adapter": null,
+    "adapter_version": null,
+    "effects": "live",
+    "environment": null,
+    "producer": "kensa",
+    "producer_version": "0.1.0",
+    "revision": null,
+    "runtime": "rust",
+    "runtime_version": "1.97.1"
+  },
+  "run_id": "run_01890f47-6c20-7a81-b1c8-9e6f12d6406e",
+  "schema_version": "kensa.protocol.v1",
+  "started_at": null,
+  "status": "error"
+}

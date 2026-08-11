@@ -1,330 +1,12 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "oneOf": [
-    {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "$ref": "#/$defs/__schema0"
-        },
-        "document_kind": {
-          "$ref": "#/$defs/__schema1"
-        },
-        "id": {
-          "$ref": "#/$defs/__schema2"
-        },
-        "status": {
-          "$ref": "#/$defs/__schema3"
-        },
-        "created_at": {
-          "$ref": "#/$defs/__schema4"
-        },
-        "started_at": {
-          "$ref": "#/$defs/__schema5"
-        },
-        "ended_at": {
-          "$ref": "#/$defs/__schema6"
-        },
-        "duration_ms": {
-          "$ref": "#/$defs/__schema7"
-        },
-        "attributes": {
-          "$ref": "#/$defs/__schema9"
-        },
-        "failure": {
-          "$ref": "#/$defs/__schema12"
-        }
-      },
-      "required": [
-        "schema_version",
-        "document_kind",
-        "id",
-        "status",
-        "created_at",
-        "started_at",
-        "ended_at",
-        "duration_ms",
-        "attributes",
-        "failure"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "$ref": "#/$defs/__schema0"
-        },
-        "document_kind": {
-          "$ref": "#/$defs/__schema15"
-        },
-        "id": {
-          "$ref": "#/$defs/__schema16"
-        },
-        "run_id": {
-          "$ref": "#/$defs/__schema2"
-        },
-        "case": {
-          "$ref": "#/$defs/__schema17"
-        },
-        "attempt": {
-          "$ref": "#/$defs/__schema20"
-        },
-        "status": {
-          "$ref": "#/$defs/__schema21"
-        },
-        "started_at": {
-          "$ref": "#/$defs/__schema22"
-        },
-        "ended_at": {
-          "$ref": "#/$defs/__schema23"
-        },
-        "duration_ms": {
-          "$ref": "#/$defs/__schema24"
-        },
-        "output_recorded": {
-          "$ref": "#/$defs/__schema25"
-        },
-        "output": {
-          "$ref": "#/$defs/__schema26"
-        },
-        "provenance": {
-          "$ref": "#/$defs/__schema27"
-        },
-        "evidence_completeness": {
-          "$ref": "#/$defs/__schema28"
-        },
-        "attributes": {
-          "$ref": "#/$defs/__schema9"
-        },
-        "failure": {
-          "$ref": "#/$defs/__schema29"
-        }
-      },
-      "required": [
-        "schema_version",
-        "document_kind",
-        "id",
-        "run_id",
-        "case",
-        "attempt",
-        "status",
-        "started_at",
-        "ended_at",
-        "duration_ms",
-        "output_recorded",
-        "output",
-        "provenance",
-        "evidence_completeness",
-        "attributes",
-        "failure"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "$ref": "#/$defs/__schema0"
-        },
-        "document_kind": {
-          "$ref": "#/$defs/__schema30"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/__schema16"
-        },
-        "trace_id": {
-          "$ref": "#/$defs/__schema31"
-        },
-        "span_id": {
-          "$ref": "#/$defs/__schema32"
-        },
-        "parent_span_id": {
-          "$ref": "#/$defs/__schema33"
-        },
-        "name": {
-          "$ref": "#/$defs/__schema14"
-        },
-        "span_kind": {
-          "$ref": "#/$defs/__schema14"
-        },
-        "status": {
-          "$ref": "#/$defs/__schema34"
-        },
-        "status_message": {
-          "$ref": "#/$defs/__schema35"
-        },
-        "started_at": {
-          "$ref": "#/$defs/__schema36"
-        },
-        "ended_at": {
-          "$ref": "#/$defs/__schema37"
-        },
-        "duration_ms": {
-          "$ref": "#/$defs/__schema38"
-        },
-        "input_recorded": {
-          "$ref": "#/$defs/__schema39"
-        },
-        "input": {
-          "$ref": "#/$defs/__schema40"
-        },
-        "output_recorded": {
-          "$ref": "#/$defs/__schema41"
-        },
-        "output": {
-          "$ref": "#/$defs/__schema42"
-        },
-        "attributes": {
-          "$ref": "#/$defs/__schema9"
-        }
-      },
-      "required": [
-        "schema_version",
-        "document_kind",
-        "invocation_id",
-        "trace_id",
-        "span_id",
-        "parent_span_id",
-        "name",
-        "span_kind",
-        "status",
-        "status_message",
-        "started_at",
-        "ended_at",
-        "duration_ms",
-        "input_recorded",
-        "input",
-        "output_recorded",
-        "output",
-        "attributes"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "$ref": "#/$defs/__schema0"
-        },
-        "document_kind": {
-          "$ref": "#/$defs/__schema43"
-        },
-        "id": {
-          "$ref": "#/$defs/__schema44"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/__schema16"
-        },
-        "name": {
-          "$ref": "#/$defs/__schema14"
-        },
-        "status": {
-          "$ref": "#/$defs/__schema45"
-        },
-        "started_at": {
-          "$ref": "#/$defs/__schema46"
-        },
-        "ended_at": {
-          "$ref": "#/$defs/__schema47"
-        },
-        "duration_ms": {
-          "$ref": "#/$defs/__schema48"
-        },
-        "evidence": {
-          "$ref": "#/$defs/__schema9"
-        },
-        "failure": {
-          "$ref": "#/$defs/__schema49"
-        }
-      },
-      "required": [
-        "schema_version",
-        "document_kind",
-        "id",
-        "invocation_id",
-        "name",
-        "status",
-        "started_at",
-        "ended_at",
-        "duration_ms",
-        "evidence",
-        "failure"
-      ],
-      "additionalProperties": false
-    }
-  ],
   "$defs": {
     "__schema0": {
-      "type": "string",
-      "const": "kensa.protocol.v1"
-    },
-    "__schema1": {
-      "type": "string",
-      "const": "eval_run"
-    },
-    "__schema2": {
-      "type": "string",
-      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "__schema3": {
-      "type": "string",
-      "enum": [
-        "pending",
-        "running",
-        "pass",
-        "fail",
-        "error",
-        "cancelled",
-        "interrupted"
-      ]
-    },
-    "__schema4": {
+      "const": "kensa.protocol.v1",
       "type": "string"
     },
-    "__schema5": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/__schema4"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "__schema6": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/__schema4"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "__schema7": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/__schema8"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "__schema8": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 9007199254740991
-    },
-    "__schema9": {
-      "type": "object",
-      "propertyNames": {
-        "$ref": "#/$defs/__schema10"
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/__schema11"
-      }
+    "__schema1": {
+      "const": "eval_run",
+      "type": "string"
     },
     "__schema10": {
       "type": "string"
@@ -344,19 +26,19 @@
           "type": "null"
         },
         {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/__schema11"
-          }
+          },
+          "type": "array"
         },
         {
-          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema11"
+          },
           "propertyNames": {
             "type": "string"
           },
-          "additionalProperties": {
-            "$ref": "#/$defs/__schema11"
-          }
+          "type": "object"
         }
       ]
     },
@@ -371,10 +53,9 @@
       ]
     },
     "__schema13": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "category": {
-          "type": "string",
           "enum": [
             "agent",
             "simulator",
@@ -383,16 +64,17 @@
             "infrastructure",
             "harness",
             "unknown"
-          ]
+          ],
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/__schema9"
         },
         "kind": {
           "$ref": "#/$defs/__schema14"
         },
         "message": {
           "$ref": "#/$defs/__schema14"
-        },
-        "evidence": {
-          "$ref": "#/$defs/__schema9"
         }
       },
       "required": [
@@ -401,23 +83,25 @@
         "message",
         "evidence"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema14": {
+      "pattern": "\\S",
       "type": "string"
     },
     "__schema15": {
-      "type": "string",
-      "const": "invocation"
+      "const": "invocation",
+      "type": "string"
     },
     "__schema16": {
-      "type": "string",
-      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
     },
     "__schema17": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "id": {
+          "pattern": "\\S",
           "type": "string"
         },
         "input": {
@@ -432,7 +116,7 @@
         "input",
         "metadata"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema18": {
       "$ref": "#/$defs/__schema19"
@@ -452,29 +136,32 @@
           "type": "null"
         },
         {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/__schema19"
-          }
+          },
+          "type": "array"
         },
         {
-          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema19"
+          },
           "propertyNames": {
             "type": "string"
           },
-          "additionalProperties": {
-            "$ref": "#/$defs/__schema19"
-          }
+          "type": "object"
         }
       ]
     },
+    "__schema2": {
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
     "__schema20": {
-      "type": "integer",
+      "maximum": 4294967295,
       "minimum": 1,
-      "maximum": 4294967295
+      "type": "integer"
     },
     "__schema21": {
-      "type": "string",
       "enum": [
         "pending",
         "running",
@@ -484,7 +171,8 @@
         "cancelled",
         "skipped",
         "interrupted"
-      ]
+      ],
+      "type": "string"
     },
     "__schema22": {
       "anyOf": [
@@ -530,14 +218,8 @@
       ]
     },
     "__schema27": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "producer": {
-          "$ref": "#/$defs/__schema14"
-        },
-        "producer_version": {
-          "$ref": "#/$defs/__schema14"
-        },
         "adapter": {
           "anyOf": [
             {
@@ -558,10 +240,29 @@
             }
           ]
         },
-        "runtime": {
+        "effects": {
+          "enum": [
+            "none",
+            "captured",
+            "sandboxed",
+            "live"
+          ],
+          "type": "string"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/__schema14"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer": {
           "$ref": "#/$defs/__schema14"
         },
-        "runtime_version": {
+        "producer_version": {
           "$ref": "#/$defs/__schema14"
         },
         "revision": {
@@ -574,24 +275,11 @@
             }
           ]
         },
-        "environment": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/__schema14"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "runtime": {
+          "$ref": "#/$defs/__schema14"
         },
-        "effects": {
-          "type": "string",
-          "enum": [
-            "none",
-            "captured",
-            "sandboxed",
-            "live"
-          ]
+        "runtime_version": {
+          "$ref": "#/$defs/__schema14"
         }
       },
       "required": [
@@ -605,20 +293,11 @@
         "environment",
         "effects"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema28": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "status": {
-          "type": "string",
-          "enum": [
-            "complete",
-            "pending",
-            "partial",
-            "unavailable"
-          ]
-        },
         "reason": {
           "anyOf": [
             {
@@ -628,13 +307,22 @@
               "type": "null"
             }
           ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "pending",
+            "partial",
+            "unavailable"
+          ],
+          "type": "string"
         }
       },
       "required": [
         "status",
         "reason"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema29": {
       "anyOf": [
@@ -646,17 +334,29 @@
         }
       ]
     },
+    "__schema3": {
+      "enum": [
+        "pending",
+        "running",
+        "pass",
+        "fail",
+        "error",
+        "cancelled",
+        "interrupted"
+      ],
+      "type": "string"
+    },
     "__schema30": {
-      "type": "string",
-      "const": "span"
+      "const": "span",
+      "type": "string"
     },
     "__schema31": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
+      "pattern": "^(?!0{32}$)[0-9a-f]{32}$",
+      "type": "string"
     },
     "__schema32": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{16}$"
+      "pattern": "^(?!0{16}$)[0-9a-f]{16}$",
+      "type": "string"
     },
     "__schema33": {
       "anyOf": [
@@ -669,12 +369,12 @@
       ]
     },
     "__schema34": {
-      "type": "string",
       "enum": [
         "unset",
         "ok",
         "error"
-      ]
+      ],
+      "type": "string"
     },
     "__schema35": {
       "anyOf": [
@@ -719,6 +419,10 @@
     "__schema39": {
       "type": "boolean"
     },
+    "__schema4": {
+      "pattern": "^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{3})Z$",
+      "type": "string"
+    },
     "__schema40": {
       "anyOf": [
         {
@@ -743,21 +447,21 @@
       ]
     },
     "__schema43": {
-      "type": "string",
-      "const": "check_result"
+      "const": "check_result",
+      "type": "string"
     },
     "__schema44": {
-      "type": "string",
-      "pattern": "^chk_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      "pattern": "^chk_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
     },
     "__schema45": {
-      "type": "string",
       "enum": [
         "pass",
         "fail",
         "error",
         "skipped"
-      ]
+      ],
+      "type": "string"
     },
     "__schema46": {
       "anyOf": [
@@ -798,6 +502,305 @@
           "type": "null"
         }
       ]
+    },
+    "__schema5": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/__schema4"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema6": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/__schema4"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema7": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/__schema8"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema8": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "__schema9": {
+      "additionalProperties": {
+        "$ref": "#/$defs/__schema11"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/__schema10"
+      },
+      "type": "object"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "created_at": {
+          "$ref": "#/$defs/__schema4"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "failure": {
+          "$ref": "#/$defs/__schema12"
+        },
+        "id": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "started_at": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema3"
+        }
+      },
+      "required": [
+        "schema_version",
+        "document_kind",
+        "id",
+        "status",
+        "created_at",
+        "started_at",
+        "ended_at",
+        "duration_ms",
+        "attributes",
+        "failure"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "$ref": "#/$defs/__schema20"
+        },
+        "attributes": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "case": {
+          "$ref": "#/$defs/__schema17"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/__schema15"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/__schema24"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/__schema23"
+        },
+        "evidence_completeness": {
+          "$ref": "#/$defs/__schema28"
+        },
+        "failure": {
+          "$ref": "#/$defs/__schema29"
+        },
+        "id": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "output": {
+          "$ref": "#/$defs/__schema26"
+        },
+        "output_recorded": {
+          "$ref": "#/$defs/__schema25"
+        },
+        "provenance": {
+          "$ref": "#/$defs/__schema27"
+        },
+        "run_id": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "started_at": {
+          "$ref": "#/$defs/__schema22"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema21"
+        }
+      },
+      "required": [
+        "schema_version",
+        "document_kind",
+        "id",
+        "run_id",
+        "case",
+        "attempt",
+        "status",
+        "started_at",
+        "ended_at",
+        "duration_ms",
+        "output_recorded",
+        "output",
+        "provenance",
+        "evidence_completeness",
+        "attributes",
+        "failure"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "document_kind": {
+          "$ref": "#/$defs/__schema30"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/__schema38"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/__schema37"
+        },
+        "input": {
+          "$ref": "#/$defs/__schema40"
+        },
+        "input_recorded": {
+          "$ref": "#/$defs/__schema39"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "name": {
+          "$ref": "#/$defs/__schema14"
+        },
+        "output": {
+          "$ref": "#/$defs/__schema42"
+        },
+        "output_recorded": {
+          "$ref": "#/$defs/__schema41"
+        },
+        "parent_span_id": {
+          "$ref": "#/$defs/__schema33"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "span_id": {
+          "$ref": "#/$defs/__schema32"
+        },
+        "span_kind": {
+          "$ref": "#/$defs/__schema14"
+        },
+        "started_at": {
+          "$ref": "#/$defs/__schema36"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema34"
+        },
+        "status_message": {
+          "$ref": "#/$defs/__schema35"
+        },
+        "trace_id": {
+          "$ref": "#/$defs/__schema31"
+        }
+      },
+      "required": [
+        "schema_version",
+        "document_kind",
+        "invocation_id",
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "name",
+        "span_kind",
+        "status",
+        "status_message",
+        "started_at",
+        "ended_at",
+        "duration_ms",
+        "input_recorded",
+        "input",
+        "output_recorded",
+        "output",
+        "attributes"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": {
+          "$ref": "#/$defs/__schema43"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/__schema48"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/__schema47"
+        },
+        "evidence": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "failure": {
+          "$ref": "#/$defs/__schema49"
+        },
+        "id": {
+          "$ref": "#/$defs/__schema44"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "name": {
+          "$ref": "#/$defs/__schema14"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "started_at": {
+          "$ref": "#/$defs/__schema46"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema45"
+        }
+      },
+      "required": [
+        "schema_version",
+        "document_kind",
+        "id",
+        "invocation_id",
+        "name",
+        "status",
+        "started_at",
+        "ended_at",
+        "duration_ms",
+        "evidence",
+        "failure"
+      ],
+      "type": "object"
+    }
+  ]
 }

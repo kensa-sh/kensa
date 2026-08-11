@@ -1,196 +1,19 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "properties": {
-    "schema_version": {
-      "$ref": "#/$defs/__schema0"
-    },
-    "document_kind": {
-      "$ref": "#/$defs/__schema1"
-    },
-    "id": {
-      "$ref": "#/$defs/__schema2"
-    },
-    "run_id": {
-      "$ref": "#/$defs/__schema3"
-    },
-    "case": {
-      "$ref": "#/$defs/__schema4"
-    },
-    "attempt": {
-      "$ref": "#/$defs/__schema10"
-    },
-    "status": {
-      "$ref": "#/$defs/__schema11"
-    },
-    "started_at": {
-      "$ref": "#/$defs/__schema12"
-    },
-    "ended_at": {
-      "$ref": "#/$defs/__schema14"
-    },
-    "duration_ms": {
-      "$ref": "#/$defs/__schema15"
-    },
-    "output_recorded": {
-      "$ref": "#/$defs/__schema16"
-    },
-    "output": {
-      "$ref": "#/$defs/__schema17"
-    },
-    "provenance": {
-      "$ref": "#/$defs/__schema18"
-    },
-    "evidence_completeness": {
-      "$ref": "#/$defs/__schema20"
-    },
-    "attributes": {
-      "$ref": "#/$defs/__schema7"
-    },
-    "failure": {
-      "$ref": "#/$defs/__schema21"
-    }
-  },
-  "required": [
-    "schema_version",
-    "document_kind",
-    "id",
-    "run_id",
-    "case",
-    "attempt",
-    "status",
-    "started_at",
-    "ended_at",
-    "duration_ms",
-    "output_recorded",
-    "output",
-    "provenance",
-    "evidence_completeness",
-    "attributes",
-    "failure"
-  ],
-  "additionalProperties": false,
   "$defs": {
     "__schema0": {
-      "type": "string",
-      "const": "kensa.protocol.v1"
-    },
-    "__schema1": {
-      "type": "string",
-      "const": "invocation"
-    },
-    "__schema2": {
-      "type": "string",
-      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "__schema3": {
-      "type": "string",
-      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "__schema4": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "input": {
-          "$ref": "#/$defs/__schema5"
-        },
-        "metadata": {
-          "$ref": "#/$defs/__schema7"
-        }
-      },
-      "required": [
-        "id",
-        "input",
-        "metadata"
-      ],
-      "additionalProperties": false
-    },
-    "__schema5": {
-      "$ref": "#/$defs/__schema6"
-    },
-    "__schema6": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "number"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema6"
-          }
-        },
-        {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "$ref": "#/$defs/__schema6"
-          }
-        }
-      ]
-    },
-    "__schema7": {
-      "type": "object",
-      "propertyNames": {
-        "$ref": "#/$defs/__schema8"
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/__schema9"
-      }
-    },
-    "__schema8": {
+      "const": "kensa.protocol.v1",
       "type": "string"
     },
-    "__schema9": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "number"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema9"
-          }
-        },
-        {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "$ref": "#/$defs/__schema9"
-          }
-        }
-      ]
+    "__schema1": {
+      "const": "invocation",
+      "type": "string"
     },
     "__schema10": {
-      "type": "integer",
+      "maximum": 4294967295,
       "minimum": 1,
-      "maximum": 4294967295
+      "type": "integer"
     },
     "__schema11": {
-      "type": "string",
       "enum": [
         "pending",
         "running",
@@ -200,7 +23,8 @@
         "cancelled",
         "skipped",
         "interrupted"
-      ]
+      ],
+      "type": "string"
     },
     "__schema12": {
       "anyOf": [
@@ -213,6 +37,7 @@
       ]
     },
     "__schema13": {
+      "pattern": "^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{3})Z$",
       "type": "string"
     },
     "__schema14": {
@@ -228,9 +53,9 @@
     "__schema15": {
       "anyOf": [
         {
-          "type": "integer",
+          "maximum": 9007199254740991,
           "minimum": 0,
-          "maximum": 9007199254740991
+          "type": "integer"
         },
         {
           "type": "null"
@@ -251,14 +76,8 @@
       ]
     },
     "__schema18": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "producer": {
-          "$ref": "#/$defs/__schema19"
-        },
-        "producer_version": {
-          "$ref": "#/$defs/__schema19"
-        },
         "adapter": {
           "anyOf": [
             {
@@ -279,10 +98,29 @@
             }
           ]
         },
-        "runtime": {
+        "effects": {
+          "enum": [
+            "none",
+            "captured",
+            "sandboxed",
+            "live"
+          ],
+          "type": "string"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/__schema19"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer": {
           "$ref": "#/$defs/__schema19"
         },
-        "runtime_version": {
+        "producer_version": {
           "$ref": "#/$defs/__schema19"
         },
         "revision": {
@@ -295,24 +133,11 @@
             }
           ]
         },
-        "environment": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/__schema19"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "runtime": {
+          "$ref": "#/$defs/__schema19"
         },
-        "effects": {
-          "type": "string",
-          "enum": [
-            "none",
-            "captured",
-            "sandboxed",
-            "live"
-          ]
+        "runtime_version": {
+          "$ref": "#/$defs/__schema19"
         }
       },
       "required": [
@@ -326,23 +151,19 @@
         "environment",
         "effects"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema19": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "__schema2": {
+      "pattern": "^inv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
       "type": "string"
     },
     "__schema20": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "status": {
-          "type": "string",
-          "enum": [
-            "complete",
-            "pending",
-            "partial",
-            "unavailable"
-          ]
-        },
         "reason": {
           "anyOf": [
             {
@@ -352,21 +173,29 @@
               "type": "null"
             }
           ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "pending",
+            "partial",
+            "unavailable"
+          ],
+          "type": "string"
         }
       },
       "required": [
         "status",
         "reason"
       ],
-      "additionalProperties": false
+      "type": "object"
     },
     "__schema21": {
       "anyOf": [
         {
-          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "category": {
-              "type": "string",
               "enum": [
                 "agent",
                 "simulator",
@@ -375,16 +204,17 @@
                 "infrastructure",
                 "harness",
                 "unknown"
-              ]
+              ],
+              "type": "string"
+            },
+            "evidence": {
+              "$ref": "#/$defs/__schema7"
             },
             "kind": {
               "$ref": "#/$defs/__schema19"
             },
             "message": {
               "$ref": "#/$defs/__schema19"
-            },
-            "evidence": {
-              "$ref": "#/$defs/__schema7"
             }
           },
           "required": [
@@ -393,12 +223,185 @@
             "message",
             "evidence"
           ],
-          "additionalProperties": false
+          "type": "object"
         },
         {
           "type": "null"
         }
       ]
+    },
+    "__schema3": {
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "__schema4": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "metadata": {
+          "$ref": "#/$defs/__schema7"
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "__schema5": {
+      "$ref": "#/$defs/__schema6"
+    },
+    "__schema6": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/__schema6"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema6"
+          },
+          "propertyNames": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "__schema7": {
+      "additionalProperties": {
+        "$ref": "#/$defs/__schema9"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/__schema8"
+      },
+      "type": "object"
+    },
+    "__schema8": {
+      "type": "string"
+    },
+    "__schema9": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/__schema9"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema9"
+          },
+          "propertyNames": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      ]
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "$ref": "#/$defs/__schema10"
+    },
+    "attributes": {
+      "$ref": "#/$defs/__schema7"
+    },
+    "case": {
+      "$ref": "#/$defs/__schema4"
+    },
+    "document_kind": {
+      "$ref": "#/$defs/__schema1"
+    },
+    "duration_ms": {
+      "$ref": "#/$defs/__schema15"
+    },
+    "ended_at": {
+      "$ref": "#/$defs/__schema14"
+    },
+    "evidence_completeness": {
+      "$ref": "#/$defs/__schema20"
+    },
+    "failure": {
+      "$ref": "#/$defs/__schema21"
+    },
+    "id": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "output": {
+      "$ref": "#/$defs/__schema17"
+    },
+    "output_recorded": {
+      "$ref": "#/$defs/__schema16"
+    },
+    "provenance": {
+      "$ref": "#/$defs/__schema18"
+    },
+    "run_id": {
+      "$ref": "#/$defs/__schema3"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/__schema0"
+    },
+    "started_at": {
+      "$ref": "#/$defs/__schema12"
+    },
+    "status": {
+      "$ref": "#/$defs/__schema11"
+    }
+  },
+  "required": [
+    "schema_version",
+    "document_kind",
+    "id",
+    "run_id",
+    "case",
+    "attempt",
+    "status",
+    "started_at",
+    "ended_at",
+    "duration_ms",
+    "output_recorded",
+    "output",
+    "provenance",
+    "evidence_completeness",
+    "attributes",
+    "failure"
+  ],
+  "type": "object"
 }

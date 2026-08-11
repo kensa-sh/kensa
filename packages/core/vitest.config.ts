@@ -11,7 +11,6 @@ export default defineConfig({
         statements: 100,
       },
       include: ["src/**/*.ts"],
-      exclude: ["src/protocol/schema-check.ts"],
     },
   },
 });

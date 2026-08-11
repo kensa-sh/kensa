@@ -16,19 +16,10 @@ export const checkResultIdSchema = branded(
   new RegExp(`^chk_${uuidV7}$`),
   "CheckResultId",
 );
-export const caseIdSchema = z
-  .string()
-  .refine((value) => value.trim().length > 0)
-  .brand("CaseId");
-export const traceIdSchema = branded(/^[0-9a-f]{32}$/, "TraceId").refine(
-  (value) => !/^0+$/.test(value),
-);
-export const spanIdSchema = branded(/^[0-9a-f]{16}$/, "SpanId").refine(
-  (value) => !/^0+$/.test(value),
-);
-export const nonBlankStringSchema = z
-  .string()
-  .refine((value) => value.trim().length > 0);
+export const caseIdSchema = z.string().regex(/\S/).brand("CaseId");
+export const traceIdSchema = branded(/^(?!0{32}$)[0-9a-f]{32}$/, "TraceId");
+export const spanIdSchema = branded(/^(?!0{16}$)[0-9a-f]{16}$/, "SpanId");
+export const nonBlankStringSchema = z.string().regex(/\S/);
 export const safeIntegerSchema = z
   .number()
   .int()
@@ -36,3 +27,12 @@ export const safeIntegerSchema = z
   .max(Number.MAX_SAFE_INTEGER)
   .refine(Number.isSafeInteger);
 export const u32Schema = z.number().int().min(0).max(4_294_967_295);
+
+export type EvalRunId = z.infer<typeof evalRunIdSchema>;
+export type InvocationId = z.infer<typeof invocationIdSchema>;
+export type CheckResultId = z.infer<typeof checkResultIdSchema>;
+export type CaseId = z.infer<typeof caseIdSchema>;
+export type TraceId = z.infer<typeof traceIdSchema>;
+export type SpanId = z.infer<typeof spanIdSchema>;
+export type SafeInteger = z.infer<typeof safeIntegerSchema>;
+export type U32 = z.infer<typeof u32Schema>;

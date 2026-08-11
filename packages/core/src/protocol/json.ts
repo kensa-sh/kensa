@@ -2,33 +2,57 @@ export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue =
   JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue };
 export type JsonObject = { readonly [key: string]: JsonValue };
+export type JsonPath = readonly (string | number)[];
 
-export function isJsonValue(
+export function invalidJsonPath(
   value: unknown,
+  path: JsonPath = [],
   seen = new Set<object>(),
-): value is JsonValue {
-  /* c8 ignore next 3 */
+): JsonPath | null {
   if (value === null || typeof value === "string" || typeof value === "boolean")
-    return true;
+    return null;
   if (typeof value === "number")
-    return (
-      Number.isFinite(value) &&
+    return Number.isFinite(value) &&
       (!Number.isInteger(value) || Number.isSafeInteger(value))
-    );
-  if (typeof value !== "object") return false;
-  if (seen.has(value)) return false;
+      ? null
+      : path;
+  if (typeof value !== "object") return path;
+  if (seen.has(value)) return path;
   seen.add(value);
   if (Array.isArray(value)) {
-    if (value.some((item) => !isJsonValue(item, seen))) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) return [...path, index];
+      const invalid = invalidJsonPath(value[index], [...path, index], seen);
+      if (invalid !== null) return invalid;
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === "length") continue;
+      if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key))
+        return [...path, typeof key === "string" ? key : "<symbol>"];
+    }
     seen.delete(value);
-    return true;
+    return null;
   }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return false;
-  for (const [key, item] of Object.entries(value))
-    if (typeof key !== "string" || !isJsonValue(item, seen)) return false;
+  const prototype = Reflect.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return path;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") return [...path, "<symbol>"];
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      !descriptor.enumerable
+    )
+      return [...path, key];
+    const invalid = invalidJsonPath(descriptor.value, [...path, key], seen);
+    if (invalid !== null) return invalid;
+  }
   seen.delete(value);
-  return true;
+  return null;
+}
+
+export function isJsonValue(value: unknown): value is JsonValue {
+  return invalidJsonPath(value) === null;
 }
 
 export function isJsonObject(value: unknown): value is JsonObject {
