@@ -31,11 +31,55 @@ GOVERNANCE_FILES = ("CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md")
 
 
 def _descriptor(root: Path, target: str = "darwin-arm64") -> tuple[Path, dict[str, str]]:
+    project = root / "pyproject.toml"
+    if not project.exists():
+        project.write_text('[project]\nversion = "0.19.1"\n')
     bun_target, wheel_tag, filename = hatch_build._TARGETS[target]
     executable = root / "build" / "engine" / target / filename
     executable.parent.mkdir(parents=True)
     executable.write_bytes(_header(target))
     executable.chmod(0o755)
+    manifest = executable.with_name("build-manifest.json")
+    manifest_value = {
+        "schema_version": "kensa.build_manifest.v1",
+        "release": "0.19.1",
+        "components": {
+            "core": {
+                "name": "@kensa/core",
+                "version": "0.19.1",
+                "digest": "c" * 64,
+            },
+            "engine": {
+                "name": "kensa-engine",
+                "version": "0.19.1",
+                "digest": "d" * 64,
+            },
+            "sdks": {
+                "python": {
+                    "name": "kensa",
+                    "version": "0.19.1",
+                    "digest": "e" * 64,
+                },
+                "typescript": {
+                    "name": "@kensa/sdk",
+                    "version": "0.19.1",
+                    "digest": "f" * 64,
+                },
+            },
+        },
+        "contracts": [
+            {"id": identity, "digest": "1" * 64} for identity in hatch_build._CONTRACT_IDS
+        ],
+        "schemas": [{"id": identity, "digest": "2" * 64} for identity in hatch_build._SCHEMA_IDS],
+        "conformance": [
+            {"id": identity, "digest": "3" * 64} for identity in hatch_build._CONFORMANCE_IDS
+        ],
+    }
+    manifest_value["contract_digest"] = hatch_build._digest_json(
+        {"contracts": manifest_value["contracts"], "schemas": manifest_value["schemas"]}
+    )
+    manifest_value["digest"] = hatch_build._digest_json(manifest_value)
+    manifest.write_text(json.dumps(manifest_value))
     value = {
         "schema_version": "kensa.engine_build.v1",
         "target": target,
@@ -43,6 +87,8 @@ def _descriptor(root: Path, target: str = "darwin-arm64") -> tuple[Path, dict[st
         "executable": str(executable.relative_to(root)),
         "wheel_tag": wheel_tag,
         "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "build_manifest": str(manifest.relative_to(root)),
+        "build_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
     }
     path = executable.with_name("engine-build.json")
     path.write_text(json.dumps(value))
@@ -144,6 +190,9 @@ def test_distributions_preserve_root_project_files(tmp_path: Path) -> None:
         assert "License-File: LICENSE" in metadata
         assert (REPOSITORY / "README.md").read_text() in metadata
         assert archive.read(license_name) == (REPOSITORY / "LICENSE").read_bytes()
+        assert json.loads(archive.read("kensa/build-manifest.json"))["schema_version"] == (
+            "kensa.build_manifest.v1"
+        )
 
 
 @pytest.mark.parametrize("target", sorted(hatch_build._TARGETS))
@@ -159,8 +208,12 @@ def test_wheel_build_includes_verified_platform_engine(
     _hook(tmp_path).initialize("standard", build_data)
 
     executable = tmp_path / value["executable"]
+    manifest = tmp_path / value["build_manifest"]
     assert build_data == {
-        "force_include": {str(executable): f"kensa/bin/{executable.name}"},
+        "force_include": {
+            str(executable): f"kensa/bin/{executable.name}",
+            str(manifest): "kensa/build-manifest.json",
+        },
         "pure_python": False,
         "tag": value["wheel_tag"],
     }
@@ -197,6 +250,7 @@ def test_descriptor_rejects_missing_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
         ("target", "", "non-empty"),
         ("schema_version", "other", "unsupported version"),
         ("sha256", "g" * 64, "invalid digest"),
+        ("build_manifest_sha256", "g" * 64, "invalid digest"),
     ],
 )
 def test_descriptor_rejects_invalid_values(
@@ -220,6 +274,115 @@ def test_hook_rejects_tampered_executable(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
     with pytest.raises(RuntimeError, match="does not match its build descriptor"):
         _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+def test_hook_rejects_tampered_or_invalid_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, value = _descriptor(tmp_path)
+    manifest = tmp_path / value["build_manifest"]
+    manifest.write_text("{}")
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+    with pytest.raises(RuntimeError, match="does not match its build descriptor"):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+    value["build_manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    path.write_text(json.dumps(value))
+    with pytest.raises(RuntimeError, match="manifest has an invalid shape"):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+def test_hook_rejects_manifest_for_another_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, value = _descriptor(tmp_path)
+    manifest = tmp_path / value["build_manifest"]
+    payload = json.loads(manifest.read_text())
+    payload["release"] = "0.20.0"
+    payload["components"]["core"]["version"] = "0.20.0"
+    payload["components"]["engine"]["version"] = "0.20.0"
+    payload["components"]["sdks"]["python"]["version"] = "0.20.0"
+    payload["components"]["sdks"]["typescript"]["version"] = "0.20.0"
+    _replace_manifest(path, value, manifest, payload)
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+
+    with pytest.raises(RuntimeError, match="manifest has an invalid shape"):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (None, "Could not read"),
+        ('[project]\nversion = ""\n', "must be a non-empty string"),
+    ],
+)
+def test_hook_rejects_missing_or_invalid_project_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contents: str | None,
+    message: str,
+) -> None:
+    path, _ = _descriptor(tmp_path)
+    project = tmp_path / "pyproject.toml"
+    if contents is None:
+        project.unlink()
+    else:
+        project.write_text(contents)
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+
+    with pytest.raises(RuntimeError, match=message):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("identity", "invalid shape"),
+        ("contract_digest", "invalid contract digest"),
+        ("digest", "invalid digest"),
+        ("component_keys", "invalid shape"),
+    ],
+)
+def test_hook_rejects_noncanonical_manifest_identity_or_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    path, value = _descriptor(tmp_path)
+    manifest = tmp_path / value["build_manifest"]
+    payload = json.loads(manifest.read_text())
+    if mutation == "identity":
+        payload["contracts"][0]["id"] = "other"
+        payload["contract_digest"] = hatch_build._digest_json(
+            {"contracts": payload["contracts"], "schemas": payload["schemas"]}
+        )
+        payload["digest"] = hatch_build._digest_json(
+            {key: item for key, item in payload.items() if key != "digest"}
+        )
+    elif mutation == "contract_digest":
+        payload["contract_digest"] = "0" * 64
+    elif mutation == "digest":
+        payload["digest"] = "0" * 64
+    else:
+        payload["components"]["extra"] = {}
+    _replace_manifest(path, value, manifest, payload)
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+
+    with pytest.raises(RuntimeError, match=message):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+def _replace_manifest(
+    path: Path,
+    descriptor: dict[str, str],
+    manifest: Path,
+    payload: dict[str, Any],
+) -> None:
+    manifest.write_text(json.dumps(payload))
+    descriptor["build_manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    path.write_text(json.dumps(descriptor))
 
 
 @pytest.mark.parametrize("field", ["bun_target", "wheel_tag"])
@@ -282,6 +445,20 @@ def test_hook_rejects_executable_outside_build_root(
     path.write_text(json.dumps(descriptor))
     monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
     with pytest.raises(RuntimeError, match="invalid executable"):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+def test_hook_rejects_manifest_outside_build_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, descriptor = _descriptor(tmp_path)
+    outside = tmp_path / "manifest.json"
+    outside.write_text("{}")
+    descriptor["build_manifest"] = outside.name
+    descriptor["build_manifest_sha256"] = hashlib.sha256(outside.read_bytes()).hexdigest()
+    path.write_text(json.dumps(descriptor))
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+    with pytest.raises(RuntimeError, match="invalid build manifest"):
         _hook(tmp_path).initialize("standard", {"force_include": {}})
 
 

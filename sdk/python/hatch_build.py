@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 _DESCRIPTOR_ENV = "KENSA_ENGINE_BUILD"
 _DESCRIPTOR_KEYS = {
+    "build_manifest",
+    "build_manifest_sha256",
     "bun_target",
     "executable",
     "schema_version",
@@ -18,6 +21,13 @@ _DESCRIPTOR_KEYS = {
     "target",
     "wheel_tag",
 }
+_CONTRACT_IDS = (
+    "kensa.build_manifest.v1",
+    "kensa.engine.v1",
+    "kensa.result.v1",
+)
+_SCHEMA_IDS = ("evaluation", "evidence", "mining", "protection", "sync")
+_CONFORMANCE_IDS = ("canonical-json", "evaluation", "redaction-proof", "trace-view")
 _TARGETS = {
     "darwin-arm64": ("bun-darwin-arm64", "py3-none-macosx_11_0_arm64", "kensa-engine"),
     "darwin-x64": (
@@ -50,7 +60,8 @@ class CustomBuildHook(BuildHookInterface):
         if version == "editable":
             return
         descriptor = _load_descriptor(Path(self.root))
-        executable = _resolve_executable(Path(self.root), descriptor)
+        root = Path(self.root)
+        executable = _resolve_build_file(root, descriptor["executable"], "executable")
         expected = descriptor["sha256"]
         actual = hashlib.sha256(executable.read_bytes()).hexdigest()
         if actual != expected:
@@ -67,8 +78,13 @@ class CustomBuildHook(BuildHookInterface):
         if target != "win32-x64" and not executable.stat().st_mode & stat.S_IXUSR:
             raise RuntimeError("Kensa engine executable is not executable")
         _validate_executable(executable, target)
+        manifest = _resolve_build_file(root, descriptor["build_manifest"], "build manifest")
+        if hashlib.sha256(manifest.read_bytes()).hexdigest() != descriptor["build_manifest_sha256"]:
+            raise RuntimeError("Kensa build manifest does not match its build descriptor")
+        _validate_manifest(manifest, _project_version(root))
         destination = f"kensa/bin/{configuration[2]}"
         build_data["force_include"][str(executable)] = destination
+        build_data["force_include"][str(manifest)] = "kensa/build-manifest.json"
         build_data["pure_python"] = False
         build_data["tag"] = descriptor["wheel_tag"]
 
@@ -92,19 +108,117 @@ def _load_descriptor(root: Path) -> dict[str, str]:
         raise RuntimeError("Kensa engine build descriptor values must be non-empty strings")
     if value["schema_version"] != "kensa.engine_build.v1":
         raise RuntimeError("Kensa engine build descriptor has an unsupported version")
-    if len(value["sha256"]) != 64 or any(
-        character not in "0123456789abcdef" for character in value["sha256"]
-    ):
+    if not _valid_digest(value["sha256"]) or not _valid_digest(value["build_manifest_sha256"]):
         raise RuntimeError("Kensa engine build descriptor has an invalid digest")
     return value
 
 
-def _resolve_executable(root: Path, descriptor: dict[str, str]) -> Path:
-    executable = (root / descriptor["executable"]).resolve()
+def _resolve_build_file(root: Path, configured: str, label: str) -> Path:
+    path = (root / configured).resolve()
     build_root = (root / "build" / "engine").resolve()
-    if not executable.is_relative_to(build_root) or not executable.is_file():
-        raise RuntimeError("Kensa engine build descriptor names an invalid executable")
-    return executable
+    if not path.is_relative_to(build_root) or not path.is_file():
+        raise RuntimeError(f"Kensa engine build descriptor names an invalid {label}")
+    return path
+
+
+def _project_version(root: Path) -> str:
+    try:
+        value = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError("Could not read the Kensa Python project version") from exc
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("Kensa Python project version must be a non-empty string")
+    return value
+
+
+def _validate_manifest(path: Path, release: str) -> None:
+    try:
+        value = json.loads(path.read_text())
+        components = value["components"]
+        sdks = components["sdks"]
+        component_identities = (
+            (components["core"], "@kensa/core"),
+            (components["engine"], "kensa-engine"),
+            (sdks["python"], "kensa"),
+            (sdks["typescript"], "@kensa/sdk"),
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError("Kensa build manifest has an invalid shape") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "release",
+            "components",
+            "contracts",
+            "schemas",
+            "conformance",
+            "contract_digest",
+            "digest",
+        }
+        or value["schema_version"] != "kensa.build_manifest.v1"
+        or value["release"] != release
+        or not isinstance(components, dict)
+        or set(components) != {"core", "engine", "sdks"}
+        or not isinstance(sdks, dict)
+        or set(sdks) != {"python", "typescript"}
+        or any(
+            not _valid_component(component, name, release)
+            for component, name in component_identities
+        )
+        or not _valid_identities(value["contracts"], _CONTRACT_IDS)
+        or not _valid_identities(value["schemas"], _SCHEMA_IDS)
+        or not _valid_identities(value["conformance"], _CONFORMANCE_IDS)
+    ):
+        raise RuntimeError("Kensa build manifest has an invalid shape")
+    expected_contract_digest = _digest_json(
+        {"contracts": value["contracts"], "schemas": value["schemas"]}
+    )
+    if value["contract_digest"] != expected_contract_digest:
+        raise RuntimeError("Kensa build manifest has an invalid contract digest")
+    expected_digest = _digest_json({key: item for key, item in value.items() if key != "digest"})
+    if value["digest"] != expected_digest:
+        raise RuntimeError("Kensa build manifest has an invalid digest")
+
+
+def _valid_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _valid_component(value: object, name: str, release: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"name", "version", "digest"}
+        and value["name"] == name
+        and value["version"] == release
+        and _valid_digest(value["digest"])
+    )
+
+
+def _valid_identities(value: object, expected_ids: tuple[str, ...]) -> bool:
+    return (
+        isinstance(value, list)
+        and [identity.get("id") for identity in value if isinstance(identity, dict)]
+        == list(expected_ids)
+        and all(
+            isinstance(identity, dict)
+            and set(identity) == {"id", "digest"}
+            and isinstance(identity["id"], str)
+            and bool(identity["id"])
+            and _valid_digest(identity["digest"])
+            for identity in value
+        )
+    )
+
+
+def _digest_json(value: object) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _validate_executable(executable: Path, target: str) -> None:

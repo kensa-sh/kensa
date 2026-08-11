@@ -123,6 +123,7 @@ def test_release_workflow_uses_npm_trusted_publishing() -> None:
     assert "pnpm --filter @kensa/core pack" in package_job
     assert "pnpm --filter @kensa/sdk pack" in package_job
     assert "name: dist-npm" in package_job
+    assert "dist/npm/kensa-build-manifest.json" in package_job
     assert "needs: [prepare, tag, package-npm]" in core_job
     assert "needs: [prepare, tag, package-npm, publish-npm-core]" in sdk_job
     for job in (core_job, sdk_job):
@@ -133,6 +134,7 @@ def test_release_workflow_uses_npm_trusted_publishing() -> None:
         assert "NODE_AUTH_TOKEN" not in job
     assert 'npm publish "dist/npm/kensa-core-$VERSION.tgz"' in core_job
     assert 'npm publish "dist/npm/kensa-sdk-$VERSION.tgz"' in sdk_job
+    assert 'gh release create "$TAG" dist/*.whl dist/npm/kensa-build-manifest.json' in workflow
 
 
 def test_typescript_package_versions_match_python_release() -> None:

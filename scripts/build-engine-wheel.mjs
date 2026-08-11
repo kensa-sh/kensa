@@ -47,6 +47,7 @@ if (target === undefined) {
 const buildDirectory = join(pythonRoot, "build", "engine", requestedTarget);
 const executable = join(buildDirectory, target.executable);
 const metadata = join(buildDirectory, "engine-build.json");
+const buildManifest = join(buildDirectory, "build-manifest.json");
 mkdirSync(buildDirectory, { recursive: true });
 
 const bunBinary = process.env.BUN_BINARY ?? "bun";
@@ -62,6 +63,12 @@ if (actualBunVersion !== expectedBunVersion) {
   process.exit(2);
 }
 
+run(process.env.PNPM_BINARY ?? "pnpm", ["--filter", "@kensa/core", "build"]);
+run(process.execPath, [
+  join(root, "scripts", "generate-build-manifest.mjs"),
+  "--output",
+  buildManifest,
+]);
 run(bunBinary, [
   "build",
   "--compile",
@@ -81,6 +88,10 @@ const descriptor = {
   executable: relative(pythonRoot, executable),
   wheel_tag: target.wheel,
   sha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
+  build_manifest: relative(pythonRoot, buildManifest),
+  build_manifest_sha256: createHash("sha256")
+    .update(readFileSync(buildManifest))
+    .digest("hex"),
 };
 writeFileSync(metadata, `${JSON.stringify(descriptor, null, 2)}\n`);
 
