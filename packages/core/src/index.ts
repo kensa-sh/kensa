@@ -1,20 +1,32 @@
 export {
   cancelCase,
-  caseSchema,
   checkCase,
-  checkSchema,
+  checkOutcomes,
   EvaluationTransitionError,
   failureCategories,
-  failureSchema,
-  observationSchema,
+  nextAction,
   observeCase,
+  parseCase,
+  parseCheck,
+  parseObservation,
   startCase,
-  traceSchema,
   type EvaluationCase,
+  type EvaluationAction,
   type EvaluationCheck,
   type EvaluationFailure,
   type EvaluationObservation,
   type EvaluationState,
   type EvaluationVerdict,
 } from "./evaluation.js";
-export { canonicalJson, digestJson, jsonValueSchema, type JsonValue } from "./json.js";
+export {
+  CoreValidationError,
+  KensaCoreError,
+  type CoreErrorCode,
+  type CoreIssue,
+} from "./errors.js";
+export {
+  canonicalJson,
+  digestJson,
+  parseJsonValue,
+  type JsonValue,
+} from "./json.js";

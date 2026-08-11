@@ -1,0 +1,57 @@
+{
+  "handshake": {
+    "type": "handshake",
+    "protocol_version": "kensa.engine.v1",
+    "engine_version": "0.1.0"
+  },
+  "invoke_agent": {
+    "type": "action",
+    "action": "invoke_agent",
+    "case_id": "case-1"
+  },
+  "evaluate_check": {
+    "type": "action",
+    "action": "evaluate_check",
+    "case_id": "case-1"
+  },
+  "complete": {
+    "type": "result",
+    "evaluation": {
+      "phase": "complete",
+      "case_id": "case-1",
+      "verdict": "pass",
+      "output": "world",
+      "output_recorded": true,
+      "trace": {
+        "spans": [],
+        "agent_runs": [],
+        "tools": [],
+        "tool_calls": [],
+        "incomplete": false,
+        "incomplete_reason": null,
+        "duration_ms": 0,
+        "cost_usd": null,
+        "known_cost_usd": null,
+        "cost_available": false,
+        "llm_turns": 0
+      },
+      "failure": null,
+      "check_id": "pytest"
+    }
+  },
+  "cancelled": {
+    "type": "result",
+    "evaluation": {
+      "phase": "cancelled",
+      "case_id": "case-1",
+      "reason": "stopped",
+      "verdict": "error",
+      "failure": {
+        "category": "harness",
+        "kind": "cancelled",
+        "message": "stopped",
+        "evidence": {}
+      }
+    }
+  }
+}

@@ -2,6 +2,8 @@ import {
   cancelCase,
   checkCase,
   EvaluationTransitionError,
+  KensaCoreError,
+  nextAction,
   observeCase,
   startCase,
   type EvaluationState,
@@ -12,8 +14,10 @@ import {
   ENGINE_VERSION,
   PROTOCOL_VERSION,
   requestEnvelopeSchema,
+  responseSchema,
   type EngineFailure,
   type EngineRequest,
+  type EngineResponse,
   type ResponseEnvelope,
 } from "./protocol.js";
 
@@ -32,30 +36,55 @@ export class KensaEngine {
     try {
       const envelope = requestEnvelopeSchema.parse(raw);
       if (!this.#handshakeComplete && envelope.request.type !== "handshake") {
-        return failure(envelope.id, "invalid_transition", "handshake must be the first request");
+        return failure(
+          envelope.id,
+          "invalid_transition",
+          "handshake must be the first request",
+        );
       }
-      return { id: envelope.id, ok: true, response: this.#dispatch(envelope.request) };
+      const response = responseSchema.parse(this.#dispatch(envelope.request));
+      return { id: envelope.id, ok: true, response };
     } catch (error) {
       if (error instanceof ZodError) {
-        return failure(requestId, "invalid_message", "message violates the engine contract", {
-          issues: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
-        });
+        return failure(
+          requestId,
+          "invalid_message",
+          "message violates the engine contract",
+          {
+            issues: error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              code: issue.code,
+            })),
+          },
+        );
       }
-      if (error instanceof EvaluationTransitionError) {
-        return failure(requestId, "invalid_transition", error.message);
+      if (error instanceof KensaCoreError) {
+        return failure(
+          requestId,
+          error instanceof EvaluationTransitionError
+            ? "invalid_transition"
+            : "invalid_message",
+          error.message,
+          { issues: error.issues },
+        );
       }
-      if (error instanceof UnknownEvaluationError || error instanceof VersionMismatchError) {
+      if (
+        error instanceof UnknownEvaluationError ||
+        error instanceof VersionMismatchError
+      ) {
         return failure(requestId, error.code, error.message);
       }
       return failure(requestId, "internal", errorMessage(error));
     }
   }
 
-  #dispatch(request: EngineRequest): Record<string, unknown> {
+  #dispatch(request: EngineRequest): EngineResponse {
     switch (request.type) {
       case "handshake":
         if (this.#handshakeComplete) {
-          throw new EvaluationTransitionError("handshake has already completed");
+          throw new EvaluationTransitionError(
+            "handshake has already completed",
+          );
         }
         if (request.protocol_version !== PROTOCOL_VERSION) {
           throw new VersionMismatchError(request.protocol_version);
@@ -74,25 +103,54 @@ export class KensaEngine {
         }
         const state = startCase(request.case);
         this.#evaluations.set(request.evaluation_id, state);
-        return { type: "action", action: "invoke_agent", case_id: state.case.id };
+        return {
+          type: "action",
+          action: nextAction(state)!,
+          case_id: state.case.id,
+        };
       }
       case "observe": {
         const state = this.#evaluation(request.evaluation_id);
         const observed = observeCase(state, request.observation);
         this.#evaluations.set(request.evaluation_id, observed);
-        return { type: "action", action: "evaluate_check", case_id: observed.case.id };
+        return {
+          type: "action",
+          action: nextAction(observed)!,
+          case_id: observed.case.id,
+        };
       }
       case "check": {
         const state = this.#evaluation(request.evaluation_id);
         const complete = checkCase(state, request.check);
-        this.#evaluations.set(request.evaluation_id, complete);
-        return { type: "result", evaluation: complete };
+        this.#evaluations.delete(request.evaluation_id);
+        return {
+          type: "result",
+          evaluation: {
+            phase: "complete",
+            case_id: complete.case.id,
+            verdict: complete.verdict,
+            output: complete.observation.output,
+            output_recorded: complete.observation.output_recorded,
+            trace: complete.observation.trace,
+            failure: complete.check.failure,
+            check_id: complete.check.id,
+          },
+        };
       }
       case "cancel": {
         const state = this.#evaluation(request.evaluation_id);
         const cancelled = cancelCase(state, request.reason);
-        this.#evaluations.set(request.evaluation_id, cancelled);
-        return { type: "result", evaluation: cancelled };
+        this.#evaluations.delete(request.evaluation_id);
+        return {
+          type: "result",
+          evaluation: {
+            phase: "cancelled",
+            case_id: cancelled.case.id,
+            reason: cancelled.reason,
+            verdict: cancelled.verdict,
+            failure: cancelled.failure,
+          },
+        };
       }
     }
   }
@@ -114,7 +172,9 @@ class VersionMismatchError extends Error {
   readonly code = "version_mismatch" as const;
 
   constructor(received: string) {
-    super(`unsupported protocol version ${received}; expected ${PROTOCOL_VERSION}`);
+    super(
+      `unsupported protocol version ${received}; expected ${PROTOCOL_VERSION}`,
+    );
   }
 }
 
