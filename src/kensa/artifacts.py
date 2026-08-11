@@ -148,6 +148,14 @@ def write_run_artifacts(
     return _metadata_aggregates(result, ordered_trials)
 
 
+def aggregates_from_core_result(
+    payload: Mapping[str, Any],
+    trials: list[TrialMetadata],
+) -> list[KensaAggregate]:
+    result = RunResult.model_validate_json(json.dumps(dict(payload), allow_nan=False))
+    return _metadata_aggregates(result, sorted(trials, key=trial_sort_key))
+
+
 def _metadata_aggregates(
     result: RunResult,
     trials: list[TrialMetadata],

@@ -11,6 +11,10 @@ export {
   parseFailure,
   parseObservation,
   startCase,
+  type AwaitingCheck,
+  type AwaitingObservation,
+  type Cancelled,
+  type Complete,
   type EvaluationCase,
   type EvaluationAction,
   type EvaluationCheck,
@@ -24,11 +28,14 @@ export {
   KensaCoreError,
   type CoreErrorCode,
   type CoreIssue,
+  type CoreIssueCode,
+  type CorePathSegment,
 } from "./errors.js";
 export {
   canonicalJson,
   digestJson,
   parseJsonValue,
+  type JsonObject,
   type JsonValue,
 } from "./json.js";
 export {

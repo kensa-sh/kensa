@@ -25,6 +25,7 @@ jobs:
       - run: pnpm test:coverage
       - run: pnpm format:check
       - run: pnpm build
+      - run: pnpm check:core-platform
 
   test:
     runs-on: ubuntu-latest

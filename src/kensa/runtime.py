@@ -531,7 +531,7 @@ class KensaTrialRuntime:
         self._snapshot_callback = snapshot_callback
         self._engine = engine
         self._engine_evaluation_id: str | None = None
-        self._engine_verdict: str | None = None
+        self._engine_completion: tuple[str, TrialFailure | None] | None = None
 
     @contextmanager
     def operation(
@@ -576,6 +576,9 @@ class KensaTrialRuntime:
                     "input": json_value(case.input),
                     "metadata": self.case,
                 }
+                from kensa.engine import _wire_json_value
+
+                engine_case = cast(dict[str, Any], _wire_json_value(engine_case))
             except (TypeError, ValueError) as exc:
                 raise KensaCaseError(f"case input must be JSON-serializable: {exc}") from exc
             self._engine_evaluation_id = f"{self.nodeid}::{self.trial.id}"
@@ -751,11 +754,15 @@ class KensaTrialRuntime:
             judges=[j.to_dict() if hasattr(j, "to_dict") else dict(j) for j in self.judges],
         )
 
-    def finalize_engine(self, status: str, failure: TrialFailure | None) -> str:
+    def finalize_engine(
+        self,
+        status: str,
+        failure: TrialFailure | None,
+    ) -> tuple[str, TrialFailure | None]:
+        if self._engine_completion is not None:
+            return self._engine_completion
         if self._engine is None or self._engine_evaluation_id is None:
-            return status
-        if self._engine_verdict is not None:
-            return self._engine_verdict
+            return status, failure
         failure_payload = failure.model_dump(mode="json") if failure is not None else None
         observation_failure = (
             failure_payload
@@ -764,25 +771,50 @@ class KensaTrialRuntime:
             and failure.category in {"agent", "simulator"}
             else None
         )
-        observation = {
-            "output": self.output if self.output_recorded else None,
-            "output_recorded": self.output_recorded,
-            "trace": _engine_trace(self.trace.to_dict()),
-            "failure": observation_failure,
-        }
-        self._engine_verdict = self._engine.complete_case(
+        from kensa.engine import KensaEngineError, _wire_json_value
+
+        try:
+            observation = {
+                "output": self.output if self.output_recorded else None,
+                "output_recorded": self.output_recorded,
+                "trace": _engine_trace(self.trace.to_dict()),
+                "failure": observation_failure,
+            }
+            observation = cast(dict[str, Any], _wire_json_value(observation))
+            if failure_payload is not None:
+                failure_payload = cast(dict[str, Any], _wire_json_value(failure_payload))
+        except (TypeError, ValueError) as exc:
+            raise KensaCaseError(f"trial evidence must be JSON-serializable: {exc}") from exc
+        completion = self._engine.complete_case(
             self._engine_evaluation_id,
             observation=observation,
             status=status,
             failure=failure_payload,
         )
-        return self._engine_verdict
+        terminal_failure: TrialFailure | None = None
+        if completion.failure is not None:
+            try:
+                terminal_failure = TrialFailure.model_validate(completion.failure)
+            except ValidationError as exc:
+                raise KensaEngineError(
+                    "Kensa engine returned an invalid terminal failure",
+                    code="protocol",
+                ) from exc
+        self._engine_completion = completion.verdict, terminal_failure
+        self._engine_evaluation_id = None
+        return self._engine_completion
+
+    def cancel_engine(self, reason: str) -> None:
+        if self._engine is None or self._engine_evaluation_id is None:
+            return
+        self._engine.cancel_case(self._engine_evaluation_id, reason)
+        self._engine_evaluation_id = None
 
 
 def _engine_trace(trace_snapshot: dict[str, Any]) -> dict[str, Any]:
-    from kensa.engine import _wire_json_value
+    from kensa.engine import _TRACE_INTEGER_KEYS, _wire_json_value
 
-    wire_trace = _wire_json_value(deepcopy(trace_snapshot))
+    wire_trace = _wire_json_value(trace_snapshot, exact_integer_keys=_TRACE_INTEGER_KEYS)
     return cast(dict[str, Any], wire_trace)
 
 

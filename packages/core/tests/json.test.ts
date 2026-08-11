@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   canonicalJson,
   CoreValidationError,
   digestJson,
+  KensaCoreError,
   parseJsonValue,
 } from "../src/index.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("canonical JSON", () => {
   it("sorts object keys recursively without reordering arrays", () => {
@@ -25,6 +30,18 @@ describe("canonical JSON", () => {
       "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
     );
   });
+
+  it.each(["crypto", "TextEncoder"] as const)(
+    "reports a stable error when %s is unavailable",
+    async (capability) => {
+      vi.stubGlobal(capability, undefined);
+
+      await expect(digestJson({ safe: true })).rejects.toMatchObject({
+        name: "KensaCoreError",
+        code: "unsupported_platform",
+      } satisfies Partial<KensaCoreError>);
+    },
+  );
 
   it("rejects unsafe JSON values", () => {
     expect(() => parseJsonValue(undefined)).toThrow(CoreValidationError);
@@ -49,6 +66,9 @@ describe("canonical JSON", () => {
 
   it("preserves prototype-shaped keys", () => {
     const value = JSON.parse('{"__proto__":{"safe":true},"constructor":1}');
+    const parsed = parseJsonValue(value);
+    expect(Object.hasOwn(parsed as object, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
     expect(canonicalJson(value)).toBe(
       '{"__proto__":{"safe":true},"constructor":1}',
     );
