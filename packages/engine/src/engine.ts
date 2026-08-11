@@ -1,4 +1,5 @@
 import {
+  buildRunResult,
   cancelCase,
   checkCase,
   EvaluationTransitionError,
@@ -152,6 +153,16 @@ export class KensaEngine {
           },
         };
       }
+      case "build_run":
+        return {
+          type: "run_result",
+          result: buildRunResult({
+            run_id: request.run_id,
+            complete: request.complete,
+            interruption: request.interruption,
+            trials: request.trials,
+          }),
+        };
     }
   }
 

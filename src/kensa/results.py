@@ -193,9 +193,21 @@ class RunResult(ResultModel):
             raise ValueError("aggregates do not match top-level trials")
 
         expected_summary = derive_v1_summary(trial_payloads)
-        if self.summary.model_dump(mode="json") != expected_summary:
+        if _normalized_numbers(self.summary.model_dump(mode="json")) != _normalized_numbers(
+            expected_summary
+        ):
             raise ValueError("summary does not match top-level trials")
         return self
+
+
+def _normalized_numbers(value: object) -> object:
+    if isinstance(value, float):
+        return round(value, 12)
+    if isinstance(value, list):
+        return [_normalized_numbers(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalized_numbers(item) for key, item in value.items()}
+    return value
 
 
 def load_run_result(path: str | Path) -> RunResult:

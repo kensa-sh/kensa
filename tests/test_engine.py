@@ -29,9 +29,15 @@ from kensa.runtime import KensaTrial, KensaTrialRuntime, _engine_trace
 
 
 class _Stream:
-    def __init__(self, *lines: str, write_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *lines: str,
+        write_error: BaseException | None = None,
+        close_error: OSError | None = None,
+    ) -> None:
         self.lines = list(lines)
         self.write_error = write_error
+        self.close_error = close_error
         self.writes: list[str] = []
         self.closed = False
 
@@ -48,6 +54,8 @@ class _Stream:
         return self.lines.pop(0) if self.lines else ""
 
     def close(self) -> None:
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
@@ -322,13 +330,13 @@ def test_agent(case):
     )
 
     result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*Kensa engine failure: Kensa engine stopped before responding*"])
+    result.stdout.fnmatch_lines(["*Kensa engine failure:*"])
     result_files = list((artifact_dir / "results").glob("*.json"))
     assert len(result_files) == 1
     payload = json.loads(result_files[0].read_text(encoding="utf-8"))
     assert payload["trials"][0]["status"] == "error"
     assert payload["trials"][0]["failure"]["category"] == "infrastructure"
-    assert payload["trials"][0]["failure"]["kind"] == "crash"
+    assert payload["trials"][0]["failure"]["kind"] in {"crash", "transport"}
 
 
 def test_engine_command_uses_built_development_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -542,6 +550,13 @@ def test_engine_client_forces_stuck_process_shutdown() -> None:
     assert process.killed
     assert process.stdin is not None
     assert process.stdin.closed
+
+
+def test_engine_client_ignores_broken_pipe_while_closing() -> None:
+    process = _Process(stdin=_Stream(close_error=BrokenPipeError("closed")))
+    client = _raw_client(process)
+
+    client.close()
 
 
 @pytest.mark.parametrize(

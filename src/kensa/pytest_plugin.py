@@ -796,6 +796,21 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 def _write_artifacts(state: KensaSessionState) -> None:
     complete = state.complete and all(trial.status != _PROVISIONAL_STATUS for trial in state.trials)
+    try:
+        core_result = (
+            state.engine.build_run(
+                run_id=state.run_id,
+                complete=complete,
+                interruption=state.interruption,
+                trials=[trial.to_dict() for trial in state.trials],
+            )
+            if state.engine is not None
+            else None
+        )
+    except KensaEngineError as exc:
+        state.mark_incomplete("engine_failure", f"{exc.code}: {exc}")
+        complete = False
+        core_result = None
     state.aggregates = write_run_artifacts(
         run_id=state.run_id,
         trials=state.trials,
@@ -803,6 +818,7 @@ def _write_artifacts(state: KensaSessionState) -> None:
         artifact_dir=state.artifact_dir,
         complete=complete,
         interruption=state.interruption,
+        core_result=core_result,
     )
 
 

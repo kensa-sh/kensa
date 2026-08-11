@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import {
+  buildRunResult,
+  canonicalJson,
   CoreValidationError,
   parseJsonValue,
   parseObservation,
@@ -34,6 +36,13 @@ const cancelRequest = z.strictObject({
   evaluation_id: z.string().min(1),
   reason: z.unknown(),
 });
+const buildRunRequest = z.strictObject({
+  type: z.literal("build_run"),
+  run_id: z.string().min(1),
+  complete: z.boolean(),
+  interruption: z.unknown(),
+  trials: z.unknown(),
+});
 
 export const requestEnvelopeSchema = z.strictObject({
   id: z.string().min(1),
@@ -43,6 +52,7 @@ export const requestEnvelopeSchema = z.strictObject({
     observeRequest,
     checkRequest,
     cancelRequest,
+    buildRunRequest,
   ]),
 });
 
@@ -111,11 +121,34 @@ const resultResponse = z.strictObject({
     cancelledEvaluationResponse,
   ]),
 });
+const runResultResponse = z
+  .strictObject({
+    type: z.literal("run_result"),
+    result: z.unknown(),
+  })
+  .superRefine((response, context) => {
+    validateCoreValue(() => {
+      const input = response.result as {
+        run_id: string;
+        complete: boolean;
+        interruption: unknown;
+        trials: unknown;
+      };
+      const rebuilt = buildRunResult(input);
+      if (canonicalJson(rebuilt) !== canonicalJson(response.result)) {
+        throw new CoreValidationError(
+          "run result contradicts core derivation",
+          new z.ZodError([]),
+        );
+      }
+    }, context);
+  });
 
 export const responseSchema = z.discriminatedUnion("type", [
   handshakeResponse,
   actionResponse,
   resultResponse,
+  runResultResponse,
 ]);
 export type EngineResponse = z.infer<typeof responseSchema>;
 

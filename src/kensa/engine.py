@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -133,12 +134,35 @@ class EngineClient:
         ):
             raise KensaEngineError("Kensa engine returned an invalid cancellation", code="protocol")
 
+    def build_run(
+        self,
+        *,
+        run_id: str,
+        complete: bool,
+        interruption: Mapping[str, Any] | None,
+        trials: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        response = self._request(
+            {
+                "type": "build_run",
+                "run_id": run_id,
+                "complete": complete,
+                "interruption": interruption,
+                "trials": [dict(trial) for trial in trials],
+            }
+        )
+        result = response.get("result")
+        if response.get("type") != "run_result" or not isinstance(result, dict):
+            raise KensaEngineError("Kensa engine returned an invalid run result", code="protocol")
+        return result
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         if self._process.stdin is not None:
-            self._process.stdin.close()
+            with suppress(OSError):
+                self._process.stdin.close()
         try:
             self._process.wait(timeout=5)
         except subprocess.TimeoutExpired:

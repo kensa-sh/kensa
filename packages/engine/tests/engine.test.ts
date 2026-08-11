@@ -64,6 +64,16 @@ describe("KensaEngine", () => {
     ).toThrow();
     expect(() =>
       responseSchema.parse({
+        ...(responses.run_result as Record<string, unknown>),
+        result: {
+          ...((responses.run_result as Record<string, unknown>)
+            .result as Record<string, unknown>),
+          aggregates: [{ verdict: "invented" }],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      responseSchema.parse({
         ...(responses.cancelled as Record<string, unknown>),
         evaluation: {
           ...((responses.cancelled as Record<string, unknown>)
@@ -167,6 +177,23 @@ describe("KensaEngine", () => {
         }),
       ),
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
+  });
+
+  it("builds a run result through core-owned aggregation", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("run", {
+          type: "build_run",
+          run_id: "run-1",
+          complete: true,
+          interruption: null,
+          trials: [],
+        }),
+      ),
+    ).toEqual({ id: "run", ok: true, response: responses.run_result });
   });
 
   it("fails closed on malformed, unversioned, and repeated requests", () => {

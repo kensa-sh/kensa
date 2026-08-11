@@ -171,6 +171,10 @@ export function parseCase(input: unknown): EvaluationCase {
   return parseInput(caseSchema, input, "case violates the core contract");
 }
 
+export function parseFailure(input: unknown): EvaluationFailure {
+  return parseInput(failureSchema, input, "failure violates the core contract");
+}
+
 export function parseObservation(input: unknown): EvaluationObservation {
   return parseInput(
     observationSchema,
