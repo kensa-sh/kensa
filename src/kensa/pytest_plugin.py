@@ -23,6 +23,7 @@ from kensa.artifacts import (
 )
 from kensa.case import KensaCase
 from kensa.conversation import ConversationError
+from kensa.engine import EngineClient, KensaEngineError
 from kensa.errors import KensaCaseError, KensaEvalError, TrialFailure
 from kensa.llm import LLMConfigurationError
 from kensa.runtime import (
@@ -117,6 +118,15 @@ def _classify_exception(
             evidence={"exception_type": type(configuration).__name__},
         )
 
+    engine = _first_exception(path, KensaEngineError)
+    if isinstance(engine, KensaEngineError):
+        return "error", TrialFailure(
+            category="infrastructure",
+            kind=engine.code,
+            message=_exception_message(engine, "Kensa engine failure"),
+            evidence={"exception_type": "KensaEngineError"},
+        )
+
     case_error = _first_exception(path, KensaCaseError)
     if isinstance(case_error, KensaCaseError):
         return "error", TrialFailure(
@@ -206,6 +216,7 @@ class KensaSessionState:
         self.aggregates: list[KensaAggregate] = []
         self.complete = True
         self.interruption: dict[str, Any] | None = None
+        self._engine: EngineClient | None = None
 
     @property
     def artifact_dir(self) -> Path:
@@ -283,6 +294,17 @@ class KensaSessionState:
     def mark_incomplete(self, kind: str, message: str, **details: Any) -> None:
         self.complete = False
         self.interruption = {"kind": kind, "message": message, **details}
+
+    @property
+    def engine(self) -> EngineClient:
+        if self._engine is None:
+            self._engine = EngineClient()
+        return self._engine
+
+    def close_engine(self) -> None:
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
 
 
 def _state(config: pytest.Config) -> KensaSessionState:
@@ -483,6 +505,7 @@ def _runtime_for_item(item: pytest.Item) -> KensaTrialRuntime | None:
         ),
         operation_callback=lambda operation: state.set_active_operation(item.nodeid, operation),
         snapshot_callback=lambda completed: _record_trial_snapshot(item.config, completed),
+        engine=state.engine,
     )
     item.__dict__["_kensa_runtime"] = runtime
     return runtime
@@ -557,11 +580,13 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
 
     excinfo = outcome.excinfo
     if excinfo is None:
-        _record_trial(item.config, runtime.metadata(status="pass", duration_ms=duration_ms))
+        status = runtime.finalize_engine("pass", None)
+        _record_trial(item.config, runtime.metadata(status=status, duration_ms=duration_ms))
         return
 
     exc = excinfo[1]
     status, failure = _classify_exception(exc, phase="call")
+    status = runtime.finalize_engine(status, failure)
     _record_trial(
         item.config,
         runtime.metadata(
@@ -716,6 +741,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
         _write_artifacts(state)
     if any(aggregate.verdict != "pass" for aggregate in state.aggregates):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    state.close_engine()
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    state = getattr(config, "_kensa_state", None)
+    if isinstance(state, KensaSessionState):
+        state.close_engine()
 
 
 def _write_artifacts(state: KensaSessionState) -> None:

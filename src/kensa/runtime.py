@@ -28,6 +28,7 @@ from kensa.errors import KensaCaseError, TrialFailure
 
 if TYPE_CHECKING:
     from kensa.case import KensaCase
+    from kensa.engine import EngineClient
     from kensa.target import AgentEvent, AgentRunEvidence
 
 _CURRENT_RUNTIME: ContextVar[KensaTrialRuntime | None] = ContextVar(
@@ -505,6 +506,7 @@ class KensaTrialRuntime:
         judge_timeout_s: float = 30.0,
         operation_callback: Callable[[ActiveOperation | None], None] | None = None,
         snapshot_callback: Callable[[KensaTrialRuntime], None] | None = None,
+        engine: EngineClient | None = None,
     ) -> None:
         self.trial = trial
         self.nodeid = nodeid
@@ -527,6 +529,9 @@ class KensaTrialRuntime:
         self._active_operations: dict[object, ActiveOperation] = {}
         self._operation_callback = operation_callback
         self._snapshot_callback = snapshot_callback
+        self._engine = engine
+        self._engine_evaluation_id: str | None = None
+        self._engine_verdict: str | None = None
 
     @contextmanager
     def operation(
@@ -564,6 +569,17 @@ class KensaTrialRuntime:
         self._run_started = True
         self.case_id = case.id
         self.case = _jsonable_mapping(case.row)
+        if self._engine is not None:
+            try:
+                engine_case = {
+                    "id": case.id,
+                    "input": json_value(case.input),
+                    "metadata": self.case,
+                }
+            except (TypeError, ValueError) as exc:
+                raise KensaCaseError(f"case input must be JSON-serializable: {exc}") from exc
+            self._engine_evaluation_id = f"{self.nodeid}::{self.trial.id}"
+            self._engine.start_case(self._engine_evaluation_id, engine_case)
         ensure_tracing()
         tracer = trace.get_tracer("kensa.pytest")
         span = tracer.start_span(
@@ -734,6 +750,41 @@ class KensaTrialRuntime:
             trace=self.trace.to_dict(),
             judges=[j.to_dict() if hasattr(j, "to_dict") else dict(j) for j in self.judges],
         )
+
+    def finalize_engine(self, status: str, failure: TrialFailure | None) -> str:
+        if self._engine is None or self._engine_evaluation_id is None:
+            return status
+        if self._engine_verdict is not None:
+            return self._engine_verdict
+        failure_payload = failure.model_dump(mode="json") if failure is not None else None
+        observation = {
+            "output": self.output if self.output_recorded else None,
+            "output_recorded": self.output_recorded,
+            "trace": _engine_trace(self.trace.to_dict()),
+            "failure": failure_payload,
+        }
+        self._engine_verdict = self._engine.complete_case(
+            self._engine_evaluation_id,
+            observation=observation,
+            status=status,
+            failure=failure_payload,
+        )
+        return self._engine_verdict
+
+
+def _engine_trace(trace_snapshot: dict[str, Any]) -> dict[str, Any]:
+    wire_trace = deepcopy(trace_snapshot)
+    spans = wire_trace.get("spans")
+    if not isinstance(spans, list):
+        return wire_trace
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        for field_name in ("start_time_unix_nano", "end_time_unix_nano"):
+            value = span.get(field_name)
+            if isinstance(value, int):
+                span[field_name] = str(value)
+    return wire_trace
 
 
 class _RuntimeSpanProcessor(SpanProcessor):
