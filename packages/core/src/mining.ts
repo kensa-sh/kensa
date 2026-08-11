@@ -106,11 +106,18 @@ export interface CandidateSet {
 }
 
 export function parseInspectQueue(input: unknown): InspectQueue {
-  return parseInput(
+  const queue = parseInput(
     inspectQueueSchema,
     input,
     "inspect queue violates the core contract",
   );
+  return {
+    ...queue,
+    items: queue.items.map((item) => ({
+      ...item,
+      trace_ids: [...item.trace_ids].sort(compareText),
+    })),
+  };
 }
 
 export function traceSummary(input: unknown): TraceSummary {

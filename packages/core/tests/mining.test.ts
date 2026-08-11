@@ -224,8 +224,20 @@ describe("trace mining contracts", () => {
       queue(),
       await evidence(trace("trace-a"), trace("trace-b")),
     );
+    const reversedReferences = await bindInspectCandidates(
+      queue({
+        items: [
+          {
+            ...(queue().items as Array<Record<string, unknown>>)[0],
+            trace_ids: ["trace-b", "trace-a"],
+          },
+        ],
+      }),
+      await evidence(trace("trace-a"), trace("trace-b")),
+    );
 
     expect(first).toEqual(second);
+    expect(first).toEqual(reversedReferences);
     expect(first.schema_version).toBe("kensa.candidate_set.v1");
     expect(first.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(first.candidates[0]!.digest).toMatch(/^[0-9a-f]{64}$/);
