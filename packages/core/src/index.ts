@@ -53,3 +53,20 @@ export {
   type TrialAggregate,
   type TrialStatus,
 } from "./aggregation.js";
+export {
+  buildEvidenceRecord,
+  normalizeTraceView,
+  normalizeTraceViews,
+  parseEvidenceRecord,
+  parseTraceView,
+  parseTraceViews,
+  sourceIdentity,
+  verifyEvidenceRecord,
+  type EvidenceRecord,
+  type SourceIdentity,
+  type TraceSource,
+  type TraceSpan,
+  type TraceStatus,
+  type TraceUsage,
+  type TraceView,
+} from "./evidence.js";

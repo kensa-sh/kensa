@@ -75,6 +75,15 @@ USAGE_VIEW_KEYS = {
 _PSEUDONYM = re.compile(r"^(trace|span)_[0-9a-f]{24}$")
 
 
+def test_python_accepts_shared_trace_view_conformance_fixture() -> None:
+    fixture_path = (
+        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "trace-view.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    traces_module._validate_trace_view_row(fixture, path=fixture_path, line_number=1)
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
