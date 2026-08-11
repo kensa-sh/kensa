@@ -126,3 +126,11 @@ export {
   type ProtectionCriterionOutcome,
   type ProtectionResult,
 } from "./protection-result.js";
+export {
+  buildReleaseManifest,
+  verifyReleaseManifest,
+  type BuildComponents,
+  type BuildIdentity,
+  type ReleaseManifest,
+  type ReleaseManifestDraft,
+} from "./build-manifest.js";
