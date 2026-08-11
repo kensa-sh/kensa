@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,8 @@ class CustomBuildHook(BuildHookInterface):
             raise RuntimeError("Kensa engine target contradicts its build descriptor")
         if executable.name != configuration[2]:
             raise RuntimeError("Kensa engine target has an invalid executable name")
+        if target != "win32-x64" and not executable.stat().st_mode & stat.S_IXUSR:
+            raise RuntimeError("Kensa engine executable is not executable")
         _validate_executable(executable, target)
         destination = f"kensa/bin/{configuration[2]}"
         build_data["force_include"][str(executable)] = destination

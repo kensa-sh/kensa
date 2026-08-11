@@ -23,6 +23,7 @@ def _descriptor(root: Path, target: str = "darwin-arm64") -> tuple[Path, dict[st
     executable = root / "build" / "engine" / target / filename
     executable.parent.mkdir(parents=True)
     executable.write_bytes(_header(target))
+    executable.chmod(0o755)
     value = {
         "schema_version": "kensa.engine_build.v1",
         "target": target,
@@ -175,6 +176,17 @@ def test_hook_rejects_wrong_executable_name(
     path.write_text(json.dumps(descriptor))
     monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
     with pytest.raises(RuntimeError, match="invalid executable name"):
+        _hook(tmp_path).initialize("standard", {"force_include": {}})
+
+
+def test_hook_rejects_non_executable_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, descriptor = _descriptor(tmp_path)
+    executable = tmp_path / descriptor["executable"]
+    executable.chmod(0o644)
+    monkeypatch.setenv("KENSA_ENGINE_BUILD", str(path))
+    with pytest.raises(RuntimeError, match="is not executable"):
         _hook(tmp_path).initialize("standard", {"force_include": {}})
 
 
