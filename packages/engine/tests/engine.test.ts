@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { KensaCoreError } from "@kensa/core";
 
 import {
+  ENGINE_VERSION,
   KensaEngine,
   PROTOCOL_VERSION,
   responseEnvelopeSchema,
@@ -36,9 +37,16 @@ function message(id: string, request: Record<string, unknown>): string {
   return JSON.stringify({ id, request });
 }
 
-const responses = JSON.parse(
+const responseFixtures = JSON.parse(
   readFileSync(new URL("fixtures/responses.json", import.meta.url), "utf8"),
 ) as Record<string, unknown>;
+const responses: Record<string, unknown> = {
+  ...responseFixtures,
+  handshake: {
+    ...(responseFixtures.handshake as Record<string, unknown>),
+    engine_version: ENGINE_VERSION,
+  },
+};
 const traceView = JSON.parse(
   readFileSync(
     new URL("../../core/conformance/trace-view.json", import.meta.url),
@@ -69,6 +77,17 @@ describe("KensaEngine", () => {
     for (const response of Object.values(responses)) {
       expect(responseSchema.parse(response)).toEqual(response);
     }
+  });
+
+  it("reports the engine package version in its handshake", () => {
+    const packageMetadata = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+
+    expect(ENGINE_VERSION).toBe(packageMetadata.version);
+    expect(responses.handshake).toMatchObject({
+      engine_version: packageMetadata.version,
+    });
   });
 
   it("rejects responses that violate core evidence contracts", () => {

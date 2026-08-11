@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -24,7 +25,9 @@ def test_release_pr_body_requires_changelog_update_and_manual_merge() -> None:
 
     assert "- [ ] Update `docs/changelog.mdx` for v1.2.3." in result.stdout
     assert "Merge this PR manually after CI passes." in result.stdout
-    assert "Merging publishes `kensa==1.2.3` to PyPI" in result.stdout
+    assert "Merging publishes `kensa==1.2.3`" in result.stdout
+    assert "`@kensa/core@1.2.3`" in result.stdout
+    assert "`@kensa/sdk@1.2.3`" in result.stdout
 
 
 def test_release_script_exposes_no_manual_publish_action() -> None:
@@ -62,21 +65,90 @@ def test_release_workflow_separates_tag_and_publication_jobs() -> None:
 
     assert "\n  tag:\n" in workflow
     assert "\n  publish-pypi:\n" in workflow
+    assert "\n  package-npm:\n" in workflow
+    assert "\n  publish-npm-core:\n" in workflow
+    assert "\n  publish-npm-sdk:\n" in workflow
     assert "\n  github-release:\n" in workflow
     assert "needs: [prepare, tag]" in workflow
-    assert "needs: [prepare, publish-pypi]" in workflow
+    assert "needs: [prepare, publish-pypi, publish-npm-core, publish-npm-sdk]" in workflow
+    assert workflow.index("\n  package-npm:\n") < workflow.index("\n  tag:\n")
     assert workflow.index("\n  tag:\n") < workflow.index("\n  publish-pypi:\n")
+    assert workflow.index("\n  tag:\n") < workflow.index("\n  publish-npm-core:\n")
+    assert workflow.index("\n  publish-npm-core:\n") < workflow.index("\n  publish-npm-sdk:\n")
     assert workflow.index("\n  publish-pypi:\n") < workflow.index("\n  github-release:\n")
+    assert workflow.index("\n  publish-npm-sdk:\n") < workflow.index("\n  github-release:\n")
 
 
 def test_release_workflow_requires_live_redaction_before_tagging() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
     redaction_job = workflow.split("\n  redaction:\n", maxsplit=1)[1].split(
-        "\n  build:\n", maxsplit=1
+        "\n  build-wheels:\n", maxsplit=1
     )[0]
 
     assert "needs: prepare" in redaction_job
     assert "ref: ${{ needs.prepare.outputs.sha }}" in redaction_job
     assert 'uv pip install ".[redaction]"' in redaction_job
     assert "uv run pytest tests/integration/test_live_redaction.py -q --run-live" in redaction_job
-    assert "needs: [prepare, test, lint, redaction, build]" in workflow
+    assert "needs: [prepare, test, lint, redaction, build-wheels, package-npm]" in workflow
+
+
+def test_release_workflow_publishes_only_verified_platform_wheels() -> None:
+    workflow = RELEASE_WORKFLOW.read_text()
+
+    assert "dist-wheel-${{ matrix.target }}" in workflow
+    assert "scripts/verify-engine-wheel.py dist" in workflow
+    assert "uvx auditwheel show dist/*.whl" in workflow
+    assert "pattern: dist-wheel-*" in workflow
+    assert "merge-multiple: true" in workflow
+    assert "--sdist" not in workflow
+
+
+def test_release_workflow_uses_npm_trusted_publishing() -> None:
+    workflow = RELEASE_WORKFLOW.read_text()
+    package_job = workflow.split("\n  package-npm:\n", maxsplit=1)[1].split(
+        "\n  tag:\n", maxsplit=1
+    )[0]
+    core_job = workflow.split("\n  publish-npm-core:\n", maxsplit=1)[1].split(
+        "\n  publish-npm-sdk:\n", maxsplit=1
+    )[0]
+    sdk_job = workflow.split("\n  publish-npm-sdk:\n", maxsplit=1)[1].split(
+        "\n  github-release:\n", maxsplit=1
+    )[0]
+
+    assert "set-typescript-version.mjs --check" in package_job
+    assert "pnpm --filter @kensa/core pack" in package_job
+    assert "pnpm --filter @kensa/sdk pack" in package_job
+    assert "name: dist-npm" in package_job
+    assert "needs: [prepare, tag, package-npm]" in core_job
+    assert "needs: [prepare, tag, package-npm, publish-npm-core]" in sdk_job
+    for job in (core_job, sdk_job):
+        assert "id-token: write" in job
+        assert "node-version: 24" in job
+        assert "npm install --global npm@11.5.1" in job
+        assert "name: dist-npm" in job
+        assert "NODE_AUTH_TOKEN" not in job
+    assert 'npm publish "dist/npm/kensa-core-$VERSION.tgz"' in core_job
+    assert 'npm publish "dist/npm/kensa-sdk-$VERSION.tgz"' in sdk_job
+
+
+def test_typescript_package_versions_match_python_release() -> None:
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+
+    result = subprocess.run(
+        ["node", "scripts/set-typescript-version.mjs", "--check", version],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    mismatch = subprocess.run(
+        ["node", "scripts/set-typescript-version.mjs", "--check", "9.9.9"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert mismatch.returncode == 1
+    assert "expected 9.9.9" in mismatch.stderr

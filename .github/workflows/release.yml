@@ -171,8 +171,38 @@ jobs:
           path: dist/*.whl
           compression-level: 0
 
+  package-npm:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify package versions
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: node scripts/set-typescript-version.mjs --check "$VERSION"
+      - run: pnpm typecheck
+      - run: pnpm test:coverage
+      - run: pnpm build
+      - run: mkdir -p dist/npm
+      - run: pnpm --filter @kensa/core pack --pack-destination "$GITHUB_WORKSPACE/dist/npm"
+      - run: pnpm --filter @kensa/sdk pack --pack-destination "$GITHUB_WORKSPACE/dist/npm"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-npm
+          path: dist/npm/*.tgz
+
   tag:
-    needs: [prepare, test, lint, redaction, build-wheels]
+    needs: [prepare, test, lint, redaction, build-wheels, package-npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -231,8 +261,52 @@ jobs:
       - name: Publish to PyPI via Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  publish-npm-core:
+    needs: [prepare, tag, package-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-npm
+          path: dist/npm
+      - name: Publish core via Trusted Publishing
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: npm publish "dist/npm/kensa-core-$VERSION.tgz"
+
+  publish-npm-sdk:
+    needs: [prepare, tag, package-npm, publish-npm-core]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-npm
+          path: dist/npm
+      - name: Publish SDK via Trusted Publishing
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: npm publish "dist/npm/kensa-sdk-$VERSION.tgz"
+
   github-release:
-    needs: [prepare, publish-pypi]
+    needs: [prepare, publish-pypi, publish-npm-core, publish-npm-sdk]
     runs-on: ubuntu-latest
     permissions:
       contents: write
