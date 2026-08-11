@@ -117,10 +117,11 @@ def write_run_artifacts(
             "Kensa core result contradicts the requested artifact: "
             + ", ".join(contradictions)
         )
-    _write_text_atomic(result_path, result.model_dump_json(indent=2))
     result_trials = [trial_result_to_metadata(trial) for trial in result.trials]
+    aggregates = _metadata_aggregates(result, ordered_trials)
+    _write_text_atomic(result_path, result.model_dump_json(indent=2))
     _write_trace_artifact(run_id, result_trials, artifact_dir)
-    return _metadata_aggregates(result, ordered_trials)
+    return aggregates
 
 
 def aggregates_from_core_result(

@@ -179,12 +179,26 @@ class RunResult(ResultModel):
         if list(self.trials) != expected_order:
             raise ValueError("trials are not in deterministic order")
 
+        trials_by_nodeid = {trial.nodeid: trial for trial in self.trials}
+        aggregate_nodeids: list[str] = []
         for aggregate in self.aggregates:
             if any(
                 trial.group_id != aggregate.group_id or trial.case_id != aggregate.case_id
                 for trial in aggregate.trials
             ):
                 raise ValueError("aggregate contains a trial with mismatched identifiers")
+            for trial in aggregate.trials:
+                top_level = trials_by_nodeid.get(trial.nodeid)
+                if top_level is None or not _json_values_equal(
+                    trial.model_dump(mode="json"),
+                    top_level.model_dump(mode="json"),
+                ):
+                    raise ValueError(
+                        "aggregate contains a trial that does not match top-level trials"
+                    )
+                aggregate_nodeids.append(trial.nodeid)
+        if len(aggregate_nodeids) != len(set(aggregate_nodeids)):
+            raise ValueError("aggregates contain duplicate trial references")
 
         return self
 

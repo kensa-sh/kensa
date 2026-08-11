@@ -511,6 +511,8 @@ def test_models_are_strict_frozen_and_recursively_forbid_unknown_fields(tmp_path
         "duplicate",
         "duplicate_index",
         "aggregate_membership",
+        "aggregate_unknown_nodeid",
+        "aggregate_duplicate_reference",
         "aggregate_identity",
         "aggregate_count",
         "aggregate_verdict",
@@ -544,6 +546,10 @@ def test_loader_rejects_cross_section_inconsistency(
         payload["trials"].append(duplicate)
     elif mutation == "aggregate_membership":
         payload["aggregates"][0]["trials"] = payload["aggregates"][0]["trials"][:1]
+    elif mutation == "aggregate_unknown_nodeid":
+        payload["aggregates"][0]["trials"][0]["nodeid"] = "ghost"
+    elif mutation == "aggregate_duplicate_reference":
+        payload["aggregates"][0]["trials"].append(payload["aggregates"][0]["trials"][0])
     elif mutation == "aggregate_identity":
         payload["aggregates"][0]["group_id"] = "other-group"
     elif mutation == "aggregate_count":
@@ -590,6 +596,25 @@ def test_failed_validation_does_not_replace_existing_artifact(tmp_path: Path) ->
         write_run_artifacts(
             run_id="run-1",
             trials=[duplicate, duplicate],
+            result_path=result_path,
+            artifact_dir=tmp_path,
+            core_result=payload,
+        )
+
+    assert result_path.read_bytes() == original
+
+
+def test_unknown_aggregate_trial_does_not_replace_existing_artifact(tmp_path: Path) -> None:
+    trial = _trial()
+    result_path = _write(tmp_path, trials=[trial])
+    original = result_path.read_bytes()
+    payload = json.loads(original)
+    payload["aggregates"][0]["trials"][0]["nodeid"] = "ghost"
+
+    with pytest.raises(ValueError, match="does not match top-level trials"):
+        write_run_artifacts(
+            run_id="run-1",
+            trials=[trial],
             result_path=result_path,
             artifact_dir=tmp_path,
             core_result=payload,

@@ -764,6 +764,35 @@ def test_engine_client_requires_complete_run_result_schema(
     client.close()
 
 
+def test_engine_client_rejects_unknown_aggregate_trial_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trial = _trial_payload()
+    with EngineClient() as canonical_engine:
+        response_result = canonical_engine.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[trial],
+        )
+    response_result["aggregates"][0]["trials"][0]["nodeid"] = "ghost"
+    client = EngineClient()
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "run_result", "result": response_result},
+    )
+
+    with pytest.raises(KensaEngineError, match="invalid run result"):
+        client.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[trial],
+        )
+    client.close()
+
+
 def test_engine_client_rejects_boolean_trial_values_as_integer_echoes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
