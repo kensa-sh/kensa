@@ -2,6 +2,7 @@ import {
   cancelCase,
   checkCase,
   EvaluationTransitionError,
+  KensaCoreError,
   nextAction,
   observeCase,
   startCase,
@@ -57,8 +58,15 @@ export class KensaEngine {
           },
         );
       }
-      if (error instanceof EvaluationTransitionError) {
-        return failure(requestId, "invalid_transition", error.message);
+      if (error instanceof KensaCoreError) {
+        return failure(
+          requestId,
+          error instanceof EvaluationTransitionError
+            ? "invalid_transition"
+            : "invalid_message",
+          error.message,
+          { issues: error.issues },
+        );
       }
       if (
         error instanceof UnknownEvaluationError ||
@@ -139,6 +147,8 @@ export class KensaEngine {
             phase: "cancelled",
             case_id: cancelled.case.id,
             reason: cancelled.reason,
+            verdict: cancelled.verdict,
+            failure: cancelled.failure,
           },
         };
       }

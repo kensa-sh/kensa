@@ -51,6 +51,29 @@ describe("KensaEngine", () => {
     }
   });
 
+  it("rejects responses that violate core evidence contracts", () => {
+    expect(() =>
+      responseSchema.parse({
+        ...(responses.complete as Record<string, unknown>),
+        evaluation: {
+          ...((responses.complete as Record<string, unknown>)
+            .evaluation as Record<string, unknown>),
+          output: undefined,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      responseSchema.parse({
+        ...(responses.cancelled as Record<string, unknown>),
+        evaluation: {
+          ...((responses.cancelled as Record<string, unknown>)
+            .evaluation as Record<string, unknown>),
+          failure: undefined,
+        },
+      }),
+    ).toThrow();
+  });
+
   it("runs one evaluation to a core-owned verdict and releases terminal state", () => {
     const engine = new KensaEngine();
     const handshake = engine.processLine(
@@ -98,7 +121,7 @@ describe("KensaEngine", () => {
       message("4", {
         type: "check",
         evaluation_id: "eval-1",
-        check: { id: "pytest", status: "pass", failure: null },
+        check: { id: "pytest", outcome: "satisfied", failure: null },
       }),
     );
     expect(result).toEqual({ id: "4", ok: true, response: responses.complete });
@@ -107,7 +130,7 @@ describe("KensaEngine", () => {
         message("5", {
           type: "check",
           evaluation_id: "eval-1",
-          check: { id: "pytest", status: "pass", failure: null },
+          check: { id: "pytest", outcome: "satisfied", failure: null },
         }),
       ),
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
@@ -178,6 +201,21 @@ describe("KensaEngine", () => {
       ),
     ).toMatchObject({ ok: false, failure: { code: "version_mismatch" } });
     ready(engine);
+    expect(
+      engine.processLine(
+        message("invalid-case", {
+          type: "start_case",
+          evaluation_id: "invalid",
+          case: { id: "", input: null, metadata: {} },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        code: "invalid_message",
+        details: { issues: expect.any(Array) },
+      },
+    });
     expect(
       engine.processLine(
         message("3", {

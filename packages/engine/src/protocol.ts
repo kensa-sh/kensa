@@ -1,11 +1,9 @@
 import { z } from "zod";
 
 import {
-  caseSchema,
-  checkSchema,
-  failureSchema,
-  jsonValueSchema,
-  observationSchema,
+  CoreValidationError,
+  parseJsonValue,
+  parseObservation,
 } from "@kensa/core";
 
 export const PROTOCOL_VERSION = "kensa.engine.v1";
@@ -19,22 +17,22 @@ const handshakeRequest = z.strictObject({
 const startCaseRequest = z.strictObject({
   type: z.literal("start_case"),
   evaluation_id: z.string().min(1),
-  case: caseSchema,
+  case: z.unknown(),
 });
 const observeRequest = z.strictObject({
   type: z.literal("observe"),
   evaluation_id: z.string().min(1),
-  observation: observationSchema,
+  observation: z.unknown(),
 });
 const checkRequest = z.strictObject({
   type: z.literal("check"),
   evaluation_id: z.string().min(1),
-  check: checkSchema,
+  check: z.unknown(),
 });
 const cancelRequest = z.strictObject({
   type: z.literal("cancel"),
   evaluation_id: z.string().min(1),
-  reason: z.string().min(1),
+  reason: z.unknown(),
 });
 
 export const requestEnvelopeSchema = z.strictObject({
@@ -72,21 +70,40 @@ const actionResponse = z.strictObject({
   action: z.enum(["invoke_agent", "evaluate_check"]),
   case_id: z.string().min(1),
 });
-const completeEvaluationResponse = z.strictObject({
-  phase: z.literal("complete"),
-  case_id: z.string().min(1),
-  verdict: z.enum(["pass", "fail", "error", "skipped"]),
-  output: jsonValueSchema.nullable(),
-  output_recorded: z.boolean(),
-  trace: observationSchema.shape.trace,
-  failure: failureSchema.nullable(),
-  check_id: z.string().min(1),
-});
-const cancelledEvaluationResponse = z.strictObject({
-  phase: z.literal("cancelled"),
-  case_id: z.string().min(1),
-  reason: z.string().min(1),
-});
+const completeEvaluationResponse = z
+  .strictObject({
+    phase: z.literal("complete"),
+    case_id: z.string().min(1),
+    verdict: z.enum(["pass", "fail", "error", "skipped"]),
+    output: z.unknown(),
+    output_recorded: z.boolean(),
+    trace: z.unknown(),
+    failure: z.unknown(),
+    check_id: z.string().min(1),
+  })
+  .superRefine((evaluation, context) => {
+    validateCoreValue(
+      () =>
+        parseObservation({
+          output: evaluation.output,
+          output_recorded: evaluation.output_recorded,
+          trace: evaluation.trace,
+          failure: evaluation.failure,
+        }),
+      context,
+    );
+  });
+const cancelledEvaluationResponse = z
+  .strictObject({
+    phase: z.literal("cancelled"),
+    case_id: z.string().min(1),
+    reason: z.string().min(1),
+    verdict: z.literal("error"),
+    failure: z.unknown(),
+  })
+  .superRefine((evaluation, context) => {
+    validateCoreValue(() => parseJsonValue(evaluation.failure), context);
+  });
 const resultResponse = z.strictObject({
   type: z.literal("result"),
   evaluation: z.discriminatedUnion("phase", [
@@ -127,3 +144,19 @@ export const responseEnvelopeSchema = z.discriminatedUnion("ok", [
   }),
 ]);
 export type ResponseEnvelope = z.infer<typeof responseEnvelopeSchema>;
+
+function validateCoreValue(
+  validate: () => unknown,
+  context: z.RefinementCtx,
+): void {
+  try {
+    validate();
+  } catch (error) {
+    const validationError = error as CoreValidationError;
+    context.addIssue({
+      code: "custom",
+      message: validationError.message,
+      params: { issues: validationError.issues },
+    });
+  }
+}
