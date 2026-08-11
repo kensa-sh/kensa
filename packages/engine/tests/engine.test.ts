@@ -86,6 +86,16 @@ describe("KensaEngine", () => {
         },
       }),
     ).toThrow();
+    expect(() =>
+      responseSchema.parse({
+        ...(responses.cancelled as Record<string, unknown>),
+        evaluation: {
+          ...((responses.cancelled as Record<string, unknown>)
+            .evaluation as Record<string, unknown>),
+          failure: { category: "harness" },
+        },
+      }),
+    ).toThrow();
   });
 
   it("runs one evaluation to a core-owned verdict and releases terminal state", () => {

@@ -1,10 +1,6 @@
 import { z } from "zod";
 
-import {
-  CoreValidationError,
-  parseJsonValue,
-  parseObservation,
-} from "@kensa/core";
+import { CoreValidationError, parseCheck, parseObservation } from "@kensa/core";
 
 export const PROTOCOL_VERSION = "kensa.engine.v1";
 export const ENGINE_VERSION = "0.1.0";
@@ -111,7 +107,15 @@ const cancelledEvaluationResponse = z
     failure: z.unknown(),
   })
   .superRefine((evaluation, context) => {
-    validateCoreValue(() => parseJsonValue(evaluation.failure), context);
+    validateCoreValue(
+      () =>
+        parseCheck({
+          id: "cancellation",
+          outcome: "error",
+          failure: evaluation.failure,
+        }),
+      context,
+    );
     if (evaluation.observation !== null) {
       validateCoreValue(
         () => parseObservation(evaluation.observation),
