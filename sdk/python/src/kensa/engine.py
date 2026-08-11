@@ -201,18 +201,51 @@ class EngineClient:
             )
             for trial in trials
         ]
+        expected_trials = sorted(
+            wire_trials,
+            key=lambda trial: (
+                trial.get("group_id"),
+                trial.get("trial_index"),
+                trial.get("nodeid"),
+            ),
+        )
+        wire_interruption = cast(
+            dict[str, Any] | None,
+            _wire_json_value(interruption),
+        )
+        expected_interruption = (
+            {
+                **wire_interruption,
+                "nodeid": wire_interruption.get("nodeid"),
+                "case_id": wire_interruption.get("case_id"),
+                "trial_index": wire_interruption.get("trial_index"),
+                "phase": wire_interruption.get("phase"),
+            }
+            if wire_interruption is not None
+            else None
+        )
         response = self._request(
             {
                 "type": "build_run",
                 "run_id": run_id,
                 "complete": complete,
-                "interruption": interruption,
+                "interruption": wire_interruption,
                 "trials": wire_trials,
             }
         )
         result = response.get("result")
         if response.get("type") != "run_result" or not isinstance(result, dict):
             raise KensaEngineError("Kensa engine returned an invalid run result", code="protocol")
+        if (
+            result.get("run_id") != run_id
+            or result.get("complete") is not complete
+            or result.get("interruption") != expected_interruption
+            or result.get("trials") != expected_trials
+        ):
+            raise KensaEngineError(
+                "Kensa engine returned a contradictory run result",
+                code="protocol",
+            )
         return result
 
     def reset(self) -> int:

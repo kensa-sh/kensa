@@ -311,8 +311,14 @@ def test_engine_crash_during_finalize_records_infrastructure_failure(
     engine.write_text(
         """
 import json
+import os
 import sys
-from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
+from kensa.engine import EngineClient, _engine_command
+
+configured_engine = os.environ.pop("KENSA_ENGINE_COMMAND", None)
+real_engine = _engine_command()
+if configured_engine is not None:
+    os.environ["KENSA_ENGINE_COMMAND"] = configured_engine
 
 for line in sys.stdin:
     envelope = json.loads(line)
@@ -326,18 +332,16 @@ for line in sys.stdin:
     elif request["type"] == "start_case":
         response = {"type": "action", "action": "invoke_agent", "case_id": "one"}
     elif request["type"] == "build_run":
-        trials = request["trials"]
+        with EngineClient(real_engine) as engine:
+            result = engine.build_run(
+                run_id=request["run_id"],
+                complete=request["complete"],
+                interruption=request["interruption"],
+                trials=request["trials"],
+            )
         response = {
             "type": "run_result",
-            "result": {
-                "schema_version": "kensa.result.v1",
-                "run_id": request["run_id"],
-                "complete": request["complete"],
-                "interruption": request["interruption"],
-                "trials": trials,
-                "aggregates": derive_v1_aggregates(trials),
-                "summary": derive_v1_summary(trials),
-            },
+            "result": result,
         }
     else:
         raise SystemExit(9)
@@ -390,9 +394,15 @@ def test_engine_finalization_failure_cancels_active_evaluation(
     engine.write_text(
         f"""
 import json
+import os
 import sys
 from pathlib import Path
-from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
+from kensa.engine import EngineClient, _engine_command
+
+configured_engine = os.environ.pop("KENSA_ENGINE_COMMAND", None)
+real_engine = _engine_command()
+if configured_engine is not None:
+    os.environ["KENSA_ENGINE_COMMAND"] = configured_engine
 
 requests_path = Path({str(requests_path)!r})
 for line in sys.stdin:
@@ -425,18 +435,16 @@ for line in sys.stdin:
             }},
         }}
     elif request["type"] == "build_run":
-        trials = request["trials"]
+        with EngineClient(real_engine) as engine:
+            result = engine.build_run(
+                run_id=request["run_id"],
+                complete=request["complete"],
+                interruption=request["interruption"],
+                trials=request["trials"],
+            )
         response = {{
             "type": "run_result",
-            "result": {{
-                "schema_version": "kensa.result.v1",
-                "run_id": request["run_id"],
-                "complete": request["complete"],
-                "interruption": request["interruption"],
-                "trials": trials,
-                "aggregates": derive_v1_aggregates(trials),
-                "summary": derive_v1_summary(trials),
-            }},
+            "result": result,
         }}
     else:
         response = {{"type": "reset", "released": 0}}
@@ -571,7 +579,15 @@ def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
 
     def request(payload: dict[str, Any]) -> dict[str, Any]:
         requests.append(payload)
-        return {"type": "run_result", "result": {"run_id": "run"}}
+        return {
+            "type": "run_result",
+            "result": {
+                "run_id": "run",
+                "complete": True,
+                "interruption": None,
+                "trials": payload["trials"],
+            },
+        }
 
     monkeypatch.setattr(client, "_request", request)
 
@@ -593,7 +609,12 @@ def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
         ],
     )
 
-    assert result == {"run_id": "run"}
+    assert result == {
+        "run_id": "run",
+        "complete": True,
+        "interruption": None,
+        "trials": requests[0]["trials"],
+    }
     spans = requests[0]["trials"][0]["trace"]["spans"]
     assert spans[0]["start_time_unix_nano"] == "1786430000000000000"
     assert spans[0]["end_time_unix_nano"] == "1786430000000000001"
@@ -606,6 +627,27 @@ def test_engine_client_rejects_invalid_run_result_and_reset(
     client = EngineClient()
     monkeypatch.setattr(client, "_request", lambda payload: {"type": "wrong"})
     with pytest.raises(KensaEngineError, match="invalid run result"):
+        client.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[],
+        )
+
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {
+            "type": "run_result",
+            "result": {
+                "run_id": "other",
+                "complete": True,
+                "interruption": None,
+                "trials": [],
+            },
+        },
+    )
+    with pytest.raises(KensaEngineError, match="contradictory run result"):
         client.build_run(
             run_id="run",
             complete=True,

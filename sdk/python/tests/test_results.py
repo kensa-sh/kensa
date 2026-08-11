@@ -320,15 +320,11 @@ def test_writer_retains_v1_legacy_cost_derivation(
     assert summary.cost_known_trials == expected_known_trials
 
 
-@pytest.mark.parametrize("llm_turns", [[], 10**400])
-def test_loader_ignores_invalid_llm_turn_values(
-    tmp_path: Path,
-    llm_turns: Any,
-) -> None:
+def test_loader_ignores_invalid_llm_turn_values(tmp_path: Path) -> None:
     result_path = _write(tmp_path, trials=[_trial()])
     payload = json.loads(result_path.read_text())
-    payload["trials"][0]["trace"]["llm_turns"] = llm_turns
-    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = llm_turns
+    payload["trials"][0]["trace"]["llm_turns"] = []
+    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = []
     payload["summary"]["cost_latency"]["mean_llm_turns"] = 0.0
     result_path.write_text(json.dumps(payload))
 
@@ -337,7 +333,18 @@ def test_loader_ignores_invalid_llm_turn_values(
     assert result.summary.cost_latency.mean_llm_turns == 0.0
 
 
-def test_loader_wraps_derivation_failures_with_artifact_path(
+def test_loader_rejects_non_interoperable_integer_values(tmp_path: Path) -> None:
+    result_path = _write(tmp_path, trials=[_trial()])
+    payload = json.loads(result_path.read_text())
+    payload["trials"][0]["trace"]["llm_turns"] = 10**400
+    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = 10**400
+    result_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="outside the interoperable JSON range"):
+        load_run_result(result_path)
+
+
+def test_loader_wraps_engine_verification_failures_with_artifact_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -345,17 +352,24 @@ def test_loader_wraps_derivation_failures_with_artifact_path(
 
     result_path = _write(tmp_path, trials=[_trial()])
 
-    def fail_derivation(trials: list[dict[str, Any]]) -> dict[str, Any]:
-        del trials
-        raise TypeError("invalid derived value")
+    class FailingEngine:
+        def __enter__(self) -> FailingEngine:
+            return self
 
-    monkeypatch.setattr(results, "derive_v1_summary", fail_derivation)
+        def __exit__(self, *_: object) -> None:
+            return None
 
-    with pytest.raises(ValueError, match="derivation failed") as exc_info:
+        def build_run(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise results.KensaEngineError("verification unavailable")
+
+    monkeypatch.setattr(results, "EngineClient", FailingEngine)
+
+    with pytest.raises(ValueError, match="engine verification failed") as exc_info:
         load_run_result(result_path)
 
     assert str(result_path) in str(exc_info.value)
-    assert "invalid derived value" in str(exc_info.value)
+    assert "verification unavailable" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

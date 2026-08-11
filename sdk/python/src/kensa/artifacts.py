@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
 from kensa._smoke import is_smoke_trial
+from kensa.engine import EngineClient, KensaEngineError
 from kensa.results import RunResult, TrialResult
 from kensa.runtime import TrialMetadata
 
@@ -77,19 +77,19 @@ def write_run_artifacts(
         )
         for trial in ordered_trials
     ]
-    payload = (
-        dict(core_result)
-        if core_result is not None
-        else {
-            "schema_version": "kensa.result.v1",
-            "run_id": run_id,
-            "complete": complete,
-            "interruption": interruption,
-            "trials": trial_payloads,
-            "aggregates": derive_v1_aggregates(trial_payloads),
-            "summary": derive_v1_summary(trial_payloads),
-        }
-    )
+    if core_result is None:
+        try:
+            with EngineClient() as engine:
+                payload = engine.build_run(
+                    run_id=run_id,
+                    complete=complete,
+                    interruption=interruption,
+                    trials=trial_payloads,
+                )
+        except KensaEngineError as exc:
+            raise ValueError(f"Could not build Kensa result artifact: {exc}") from exc
+    else:
+        payload = dict(core_result)
     result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
     _write_text_atomic(result_path, result.model_dump_json(indent=2))
     result_trials = [trial_result_to_metadata(trial) for trial in result.trials]

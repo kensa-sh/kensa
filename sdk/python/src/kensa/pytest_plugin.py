@@ -299,6 +299,7 @@ class KensaSessionState:
         self.complete = False
         if self.interruption is None:
             self.interruption = {"kind": kind, "message": message, **details}
+        self._core_result = None
 
     @property
     def engine(self) -> EngineClient:
@@ -786,6 +787,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
 def _record_trial(config: pytest.Config, metadata: TrialMetadata) -> None:
     state = _state(config)
     upsert_trial(state.trials, metadata)
+    state._core_result = None
     if _is_xdist_worker(config):
         state.set_trial_snapshot(metadata)
     if state.write_artifacts:
