@@ -7,6 +7,11 @@ import {
 } from "./evidence.js";
 import { KensaCoreError, parseInput } from "./errors.js";
 import { canonicalJson, digestJson } from "./json.js";
+import {
+  verifyProtectionResult,
+  type ProtectionResult,
+} from "./protection-result.js";
+import { verifyProtectionSuite, type ProtectionSuite } from "./protection.js";
 
 const digestSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const syncPointerSchema = z.strictObject({
@@ -27,9 +32,25 @@ const resultArtifactSchema = z.strictObject({
   digest: digestSchema,
   payload: z.unknown(),
 });
+const protectionSuiteArtifactSchema = z.strictObject({
+  schema_version: z.literal("kensa.sync_artifact.v1"),
+  kind: z.literal("protection_suite"),
+  key: z.string().min(1),
+  digest: digestSchema,
+  payload: z.unknown(),
+});
+const protectionResultArtifactSchema = z.strictObject({
+  schema_version: z.literal("kensa.sync_artifact.v1"),
+  kind: z.literal("protection_result"),
+  key: z.string().min(1),
+  digest: digestSchema,
+  payload: z.unknown(),
+});
 const syncArtifactSchema = z.discriminatedUnion("kind", [
   evidenceArtifactSchema,
   resultArtifactSchema,
+  protectionSuiteArtifactSchema,
+  protectionResultArtifactSchema,
 ]);
 const syncBatchSchema = z.strictObject({
   schema_version: z.literal("kensa.sync_batch.v1"),
@@ -39,6 +60,8 @@ const syncBatchSchema = z.strictObject({
 const buildSyncBatchInputSchema = z.strictObject({
   evidence: z.array(z.unknown()).default([]),
   results: z.array(z.unknown()).default([]),
+  protection_suites: z.array(z.unknown()).default([]),
+  protection_results: z.array(z.unknown()).default([]),
 });
 const syncConflictSchema = z.strictObject({
   key: z.string().min(1),
@@ -86,7 +109,27 @@ export interface ResultSyncArtifact {
   payload: RunResult;
 }
 
-export type SyncArtifact = EvidenceSyncArtifact | ResultSyncArtifact;
+export interface ProtectionSuiteSyncArtifact {
+  schema_version: "kensa.sync_artifact.v1";
+  kind: "protection_suite";
+  key: string;
+  digest: string;
+  payload: ProtectionSuite;
+}
+
+export interface ProtectionResultSyncArtifact {
+  schema_version: "kensa.sync_artifact.v1";
+  kind: "protection_result";
+  key: string;
+  digest: string;
+  payload: ProtectionResult;
+}
+
+export type SyncArtifact =
+  | EvidenceSyncArtifact
+  | ResultSyncArtifact
+  | ProtectionSuiteSyncArtifact
+  | ProtectionResultSyncArtifact;
 
 export interface SyncBatch {
   schema_version: "kensa.sync_batch.v1";
@@ -131,9 +174,17 @@ export async function buildSyncBatch(input: unknown): Promise<SyncBatch> {
     parsed.evidence.map(verifyRedactedEvidenceRecord),
   );
   const results = parsed.results.map(verifyRunResult);
+  const protectionSuites = await Promise.all(
+    parsed.protection_suites.map(verifyProtectionSuite),
+  );
+  const protectionResults = await Promise.all(
+    parsed.protection_results.map(verifyProtectionResult),
+  );
   const artifacts = await Promise.all<SyncArtifact>([
     ...evidence.map(buildEvidenceArtifact),
     ...results.map(buildResultArtifact),
+    ...protectionSuites.map(buildProtectionSuiteArtifact),
+    ...protectionResults.map(buildProtectionResultArtifact),
   ]);
   artifacts.sort(compareArtifacts);
   rejectDuplicateKeys(artifacts);
@@ -152,6 +203,12 @@ export async function verifySyncBatch(input: unknown): Promise<SyncBatch> {
       .map((artifact) => artifact.payload),
     results: batch.artifacts
       .filter((artifact) => artifact.kind === "result")
+      .map((artifact) => artifact.payload),
+    protection_suites: batch.artifacts
+      .filter((artifact) => artifact.kind === "protection_suite")
+      .map((artifact) => artifact.payload),
+    protection_results: batch.artifacts
+      .filter((artifact) => artifact.kind === "protection_result")
       .map((artifact) => artifact.payload),
   });
   requireCanonical(input, expected, "sync batch does not match its artifacts");
@@ -312,6 +369,37 @@ async function buildResultArtifact(
     kind: "result",
     key: `result:${payload.run_id}`,
     digest: await digestJson(payload),
+    payload,
+  };
+}
+
+async function buildProtectionSuiteArtifact(
+  payload: ProtectionSuite,
+): Promise<ProtectionSuiteSyncArtifact> {
+  return {
+    schema_version: "kensa.sync_artifact.v1",
+    kind: "protection_suite",
+    key: `protection-suite:${payload.id}:${payload.digest}`,
+    digest: payload.digest,
+    payload,
+  };
+}
+
+async function buildProtectionResultArtifact(
+  payload: ProtectionResult,
+): Promise<ProtectionResultSyncArtifact> {
+  return {
+    schema_version: "kensa.sync_artifact.v1",
+    kind: "protection_result",
+    key: [
+      "protection-result",
+      payload.suite.id,
+      payload.github.repository_id,
+      payload.github.run_id,
+      String(payload.github.run_attempt),
+      payload.result.run_id,
+    ].join(":"),
+    digest: payload.digest,
     payload,
   };
 }

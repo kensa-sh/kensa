@@ -101,6 +101,8 @@ export {
   verifySyncPlan,
   verifySyncReceipt,
   type EvidenceSyncArtifact,
+  type ProtectionResultSyncArtifact,
+  type ProtectionSuiteSyncArtifact,
   type ResultSyncArtifact,
   type SyncArtifact,
   type SyncBatch,
@@ -117,3 +119,9 @@ export {
   type ProtectionCriterion,
   type ProtectionSuite,
 } from "./protection.js";
+export {
+  buildProtectionResult,
+  verifyProtectionResult,
+  type GitHubRunContext,
+  type ProtectionResult,
+} from "./protection-result.js";
