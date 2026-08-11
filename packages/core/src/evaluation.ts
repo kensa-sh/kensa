@@ -46,11 +46,22 @@ export const observationSchema = z.strictObject({
   failure: failureSchema.nullable(),
 });
 
-export const checkSchema = z.strictObject({
-  id: z.string().min(1),
-  status: z.enum(["pass", "fail", "error", "skipped"]),
-  failure: failureSchema.nullable(),
-});
+export const checkSchema = z
+  .strictObject({
+    id: z.string().min(1),
+    status: z.enum(["pass", "fail", "error", "skipped"]),
+    failure: failureSchema.nullable(),
+  })
+  .superRefine((check, context) => {
+    const requiresFailure = check.status !== "pass";
+    if (requiresFailure !== (check.failure !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["failure"],
+        message: `${check.status} check has contradictory failure provenance`,
+      });
+    }
+  });
 
 export type EvaluationCase = z.infer<typeof caseSchema>;
 export type EvaluationFailure = z.infer<typeof failureSchema>;
@@ -83,7 +94,8 @@ interface Cancelled {
   reason: string;
 }
 
-export type EvaluationState = AwaitingObservation | AwaitingCheck | Complete | Cancelled;
+export type EvaluationState =
+  AwaitingObservation | AwaitingCheck | Complete | Cancelled;
 
 export class EvaluationTransitionError extends Error {
   readonly code = "invalid_transition";
@@ -93,20 +105,33 @@ export function startCase(input: unknown): AwaitingObservation {
   return { phase: "awaiting_observation", case: caseSchema.parse(input) };
 }
 
-export function observeCase(state: EvaluationState, input: unknown): AwaitingCheck {
+export function observeCase(
+  state: EvaluationState,
+  input: unknown,
+): AwaitingCheck {
   if (state.phase !== "awaiting_observation") {
-    throw new EvaluationTransitionError(`cannot observe case in ${state.phase} phase`);
+    throw new EvaluationTransitionError(
+      `cannot observe case in ${state.phase} phase`,
+    );
   }
-  return { phase: "awaiting_check", case: state.case, observation: observationSchema.parse(input) };
+  return {
+    phase: "awaiting_check",
+    case: state.case,
+    observation: observationSchema.parse(input),
+  };
 }
 
 export function checkCase(state: EvaluationState, input: unknown): Complete {
   if (state.phase !== "awaiting_check") {
-    throw new EvaluationTransitionError(`cannot check case in ${state.phase} phase`);
+    throw new EvaluationTransitionError(
+      `cannot check case in ${state.phase} phase`,
+    );
   }
   const check = checkSchema.parse(input);
   if (state.observation.failure !== null && check.status === "pass") {
-    throw new EvaluationTransitionError("a failed observation cannot pass its check");
+    throw new EvaluationTransitionError(
+      "a failed observation cannot pass its check",
+    );
   }
   return {
     phase: "complete",
@@ -119,10 +144,14 @@ export function checkCase(state: EvaluationState, input: unknown): Complete {
 
 export function cancelCase(state: EvaluationState, reason: string): Cancelled {
   if (state.phase === "complete" || state.phase === "cancelled") {
-    throw new EvaluationTransitionError(`cannot cancel case in ${state.phase} phase`);
+    throw new EvaluationTransitionError(
+      `cannot cancel case in ${state.phase} phase`,
+    );
   }
   if (reason.length === 0) {
-    throw new EvaluationTransitionError("cancellation reason must not be empty");
+    throw new EvaluationTransitionError(
+      "cancellation reason must not be empty",
+    );
   }
   return { phase: "cancelled", case: state.case, reason };
 }
