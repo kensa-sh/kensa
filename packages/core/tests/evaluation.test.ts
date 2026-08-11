@@ -32,30 +32,40 @@ describe("evaluation transitions", () => {
       trace,
       failure: null,
     });
-    const complete = checkCase(observed, { id: "pytest", status: "pass", failure: null });
+    const complete = checkCase(observed, {
+      id: "pytest",
+      status: "pass",
+      failure: null,
+    });
 
     expect(complete.verdict).toBe("pass");
     expect(complete.observation.output).toBe("hello");
   });
 
-  it.each(["fail", "error", "skipped"] as const)("derives a %s verdict", (status) => {
-    const observed = observeCase(startCase(testCase), {
-      output: null,
-      output_recorded: false,
-      trace,
-      failure:
-        status === "skipped"
-          ? null
-          : { category: "agent", kind: status, message: status, evidence: {} },
-    });
-    const complete = checkCase(observed, {
-      id: "pytest",
-      status,
-      failure: status === "skipped" ? null : observed.observation.failure,
-    });
+  it.each(["fail", "error", "skipped"] as const)(
+    "derives a %s verdict",
+    (status) => {
+      const failure = {
+        category: "agent" as const,
+        kind: status,
+        message: status,
+        evidence: {},
+      };
+      const observed = observeCase(startCase(testCase), {
+        output: null,
+        output_recorded: false,
+        trace,
+        failure,
+      });
+      const complete = checkCase(observed, {
+        id: "pytest",
+        status,
+        failure,
+      });
 
-    expect(complete.verdict).toBe(status);
-  });
+      expect(complete.verdict).toBe(status);
+    },
+  );
 
   it("rejects invalid transitions and contradictory outcomes", () => {
     const started = startCase(testCase);
@@ -64,19 +74,60 @@ describe("evaluation transitions", () => {
       output: null,
       output_recorded: false,
       trace,
-      failure: { category: "agent", kind: "execution", message: "failed", evidence: {} },
+      failure: {
+        category: "agent",
+        kind: "execution",
+        message: "failed",
+        evidence: {},
+      },
     });
     expect(() => observeCase(observed, {})).toThrow(EvaluationTransitionError);
-    expect(() => checkCase(observed, { id: "pytest", status: "pass", failure: null })).toThrow(
-      EvaluationTransitionError,
-    );
+    expect(() =>
+      checkCase(observed, { id: "pytest", status: "pass", failure: null }),
+    ).toThrow(EvaluationTransitionError);
+    expect(() =>
+      checkCase(
+        observeCase(startCase(testCase), {
+          output: null,
+          output_recorded: false,
+          trace,
+          failure: null,
+        }),
+        {
+          id: "pytest",
+          status: "pass",
+          failure: {
+            category: "agent",
+            kind: "assertion",
+            message: "failed",
+            evidence: {},
+          },
+        },
+      ),
+    ).toThrow();
+    expect(() =>
+      checkCase(
+        observeCase(startCase(testCase), {
+          output: null,
+          output_recorded: false,
+          trace,
+          failure: null,
+        }),
+        { id: "pytest", status: "fail", failure: null },
+      ),
+    ).toThrow();
   });
 
   it("cancels only active evaluations with a reason", () => {
     const started = startCase(testCase);
     const cancelled = cancelCase(started, "pytest stopped");
-    expect(cancelled).toMatchObject({ phase: "cancelled", reason: "pytest stopped" });
-    expect(() => cancelCase(cancelled, "again")).toThrow(EvaluationTransitionError);
+    expect(cancelled).toMatchObject({
+      phase: "cancelled",
+      reason: "pytest stopped",
+    });
+    expect(() => cancelCase(cancelled, "again")).toThrow(
+      EvaluationTransitionError,
+    );
     expect(() => cancelCase(started, "")).toThrow(EvaluationTransitionError);
   });
 
