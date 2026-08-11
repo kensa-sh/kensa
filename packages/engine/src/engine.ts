@@ -2,6 +2,7 @@ import {
   cancelCase,
   checkCase,
   EvaluationTransitionError,
+  nextAction,
   observeCase,
   startCase,
   type EvaluationState,
@@ -96,7 +97,7 @@ export class KensaEngine {
         this.#evaluations.set(request.evaluation_id, state);
         return {
           type: "action",
-          action: "invoke_agent",
+          action: nextAction(state)!,
           case_id: state.case.id,
         };
       }
@@ -106,7 +107,7 @@ export class KensaEngine {
         this.#evaluations.set(request.evaluation_id, observed);
         return {
           type: "action",
-          action: "evaluate_check",
+          action: nextAction(observed)!,
           case_id: observed.case.id,
         };
       }
