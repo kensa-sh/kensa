@@ -1,4 +1,4 @@
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
@@ -54,5 +54,78 @@ describe("runEngine", () => {
     output.destroy(new Error("parent disconnected"));
 
     await expect(completion).rejects.toThrow("parent disconnected");
+  });
+
+  it("rejects when the protocol input fails", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const completion = runEngine(input, output);
+
+    input.destroy(new Error("input disconnected"));
+
+    await expect(completion).rejects.toThrow("input disconnected");
+  });
+
+  it("rejects when flushing an output frame fails", async () => {
+    const input = new PassThrough();
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("flush failed"));
+      },
+    });
+    const completion = runEngine(input, output);
+    input.end(
+      JSON.stringify({
+        id: "request-1",
+        request: {
+          type: "handshake",
+          protocol_version: PROTOCOL_VERSION,
+          client: "test",
+        },
+      }),
+    );
+
+    await expect(completion).rejects.toThrow("flush failed");
+  });
+
+  it("waits for each output frame to flush before processing the next", async () => {
+    const input = new PassThrough();
+    const writes: string[] = [];
+    let activeWrites = 0;
+    let maximumActiveWrites = 0;
+    const output = new Writable({
+      highWaterMark: 1,
+      write(chunk: Buffer, _encoding, callback) {
+        activeWrites += 1;
+        maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
+        setImmediate(() => {
+          writes.push(chunk.toString());
+          activeWrites -= 1;
+          callback();
+        });
+      },
+    });
+    const completion = runEngine(input, output);
+    input.end(
+      [
+        JSON.stringify({
+          id: "request-1",
+          request: {
+            type: "handshake",
+            protocol_version: PROTOCOL_VERSION,
+            client: "test",
+          },
+        }),
+        JSON.stringify({
+          id: "request-2",
+          request: { type: "reset" },
+        }),
+      ].join("\n"),
+    );
+
+    await completion;
+
+    expect(writes).toHaveLength(2);
+    expect(maximumActiveWrites).toBe(1);
   });
 });

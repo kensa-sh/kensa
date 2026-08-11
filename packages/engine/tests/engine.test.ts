@@ -1,8 +1,15 @@
 import { readFileSync } from "node:fs";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
+import { KensaCoreError } from "@kensa/core";
 
-import { KensaEngine, PROTOCOL_VERSION, responseSchema } from "../src/index.js";
+import {
+  KensaEngine,
+  PROTOCOL_VERSION,
+  responseEnvelopeSchema,
+  responseSchema,
+} from "../src/index.js";
 
 const trace = {
   spans: [],
@@ -17,6 +24,13 @@ const trace = {
   cost_available: false,
   llm_turns: 0,
 };
+
+const agentFailure = {
+  category: "agent",
+  kind: "exception",
+  message: "agent raised",
+  evidence: { type: "RuntimeError" },
+} as const;
 
 function message(id: string, request: Record<string, unknown>): string {
   return JSON.stringify({ id, request });
@@ -69,6 +83,16 @@ describe("KensaEngine", () => {
           ...((responses.cancelled as Record<string, unknown>)
             .evaluation as Record<string, unknown>),
           failure: undefined,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      responseSchema.parse({
+        ...(responses.cancelled as Record<string, unknown>),
+        evaluation: {
+          ...((responses.cancelled as Record<string, unknown>)
+            .evaluation as Record<string, unknown>),
+          failure: { category: "harness" },
         },
       }),
     ).toThrow();
@@ -169,6 +193,105 @@ describe("KensaEngine", () => {
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
   });
 
+  it("preserves failed observations through terminal error handling", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    engine.processLine(
+      message("2", {
+        type: "start_case",
+        evaluation_id: "failed-agent",
+        case: { id: "case-1", input: null, metadata: {} },
+      }),
+    );
+    expect(
+      engine.processLine(
+        message("3", {
+          type: "observe",
+          evaluation_id: "failed-agent",
+          observation: {
+            output: null,
+            output_recorded: false,
+            trace: {
+              ...trace,
+              incomplete: true,
+              incomplete_reason: "agent raised",
+            },
+            failure: agentFailure,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: { type: "action", action: "evaluate_check" },
+    });
+    expect(
+      engine.processLine(
+        message("4", {
+          type: "check",
+          evaluation_id: "failed-agent",
+          check: { id: "pytest", outcome: "error", failure: agentFailure },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: {
+        type: "result",
+        evaluation: { verdict: "error", failure: agentFailure },
+      },
+    });
+    expect(
+      engine.processLine(
+        message("5", {
+          type: "cancel",
+          evaluation_id: "failed-agent",
+          reason: "late",
+        }),
+      ),
+    ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
+  });
+
+  it("retains observed evidence in cancellation results", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    engine.processLine(
+      message("2", {
+        type: "start_case",
+        evaluation_id: "observed",
+        case: { id: "case-1", input: null, metadata: {} },
+      }),
+    );
+    engine.processLine(
+      message("3", {
+        type: "observe",
+        evaluation_id: "observed",
+        observation: {
+          output: "partial",
+          output_recorded: true,
+          trace,
+          failure: null,
+        },
+      }),
+    );
+
+    expect(
+      engine.processLine(
+        message("4", {
+          type: "cancel",
+          evaluation_id: "observed",
+          reason: "interrupted",
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: {
+        evaluation: {
+          phase: "cancelled",
+          observation: { output: "partial", trace },
+        },
+      },
+    });
+  });
+
   it("fails closed on malformed, unversioned, and repeated requests", () => {
     const engine = new KensaEngine();
     expect(engine.processLine("{")).toMatchObject({
@@ -254,6 +377,148 @@ describe("KensaEngine", () => {
       ok: false,
       failure: { code: "invalid_transition" },
     });
+    expect(
+      engine.processLine(
+        message("5", {
+          type: "check",
+          evaluation_id: "duplicate",
+          check: { id: "pytest", outcome: "satisfied", failure: null },
+        }),
+      ),
+    ).toMatchObject({ ok: false, failure: { code: "invalid_transition" } });
+    engine.processLine(
+      message("6", {
+        type: "observe",
+        evaluation_id: "duplicate",
+        observation: {
+          output: null,
+          output_recorded: true,
+          trace,
+          failure: null,
+        },
+      }),
+    );
+    expect(
+      engine.processLine(
+        message("7", {
+          type: "observe",
+          evaluation_id: "duplicate",
+          observation: {
+            output: null,
+            output_recorded: true,
+            trace,
+            failure: null,
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false, failure: { code: "invalid_transition" } });
+  });
+
+  it("resets all abandoned evaluation state", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    for (const evaluationId of ["first", "second"]) {
+      engine.processLine(
+        message(evaluationId, {
+          type: "start_case",
+          evaluation_id: evaluationId,
+          case: { id: evaluationId, input: null, metadata: {} },
+        }),
+      );
+    }
+
+    expect(engine.processLine(message("reset", { type: "reset" }))).toEqual({
+      id: "reset",
+      ok: true,
+      response: { type: "reset", released: 2 },
+    });
+    expect(
+      engine.processLine(
+        message("missing", {
+          type: "cancel",
+          evaluation_id: "first",
+          reason: "late",
+        }),
+      ),
+    ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
+    expect(engine.reset()).toBe(0);
+  });
+
+  it("does not commit state until the outbound response validates", () => {
+    let validation = 0;
+    const engine = new KensaEngine({
+      nextAction: (state) =>
+        state.phase === "awaiting_observation"
+          ? "invoke_agent"
+          : "evaluate_check",
+      validateResponse: (value) => {
+        validation += 1;
+        if (validation === 3) {
+          throw new ZodError([
+            {
+              code: "custom",
+              message: "forced failure",
+              path: ["response", 1],
+            },
+          ]);
+        }
+        return responseSchema.parse(value);
+      },
+    });
+    ready(engine);
+    engine.processLine(
+      message("2", {
+        type: "start_case",
+        evaluation_id: "atomic",
+        case: { id: "case-1", input: null, metadata: {} },
+      }),
+    );
+    const observation = {
+      type: "observe",
+      evaluation_id: "atomic",
+      observation: {
+        output: "world",
+        output_recorded: true,
+        trace,
+        failure: null,
+      },
+    };
+
+    expect(engine.processLine(message("3", observation))).toMatchObject({
+      ok: false,
+      failure: {
+        code: "internal",
+        message: "engine produced an invalid response",
+      },
+    });
+    expect(engine.processLine(message("4", observation))).toMatchObject({
+      ok: true,
+      response: { type: "action", action: "evaluate_check" },
+    });
+  });
+
+  it("fails safely when core returns no action for active state", () => {
+    const engine = new KensaEngine({
+      nextAction: () => null,
+      validateResponse: (value) => responseSchema.parse(value),
+    });
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("2", {
+          type: "start_case",
+          evaluation_id: "no-action",
+          case: { id: "case-1", input: null, metadata: {} },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        code: "internal",
+        message: "active evaluation case-1 has no next action",
+      },
+    });
   });
 
   it("retains request identifiers when validating invalid envelopes", () => {
@@ -279,11 +544,21 @@ describe("KensaEngine", () => {
   ])(
     "returns structured internal failures for unexpected exceptions",
     (thrown, messageText) => {
-      const engine = new KensaEngine();
-      ready(engine);
-      vi.spyOn(Map.prototype, "has").mockImplementationOnce(() => {
-        throw thrown;
+      let explode = false;
+      const engine = new KensaEngine({
+        nextAction: (state) =>
+          state.phase === "awaiting_observation"
+            ? "invoke_agent"
+            : "evaluate_check",
+        validateResponse: (value) => {
+          if (explode) {
+            throw thrown;
+          }
+          return responseSchema.parse(value);
+        },
       });
+      ready(engine);
+      explode = true;
 
       expect(
         engine.processLine(
@@ -300,4 +575,114 @@ describe("KensaEngine", () => {
       });
     },
   );
+
+  it("validates every emitted failure envelope", () => {
+    const preHandshake = new KensaEngine();
+    const version = new KensaEngine();
+    const readyEngine = new KensaEngine();
+    ready(readyEngine);
+    const internal = new KensaEngine({
+      nextAction: () => {
+        throw new Error("internal seam");
+      },
+      validateResponse: (value) => responseSchema.parse(value),
+    });
+    ready(internal);
+    const failures = [
+      preHandshake.processLine("{"),
+      preHandshake.processLine(
+        message("transition", {
+          type: "start_case",
+          evaluation_id: "early",
+          case: { id: "case", input: null, metadata: {} },
+        }),
+      ),
+      version.processLine(
+        message("version", {
+          type: "handshake",
+          protocol_version: "future",
+          client: "test",
+        }),
+      ),
+      readyEngine.processLine(
+        message("unknown", {
+          type: "cancel",
+          evaluation_id: "missing",
+          reason: "stopped",
+        }),
+      ),
+      internal.processLine(
+        message("internal", {
+          type: "start_case",
+          evaluation_id: "internal",
+          case: { id: "case", input: null, metadata: {} },
+        }),
+      ),
+    ];
+
+    for (const envelope of failures) {
+      expect(responseEnvelopeSchema.parse(envelope)).toEqual(envelope);
+    }
+    expect(
+      failures.map((envelope) =>
+        envelope.ok ? "success" : envelope.failure.code,
+      ),
+    ).toEqual([
+      "invalid_message",
+      "invalid_transition",
+      "version_mismatch",
+      "unknown_evaluation",
+      "internal",
+    ]);
+  });
+
+  it("does not hide unexpected errors from core response validation", () => {
+    const failure = new Proxy(
+      {},
+      {
+        getPrototypeOf: () => {
+          throw new Error("unexpected proxy failure");
+        },
+      },
+    );
+
+    expect(() =>
+      responseSchema.parse({
+        ...(responses.cancelled as Record<string, unknown>),
+        evaluation: {
+          ...((responses.cancelled as Record<string, unknown>)
+            .evaluation as Record<string, unknown>),
+          failure,
+        },
+      }),
+    ).toThrow("unexpected proxy failure");
+  });
+
+  it("classifies unexpected core failures as internal", () => {
+    let explode = false;
+    const engine = new KensaEngine({
+      nextAction: (state) =>
+        state.phase === "awaiting_observation"
+          ? "invoke_agent"
+          : "evaluate_check",
+      validateResponse: (value) => {
+        if (explode) {
+          throw new KensaCoreError(
+            "unsupported_platform",
+            "platform unavailable",
+          );
+        }
+        return responseSchema.parse(value);
+      },
+    });
+    ready(engine);
+    explode = true;
+
+    expect(
+      engine.processLine(message("reset", { type: "reset" })),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "internal", message: "platform unavailable" },
+    });
+  });
 });

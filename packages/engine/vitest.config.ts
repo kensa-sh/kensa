@@ -10,6 +10,7 @@ export default defineConfig({
     },
   },
   test: {
+    globalSetup: ["./tests/global-setup.ts"],
     coverage: {
       include: ["src/**/*.ts"],
       provider: "v8",
