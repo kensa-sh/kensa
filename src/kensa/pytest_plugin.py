@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections import Counter
@@ -217,6 +218,7 @@ class KensaSessionState:
         self.complete = True
         self.interruption: dict[str, Any] | None = None
         self._engine: EngineClient | None = None
+        self._engine_resolved = False
 
     @property
     def artifact_dir(self) -> Path:
@@ -296,15 +298,30 @@ class KensaSessionState:
         self.interruption = {"kind": kind, "message": message, **details}
 
     @property
-    def engine(self) -> EngineClient:
-        if self._engine is None:
-            self._engine = EngineClient()
+    def engine(self) -> EngineClient | None:
+        if not self._engine_resolved:
+            self._engine_resolved = True
+            try:
+                self._engine = EngineClient()
+            except KensaEngineError as exc:
+                if os.environ.get("KENSA_ENGINE_COMMAND") is not None or exc.code != "startup":
+                    raise
         return self._engine
 
     def close_engine(self) -> None:
         if self._engine is not None:
             self._engine.close()
             self._engine = None
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if not any(item.get_closest_marker("kensa") is not None for item in session.items):
+        return
+    try:
+        engine = _state(session.config).engine
+        del engine
+    except KensaEngineError as exc:
+        raise pytest.UsageError(f"Kensa engine startup failed: {exc}") from exc
 
 
 def _state(config: pytest.Config) -> KensaSessionState:
@@ -580,13 +597,27 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
 
     excinfo = outcome.excinfo
     if excinfo is None:
-        status = runtime.finalize_engine("pass", None)
+        try:
+            status = runtime.finalize_engine("pass", None)
+        except KensaEngineError as exc:
+            _record_engine_failure(item, runtime, duration_ms, exc)
+            outcome.force_exception(
+                pytest.fail.Exception(f"Kensa engine failure: {exc}", pytrace=False)
+            )
+            return
         _record_trial(item.config, runtime.metadata(status=status, duration_ms=duration_ms))
         return
 
     exc = excinfo[1]
     status, failure = _classify_exception(exc, phase="call")
-    status = runtime.finalize_engine(status, failure)
+    try:
+        status = runtime.finalize_engine(status, failure)
+    except KensaEngineError as engine_error:
+        _record_engine_failure(item, runtime, duration_ms, engine_error)
+        outcome.force_exception(
+            pytest.fail.Exception(f"Kensa engine failure: {engine_error}", pytrace=False)
+        )
+        return
     _record_trial(
         item.config,
         runtime.metadata(
@@ -594,6 +625,19 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
             duration_ms=duration_ms,
             failure=failure,
         ),
+    )
+
+
+def _record_engine_failure(
+    item: pytest.Item,
+    runtime: KensaTrialRuntime,
+    duration_ms: float,
+    error: KensaEngineError,
+) -> None:
+    _, failure = _classify_exception(error, phase="call")
+    _record_trial(
+        item.config,
+        runtime.metadata(status="error", duration_ms=duration_ms, failure=failure),
     )
 
 

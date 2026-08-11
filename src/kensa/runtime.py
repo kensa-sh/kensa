@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import Lock, get_ident
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -757,11 +757,18 @@ class KensaTrialRuntime:
         if self._engine_verdict is not None:
             return self._engine_verdict
         failure_payload = failure.model_dump(mode="json") if failure is not None else None
+        observation_failure = (
+            failure_payload
+            if status == "error"
+            and failure is not None
+            and failure.category in {"agent", "simulator"}
+            else None
+        )
         observation = {
             "output": self.output if self.output_recorded else None,
             "output_recorded": self.output_recorded,
             "trace": _engine_trace(self.trace.to_dict()),
-            "failure": failure_payload,
+            "failure": observation_failure,
         }
         self._engine_verdict = self._engine.complete_case(
             self._engine_evaluation_id,
@@ -773,18 +780,10 @@ class KensaTrialRuntime:
 
 
 def _engine_trace(trace_snapshot: dict[str, Any]) -> dict[str, Any]:
-    wire_trace = deepcopy(trace_snapshot)
-    spans = wire_trace.get("spans")
-    if not isinstance(spans, list):
-        return wire_trace
-    for span in spans:
-        if not isinstance(span, dict):
-            continue
-        for field_name in ("start_time_unix_nano", "end_time_unix_nano"):
-            value = span.get(field_name)
-            if isinstance(value, int):
-                span[field_name] = str(value)
-    return wire_trace
+    from kensa.engine import _wire_json_value
+
+    wire_trace = _wire_json_value(deepcopy(trace_snapshot))
+    return cast(dict[str, Any], wire_trace)
 
 
 class _RuntimeSpanProcessor(SpanProcessor):

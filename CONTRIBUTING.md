@@ -9,7 +9,13 @@ covered by tests.
 git clone https://github.com/kensa-sh/kensa.git
 cd kensa
 uv sync --group dev
+pnpm install --frozen-lockfile
+pnpm build
 ```
+
+The source checkout runs Python eval tests against the locally built TypeScript engine. During the
+transition, an installed package without that engine keeps the existing Python path; setting
+`KENSA_ENGINE_COMMAND` opts into an explicit engine and fails closed if it cannot start.
 
 Pip users can install the same editable development environment with:
 
@@ -69,6 +75,10 @@ uv run ty check
 uv run pytest -q
 uv run python -m coverage run -m pytest -q
 uv run python -m coverage report
+pnpm typecheck
+pnpm test:coverage
+pnpm format:check
+pnpm build
 uv build
 ```
 

@@ -7,17 +7,21 @@ import subprocess
 import sys
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import kensa.pytest_plugin as pytest_plugin
 from kensa.case import kensa_case
 from kensa.engine import (
     PROTOCOL_VERSION,
     EngineClient,
     KensaEngineError,
+    _check_outcome,
     _engine_command,
     _engine_executable,
+    _wire_json_value,
 )
 from kensa.errors import KensaCaseError, TrialFailure
 from kensa.pytest_plugin import _classify_exception
@@ -241,6 +245,92 @@ def test_agent(case):
     assert launches.read_text(encoding="utf-8").splitlines() == ["launch"]
 
 
+def test_explicit_missing_engine_is_a_usage_error(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KENSA_ENGINE_COMMAND", str(tmp_path / "missing-engine"))
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="one", input=None)])
+def test_agent(case):
+    case.run(lambda value: value)
+"""
+    )
+
+    result = pytester.runpytest("-q")
+
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*Kensa engine startup failed: Could not start Kensa engine*"])
+    assert "INTERNALERROR" not in result.stderr.str()
+
+
+def test_engine_crash_during_finalize_records_infrastructure_failure(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = tmp_path / "crashing-engine.py"
+    engine.write_text(
+        """
+import json
+import sys
+
+for line in sys.stdin:
+    envelope = json.loads(line)
+    request = envelope["request"]
+    if request["type"] == "handshake":
+        response = {
+            "type": "handshake",
+            "protocol_version": "kensa.engine.v1",
+            "engine_version": "test",
+        }
+    elif request["type"] == "start_case":
+        response = {"type": "action", "action": "invoke_agent", "case_id": "one"}
+    else:
+        raise SystemExit(9)
+    print(json.dumps({"id": envelope["id"], "ok": True, "response": response}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "KENSA_ENGINE_COMMAND",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(engine))}",
+    )
+    artifact_dir = tmp_path / "artifacts"
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="one", input="hello")])
+def test_agent(case):
+    assert case.run(lambda value: value) == "hello"
+"""
+    )
+
+    result = pytester.runpytest(
+        "-q",
+        "--kensa-write-artifacts",
+        f"--kensa-artifact-dir={artifact_dir}",
+    )
+
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*Kensa engine failure: Kensa engine stopped before responding*"])
+    result_files = list((artifact_dir / "results").glob("*.json"))
+    assert len(result_files) == 1
+    payload = json.loads(result_files[0].read_text(encoding="utf-8"))
+    assert payload["trials"][0]["status"] == "error"
+    assert payload["trials"][0]["failure"]["category"] == "infrastructure"
+    assert payload["trials"][0]["failure"]["kind"] == "crash"
+
+
 def test_engine_command_uses_built_development_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
     command = _engine_command()
@@ -269,14 +359,32 @@ def test_engine_trace_preserves_nanosecond_timestamps_as_decimal_strings() -> No
         "start_time_unix_nano": 1_786_430_000_000_000_000,
         "end_time_unix_nano": None,
     }
-    original: dict[str, Any] = {"spans": [original_span, "ignored"]}
+    original: dict[str, Any] = {
+        "spans": [original_span, "ignored"],
+        "agent_runs": [{"event": {"timestamp": 1_786_430_000_000_000_001}}],
+    }
 
     wire = _engine_trace(original)
 
     assert wire["spans"][0]["start_time_unix_nano"] == "1786430000000000000"
     assert wire["spans"][0]["end_time_unix_nano"] is None
+    assert wire["agent_runs"][0]["event"]["timestamp"] == "1786430000000000001"
     assert original_span["start_time_unix_nano"] == 1_786_430_000_000_000_000
     assert _engine_trace({"spans": None}) == {"spans": None}
+
+
+def test_wire_json_value_preserves_types_and_safe_integers() -> None:
+    assert _wire_json_value(
+        {
+            "values": [True, None, 1.5, "text", 9_007_199_254_740_991],
+            1: (9_007_199_254_740_992,),
+            "bytes": b"opaque",
+        }
+    ) == {
+        "values": [True, None, 1.5, "text", 9_007_199_254_740_991],
+        "1": ["9007199254740992"],
+        "bytes": b"opaque",
+    }
 
 
 def test_engine_client_rejects_startup_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,6 +430,17 @@ def test_engine_client_rejects_invalid_handshake(monkeypatch: pytest.MonkeyPatch
             ],
             "invalid verdict",
         ),
+        (
+            "complete",
+            [
+                {"type": "action", "action": "evaluate_check"},
+                {
+                    "type": "result",
+                    "evaluation": {"phase": "complete", "verdict": "fail"},
+                },
+            ],
+            "contradicts the check observation",
+        ),
         ("cancel", [{"type": "result", "evaluation": {"phase": "complete"}}], "cancellation"),
     ],
 )
@@ -346,6 +465,70 @@ def test_engine_client_rejects_invalid_protocol_actions(
     with pytest.raises(KensaEngineError, match=message):
         invoke()
     client.close()
+
+
+def test_engine_client_rejects_contradictory_failure_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = EngineClient()
+    responses = iter(
+        [
+            {"type": "action", "action": "evaluate_check"},
+            {"type": "result", "evaluation": {"phase": "complete", "verdict": "pass"}},
+        ]
+    )
+    monkeypatch.setattr(client, "_request", lambda request: next(responses))
+
+    with pytest.raises(KensaEngineError, match="failure provenance"):
+        client.complete_case(
+            "eval",
+            observation={},
+            status="pass",
+            failure={"category": "agent"},
+        )
+    with pytest.raises(KensaEngineError, match="Unknown check status"):
+        _check_outcome("unknown")
+    client.close()
+
+
+def test_passing_test_engine_finalize_failure_is_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        def finalize_engine(self, status: str, failure: Any) -> str:
+            del status, failure
+            raise KensaEngineError("stopped", code="crash")
+
+    class Outcome:
+        excinfo = None
+
+        def __init__(self) -> None:
+            self.exception: BaseException | None = None
+
+        def force_exception(self, exception: BaseException) -> None:
+            self.exception = exception
+
+    state = SimpleNamespace(set_active_phase=lambda *_: None)
+    item = SimpleNamespace(config=object(), nodeid="test_eval")
+    recorded: list[KensaEngineError] = []
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pytest_plugin, "_runtime_for_item", lambda _: Runtime())
+        patcher.setattr(pytest_plugin, "_state", lambda _: state)
+        patcher.setattr(
+            pytest_plugin,
+            "_record_engine_failure",
+            lambda _item, _runtime, _duration, error: recorded.append(error),
+        )
+        hook = pytest_plugin.pytest_runtest_call(cast(Any, item))
+        next(hook)
+        outcome = Outcome()
+
+        with pytest.raises(StopIteration):
+            hook.send(outcome)
+
+    assert recorded[0].code == "crash"
+    assert isinstance(outcome.exception, pytest.fail.Exception)
+    assert str(outcome.exception) == "Kensa engine failure: stopped"
 
 
 def test_engine_client_forces_stuck_process_shutdown() -> None:

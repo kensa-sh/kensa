@@ -14,6 +14,7 @@ from typing import Any
 
 PROTOCOL_VERSION = "kensa.engine.v1"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 
 class KensaEngineError(RuntimeError):
@@ -94,7 +95,11 @@ class EngineClient:
             {
                 "type": "check",
                 "evaluation_id": evaluation_id,
-                "check": {"id": "pytest", "status": status, "failure": failure},
+                "check": {
+                    "id": "pytest",
+                    "outcome": _check_outcome(status),
+                    "failure": failure,
+                },
             }
         )
         evaluation = response.get("evaluation")
@@ -103,6 +108,17 @@ class EngineClient:
         verdict = evaluation.get("verdict")
         if verdict not in {"pass", "fail", "error", "skipped"}:
             raise KensaEngineError("Kensa engine returned an invalid verdict", code="protocol")
+        if evaluation.get("phase") != "complete" or verdict != status:
+            raise KensaEngineError(
+                "Kensa engine verdict contradicts the check observation",
+                code="protocol",
+            )
+        requires_failure = verdict in {"fail", "error", "skipped"}
+        if requires_failure != (failure is not None):
+            raise KensaEngineError(
+                "Kensa engine verdict contradicts failure provenance",
+                code="protocol",
+            )
         return verdict
 
     def cancel_case(self, evaluation_id: str, reason: str) -> None:
@@ -144,7 +160,10 @@ class EngineClient:
             if stdin is None or stdout is None:
                 raise KensaEngineError("Kensa engine pipes are unavailable", code="transport")
             try:
-                payload = json.dumps({"id": request_id, "request": request}, allow_nan=False)
+                payload = json.dumps(
+                    _wire_json_value({"id": request_id, "request": request}),
+                    allow_nan=False,
+                )
                 stdin.write(payload + "\n")
                 stdin.flush()
             except (BrokenPipeError, OSError, TypeError, ValueError) as exc:
@@ -212,3 +231,28 @@ def _engine_command() -> tuple[str, ...]:
 
 def _engine_executable(platform_name: str) -> str:
     return "kensa-engine.exe" if platform_name == "nt" else "kensa-engine"
+
+
+def _check_outcome(status: str) -> str:
+    outcomes = {
+        "pass": "satisfied",
+        "fail": "unsatisfied",
+        "error": "error",
+        "skipped": "skipped",
+    }
+    try:
+        return outcomes[status]
+    except KeyError as exc:
+        raise KensaEngineError(f"Unknown check status: {status!r}", code="protocol") from exc
+
+
+def _wire_json_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None or isinstance(value, (float, str)):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _MAX_SAFE_INTEGER else value
+    if isinstance(value, Mapping):
+        return {str(key): _wire_json_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return [_wire_json_value(item) for item in value]
+    return value
