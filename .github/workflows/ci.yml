@@ -121,6 +121,6 @@ jobs:
       - run: pnpm --filter kensa-engine build
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
-      - run: uv pip install ".[redaction]"
+      - run: uv sync --group dev --all-packages --extra redaction
       - run: uv run pytest -q -m "not live"
-      - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live
+      - run: uv run pytest sdk/python/tests/integration/test_live_redaction.py -q --run-live

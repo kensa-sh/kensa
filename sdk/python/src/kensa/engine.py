@@ -442,7 +442,7 @@ def _engine_command() -> tuple[str, ...]:
     bundled = Path(__file__).with_name("bin") / executable
     if bundled.is_file():
         return (str(bundled),)
-    repository = Path(__file__).resolve().parents[2]
+    repository = Path(__file__).resolve().parents[4]
     development = repository / "packages" / "engine" / "dist" / "cli.js"
     node = shutil.which("node")
     if development.is_file() and node is not None:

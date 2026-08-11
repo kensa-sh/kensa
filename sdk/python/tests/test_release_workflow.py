@@ -5,7 +5,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
+PYTHON_PROJECT = ROOT / "sdk" / "python" / "pyproject.toml"
 RELEASE_SCRIPT = ROOT / "scripts" / "release.sh"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -87,8 +88,11 @@ def test_release_workflow_requires_live_redaction_before_tagging() -> None:
 
     assert "needs: prepare" in redaction_job
     assert "ref: ${{ needs.prepare.outputs.sha }}" in redaction_job
-    assert 'uv pip install ".[redaction]"' in redaction_job
-    assert "uv run pytest tests/integration/test_live_redaction.py -q --run-live" in redaction_job
+    assert "uv sync --group dev --all-packages --extra redaction" in redaction_job
+    assert (
+        "uv run pytest sdk/python/tests/integration/test_live_redaction.py -q --run-live"
+        in redaction_job
+    )
     assert "needs: [prepare, test, lint, redaction, build-wheels, package-npm]" in workflow
 
 
@@ -132,7 +136,7 @@ def test_release_workflow_uses_npm_trusted_publishing() -> None:
 
 
 def test_typescript_package_versions_match_python_release() -> None:
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    version = tomllib.loads(PYTHON_PROJECT.read_text())["project"]["version"]
 
     result = subprocess.run(
         ["node", "scripts/set-typescript-version.mjs", "--check", version],
@@ -152,3 +156,16 @@ def test_typescript_package_versions_match_python_release() -> None:
     assert result.returncode == 0
     assert mismatch.returncode == 1
     assert "expected 9.9.9" in mismatch.stderr
+
+
+def test_python_sdk_is_the_only_python_workspace_member() -> None:
+    workspace = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    project = tomllib.loads(PYTHON_PROJECT.read_text())
+
+    assert "project" not in workspace
+    assert workspace["tool"]["uv"]["workspace"]["members"] == ["sdk/python"]
+    assert project["project"]["name"] == "kensa"
+    assert (ROOT / "sdk" / "python" / "src" / "kensa").is_dir()
+    assert (ROOT / "sdk" / "python" / "tests").is_dir()
+    assert not list((ROOT / "src").glob("**/*.py"))
+    assert not list((ROOT / "tests").glob("**/*.py"))

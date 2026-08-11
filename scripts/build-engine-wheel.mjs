@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const pythonRoot = join(root, "sdk", "python");
 const targets = {
   "darwin-arm64": {
     bun: "bun-darwin-arm64",
@@ -43,7 +44,7 @@ if (target === undefined) {
   process.exit(2);
 }
 
-const buildDirectory = join(root, "build", "engine", requestedTarget);
+const buildDirectory = join(pythonRoot, "build", "engine", requestedTarget);
 const executable = join(buildDirectory, target.executable);
 const metadata = join(buildDirectory, "engine-build.json");
 mkdirSync(buildDirectory, { recursive: true });
@@ -77,15 +78,17 @@ const descriptor = {
   schema_version: "kensa.engine_build.v1",
   target: requestedTarget,
   bun_target: target.bun,
-  executable: relative(root, executable),
+  executable: relative(pythonRoot, executable),
   wheel_tag: target.wheel,
   sha256: createHash("sha256").update(readFileSync(executable)).digest("hex"),
 };
 writeFileSync(metadata, `${JSON.stringify(descriptor, null, 2)}\n`);
 
-run(process.env.UV_BINARY ?? "uv", ["build", "--wheel", "--out-dir", "dist"], {
-  KENSA_ENGINE_BUILD: metadata,
-});
+run(
+  process.env.UV_BINARY ?? "uv",
+  ["build", "--package", "kensa", "--wheel", "--out-dir", "dist"],
+  { KENSA_ENGINE_BUILD: metadata },
+);
 
 function run(command, args, environment = {}) {
   const result = spawnSync(command, args, {

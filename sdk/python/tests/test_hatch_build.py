@@ -3,6 +3,14 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tomllib
+import zipfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +24,10 @@ if _SPEC is None or _SPEC.loader is None:
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 hatch_build = cast(Any, _MODULE)
+REPOSITORY = Path(__file__).parents[3]
+PYTHON_PROJECT = REPOSITORY / "sdk" / "python"
+PROJECT_FILES = ("README.md", "LICENSE")
+GOVERNANCE_FILES = ("CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md")
 
 
 def _descriptor(root: Path, target: str = "darwin-arm64") -> tuple[Path, dict[str, str]]:
@@ -61,8 +73,77 @@ def _header(target: str) -> bytes:
     return bytes(value)
 
 
+def _native_target() -> str:
+    machine = platform.machine().lower()
+    architecture = "arm64" if machine in {"aarch64", "arm64"} else "x64"
+    if sys.platform == "darwin":
+        return f"darwin-{architecture}"
+    if sys.platform.startswith("linux"):
+        return f"linux-{architecture}"
+    if sys.platform == "win32" and architecture == "x64":
+        return "win32-x64"
+    pytest.skip(f"unsupported distribution-test platform {sys.platform}-{machine}")
+
+
 def test_editable_build_does_not_require_bundled_engine(tmp_path: Path) -> None:
     _hook(tmp_path).initialize("editable", {})
+
+
+def test_distributions_preserve_root_project_files(tmp_path: Path) -> None:
+    for filename in PROJECT_FILES:
+        assert (PYTHON_PROJECT / filename).read_bytes() == (REPOSITORY / filename).read_bytes()
+
+    repository = tmp_path / "repository"
+    project = repository / "sdk" / "python"
+    project.parent.mkdir(parents=True)
+    shutil.copytree(
+        PYTHON_PROJECT,
+        project,
+        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "build"),
+    )
+    for filename in GOVERNANCE_FILES:
+        shutil.copyfile(REPOSITORY / filename, repository / filename)
+    descriptor, _ = _descriptor(project, _native_target())
+    output = tmp_path / "dist"
+    environment = os.environ.copy()
+    environment["KENSA_ENGINE_BUILD"] = str(descriptor)
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from hatchling.build import build_sdist, build_wheel; "
+                "build_sdist(sys.argv[1]); build_wheel(sys.argv[1])"
+            ),
+            str(output),
+        ],
+        cwd=project,
+        env=environment,
+        check=True,
+    )
+
+    sdist = next(output.glob("*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        members = {member.name: member for member in archive.getmembers()}
+        version = tomllib.loads((project / "pyproject.toml").read_text())["project"]["version"]
+        prefix = f"kensa-{version}/"
+        for filename in (*PROJECT_FILES, *GOVERNANCE_FILES):
+            member = members[f"{prefix}{filename}"]
+            extracted = archive.extractfile(member)
+            assert extracted is not None
+            assert extracted.read() == (REPOSITORY / filename).read_bytes()
+
+    wheel = next(output.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        license_name = next(name for name in names if name.endswith(".dist-info/licenses/LICENSE"))
+        metadata = archive.read(metadata_name).decode()
+        assert "License-Expression: Apache-2.0" in metadata
+        assert "License-File: LICENSE" in metadata
+        assert (REPOSITORY / "README.md").read_text() in metadata
+        assert archive.read(license_name) == (REPOSITORY / "LICENSE").read_bytes()
 
 
 @pytest.mark.parametrize("target", sorted(hatch_build._TARGETS))
