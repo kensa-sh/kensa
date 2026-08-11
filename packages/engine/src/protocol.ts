@@ -34,6 +34,9 @@ const cancelRequest = z.strictObject({
   evaluation_id: z.string().min(1),
   reason: z.unknown(),
 });
+const resetRequest = z.strictObject({
+  type: z.literal("reset"),
+});
 
 export const requestEnvelopeSchema = z.strictObject({
   id: z.string().min(1),
@@ -43,6 +46,7 @@ export const requestEnvelopeSchema = z.strictObject({
     observeRequest,
     checkRequest,
     cancelRequest,
+    resetRequest,
   ]),
 });
 
@@ -69,6 +73,10 @@ const actionResponse = z.strictObject({
   type: z.literal("action"),
   action: z.enum(["invoke_agent", "evaluate_check"]),
   case_id: z.string().min(1),
+});
+const resetResponse = z.strictObject({
+  type: z.literal("reset"),
+  released: z.number().int().nonnegative(),
 });
 const completeEvaluationResponse = z
   .strictObject({
@@ -99,10 +107,17 @@ const cancelledEvaluationResponse = z
     case_id: z.string().min(1),
     reason: z.string().min(1),
     verdict: z.literal("error"),
+    observation: z.unknown().nullable(),
     failure: z.unknown(),
   })
   .superRefine((evaluation, context) => {
     validateCoreValue(() => parseJsonValue(evaluation.failure), context);
+    if (evaluation.observation !== null) {
+      validateCoreValue(
+        () => parseObservation(evaluation.observation),
+        context,
+      );
+    }
   });
 const resultResponse = z.strictObject({
   type: z.literal("result"),
@@ -115,6 +130,7 @@ const resultResponse = z.strictObject({
 export const responseSchema = z.discriminatedUnion("type", [
   handshakeResponse,
   actionResponse,
+  resetResponse,
   resultResponse,
 ]);
 export type EngineResponse = z.infer<typeof responseSchema>;
@@ -152,11 +168,13 @@ function validateCoreValue(
   try {
     validate();
   } catch (error) {
-    const validationError = error as CoreValidationError;
+    if (!(error instanceof CoreValidationError)) {
+      throw error;
+    }
     context.addIssue({
       code: "custom",
-      message: validationError.message,
-      params: { issues: validationError.issues },
+      message: error.message,
+      params: { issues: error.issues },
     });
   }
 }
