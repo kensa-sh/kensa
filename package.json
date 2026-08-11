@@ -10,7 +10,7 @@
     "build": "pnpm -r build",
     "build:python-wheel": "node scripts/build-engine-wheel.mjs",
     "check:core-platform": "pnpm --filter @kensa/core check:platform",
-    "format:check": "prettier --check \"packages/**/*.{ts,json}\" \"sdk/**/*.{ts,json}\" \"*.json\"",
+    "format:check": "prettier --check \"packages/**/*.{ts,json}\" \"sdk/typescript/**/*.{ts,json}\" \"*.json\"",
     "test": "pnpm -r test",
     "test:coverage": "pnpm -r test:coverage",
     "typecheck": "pnpm -r typecheck"
