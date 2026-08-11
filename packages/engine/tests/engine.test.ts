@@ -39,6 +39,12 @@ function message(id: string, request: Record<string, unknown>): string {
 const responses = JSON.parse(
   readFileSync(new URL("fixtures/responses.json", import.meta.url), "utf8"),
 ) as Record<string, unknown>;
+const traceView = JSON.parse(
+  readFileSync(
+    new URL("../../core/conformance/trace-view.json", import.meta.url),
+    "utf8",
+  ),
+) as Record<string, unknown>;
 
 function ready(engine: KensaEngine): void {
   const handshake = engine.processLine(
@@ -79,6 +85,12 @@ describe("KensaEngine", () => {
     expect(() =>
       responseSchema.parse({ type: "run_result", result: null }),
     ).toThrow(ZodError);
+    expect(() =>
+      responseSchema.parse({
+        type: "trace_views",
+        traces: [{ ...traceView, duration_ms: 99 }],
+      }),
+    ).toThrow();
     expect(() =>
       responseSchema.parse({
         ...(responses.cancelled as Record<string, unknown>),
@@ -320,6 +332,29 @@ describe("KensaEngine", () => {
         }),
       ),
     ).toEqual({ id: "run", ok: true, response: responses.run_result });
+  });
+
+  it("normalizes portable trace evidence through the core", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("traces", { type: "normalize_traces", traces: [] }),
+      ),
+    ).toEqual({ id: "traces", ok: true, response: responses.trace_views });
+    expect(
+      engine.processLine(
+        message("invalid-traces", {
+          type: "normalize_traces",
+          traces: [{ schema_version: "unknown" }],
+        }),
+      ),
+    ).toMatchObject({
+      id: "invalid-traces",
+      ok: false,
+      failure: { code: "invalid_message" },
+    });
   });
 
   it("fails closed on malformed, unversioned, and repeated requests", () => {

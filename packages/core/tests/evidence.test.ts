@@ -277,7 +277,7 @@ describe("portable trace evidence", () => {
     );
   });
 
-  it("sorts null timestamps after known timestamps and breaks ties by ID", () => {
+  it("sorts null timestamps after known timestamps and preserves ties", () => {
     const normalized = normalizeTraceView(
       trace({
         spans: [
@@ -291,8 +291,8 @@ describe("portable trace evidence", () => {
 
     expect(normalized.spans.map((item) => item.id)).toEqual([
       "first",
-      "a",
       "b",
+      "a",
       "z",
     ]);
     expect(

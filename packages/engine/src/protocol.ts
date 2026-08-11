@@ -5,6 +5,7 @@ import {
   canonicalJson,
   CoreValidationError,
   parseCheck,
+  normalizeTraceViews,
   parseObservation,
 } from "@kensa/core";
 
@@ -46,6 +47,10 @@ const buildRunRequest = z.strictObject({
   interruption: z.unknown(),
   trials: z.unknown(),
 });
+const normalizeTracesRequest = z.strictObject({
+  type: z.literal("normalize_traces"),
+  traces: z.unknown(),
+});
 
 export const requestEnvelopeSchema = z.strictObject({
   id: z.string().min(1),
@@ -57,6 +62,7 @@ export const requestEnvelopeSchema = z.strictObject({
     cancelRequest,
     resetRequest,
     buildRunRequest,
+    normalizeTracesRequest,
   ]),
 });
 
@@ -175,6 +181,22 @@ const runResultResponse = z
       }
     }, context);
   });
+const traceViewsResponse = z
+  .strictObject({
+    type: z.literal("trace_views"),
+    traces: z.array(z.unknown()),
+  })
+  .superRefine((response, context) => {
+    validateCoreValue(() => {
+      const normalized = normalizeTraceViews(response.traces);
+      if (canonicalJson(normalized) !== canonicalJson(response.traces)) {
+        throw new CoreValidationError(
+          "trace views contradict core normalization",
+          new z.ZodError([]),
+        );
+      }
+    }, context);
+  });
 
 export const responseSchema = z.discriminatedUnion("type", [
   handshakeResponse,
@@ -182,6 +204,7 @@ export const responseSchema = z.discriminatedUnion("type", [
   resetResponse,
   resultResponse,
   runResultResponse,
+  traceViewsResponse,
 ]);
 export type EngineResponse = z.infer<typeof responseSchema>;
 
