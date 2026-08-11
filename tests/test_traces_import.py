@@ -84,6 +84,16 @@ def test_python_accepts_shared_trace_view_conformance_fixture() -> None:
     traces_module._validate_trace_view_row(fixture, path=fixture_path, line_number=1)
 
 
+def test_typescript_redaction_proof_fixture_matches_python_contract() -> None:
+    fixture_path = (
+        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "redaction-proof.json"
+    )
+    proof = json.loads(fixture_path.read_text())
+
+    assert redact.safe_manifest(proof) is True
+    assert proof["ruleset_hash"] == RULESET_HASH
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 

@@ -4,15 +4,19 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildEvidenceRecord,
+  buildRedactedEvidenceRecord,
   CoreValidationError,
   KensaCoreError,
   normalizeTraceView,
   normalizeTraceViews,
   parseEvidenceRecord,
+  parseRedactedEvidenceRecord,
+  parseRedactionProof,
   parseTraceView,
   parseTraceViews,
   sourceIdentity,
   verifyEvidenceRecord,
+  verifyRedactedEvidenceRecord,
   type TraceView,
 } from "../src/index.js";
 
@@ -173,6 +177,48 @@ describe("portable trace evidence", () => {
     expect(record.trace).toEqual(normalizeTraceView(trace({ spans: [] })));
     expect(parseEvidenceRecord(record)).toEqual(record);
     expect(await verifyEvidenceRecord(record)).toEqual(record);
+  });
+
+  it("binds redacted evidence to the shared Python proof contract", async () => {
+    const proof = JSON.parse(
+      readFileSync(
+        new URL("../conformance/redaction-proof.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    const record = await buildRedactedEvidenceRecord(
+      trace({ spans: [] }),
+      proof,
+    );
+
+    expect(parseRedactionProof(proof)).toEqual(proof);
+    expect(record.schema_version).toBe("kensa.redacted_evidence.v1");
+    expect(record.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(parseRedactedEvidenceRecord(record)).toEqual(record);
+    expect(await verifyRedactedEvidenceRecord(record)).toEqual(record);
+  });
+
+  it("rejects unsafe and incorrectly bound redacted evidence", async () => {
+    const proof = JSON.parse(
+      readFileSync(
+        new URL("../conformance/redaction-proof.json", import.meta.url),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    const model = proof.model as Record<string, unknown>;
+    expect(() =>
+      parseRedactionProof({
+        ...proof,
+        model: { ...model, checksum_verified: false },
+      }),
+    ).toThrow(CoreValidationError);
+    const record = await buildRedactedEvidenceRecord(
+      trace({ spans: [] }),
+      proof,
+    );
+    await expect(
+      verifyRedactedEvidenceRecord({ ...record, digest: "0".repeat(64) }),
+    ).rejects.toThrow(KensaCoreError);
   });
 
   it("rejects malformed and incorrectly bound evidence records", async () => {

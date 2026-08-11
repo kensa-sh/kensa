@@ -4,6 +4,7 @@ import { KensaCoreError, parseInput } from "./errors.js";
 import {
   canonicalJson,
   digestJson,
+  jsonObjectSchema,
   jsonValueSchema,
   type JsonValue,
 } from "./json.js";
@@ -156,6 +157,35 @@ const evidenceRecordSchema = z.strictObject({
   identity: sourceIdentitySchema,
   trace: traceSchema,
 });
+export const REDACTION_RULESET_HASH =
+  "96332f6e9bdb07b0d837e733c393f3e4dd2ecd0b8e910fff06ba6266114ae422";
+const redactionProofSchema = z.strictObject({
+  version: z.literal("kensa.redactor.v2"),
+  mandatory: z.literal(true),
+  language: z.literal("en"),
+  value_redaction_applied: z.literal(true),
+  redaction_available: z.literal(true),
+  redacted_span_count: z.number().int().nonnegative(),
+  changed_value_count: z.number().int().nonnegative(),
+  secret_keys_redacted: z.boolean(),
+  trace_count: z.number().int().nonnegative(),
+  ruleset_hash: z.literal(REDACTION_RULESET_HASH),
+  pseudonymization: z.literal("instance-counter"),
+  entity_instance_counts: z.record(z.string(), z.number().int().nonnegative()),
+  detectors: jsonObjectSchema,
+  model: z.strictObject({
+    name: z.enum(["en_core_web_sm", "en_core_web_lg"]),
+    version: z.literal("3.8.0"),
+    checksum_verified: z.literal(true),
+  }),
+});
+const redactedEvidenceRecordSchema = z.strictObject({
+  schema_version: z.literal("kensa.redacted_evidence.v1"),
+  identity: sourceIdentitySchema,
+  redaction: redactionProofSchema,
+  trace: traceSchema,
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+});
 
 export type TraceStatus = (typeof traceStatuses)[number];
 export type TraceSource = z.infer<typeof traceSourceSchema>;
@@ -175,6 +205,16 @@ export interface EvidenceRecord {
   schema_version: "kensa.evidence.v1";
   identity: SourceIdentity;
   trace: TraceView;
+}
+
+export type RedactionProof = z.infer<typeof redactionProofSchema>;
+
+export interface RedactedEvidenceRecord {
+  schema_version: "kensa.redacted_evidence.v1";
+  identity: SourceIdentity;
+  redaction: RedactionProof;
+  trace: TraceView;
+  digest: string;
 }
 
 export function parseTraceView(input: unknown): TraceView {
@@ -198,6 +238,24 @@ export function parseEvidenceRecord(input: unknown): EvidenceRecord {
     evidenceRecordSchema,
     input,
     "evidence record violates the core contract",
+  );
+}
+
+export function parseRedactionProof(input: unknown): RedactionProof {
+  return parseInput(
+    redactionProofSchema,
+    input,
+    "redaction proof violates the core contract",
+  );
+}
+
+export function parseRedactedEvidenceRecord(
+  input: unknown,
+): RedactedEvidenceRecord {
+  return parseInput(
+    redactedEvidenceRecordSchema,
+    input,
+    "redacted evidence record violates the core contract",
   );
 }
 
@@ -261,6 +319,39 @@ export async function verifyEvidenceRecord(
     );
   }
   return { ...record, trace };
+}
+
+export async function buildRedactedEvidenceRecord(
+  traceInput: unknown,
+  proofInput: unknown,
+): Promise<RedactedEvidenceRecord> {
+  const trace = normalizeTraceView(traceInput);
+  const identity = await sourceIdentity(trace);
+  const redaction = parseRedactionProof(proofInput);
+  return {
+    schema_version: "kensa.redacted_evidence.v1",
+    identity,
+    redaction,
+    trace,
+    digest: await digestJson({ identity, redaction, trace }),
+  };
+}
+
+export async function verifyRedactedEvidenceRecord(
+  input: unknown,
+): Promise<RedactedEvidenceRecord> {
+  const record = parseRedactedEvidenceRecord(input);
+  const expected = await buildRedactedEvidenceRecord(
+    record.trace,
+    record.redaction,
+  );
+  if (canonicalJson(record) !== canonicalJson(expected)) {
+    throw new KensaCoreError(
+      "invalid_input",
+      "redacted evidence proof does not match its trace",
+    );
+  }
+  return expected;
 }
 
 function normalizeSpan(span: TraceSpan): TraceSpan {
