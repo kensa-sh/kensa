@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
@@ -34,10 +35,12 @@ class _Stream:
         self,
         *lines: str,
         write_error: BaseException | None = None,
+        read_error: BaseException | None = None,
         close_error: OSError | None = None,
     ) -> None:
         self.lines = list(lines)
         self.write_error = write_error
+        self.read_error = read_error
         self.close_error = close_error
         self.writes: list[str] = []
         self.closed = False
@@ -52,6 +55,8 @@ class _Stream:
         return None
 
     def readline(self) -> str:
+        if self.read_error is not None:
+            raise self.read_error
         return self.lines.pop(0) if self.lines else ""
 
     def close(self) -> None:
@@ -518,7 +523,10 @@ def test_engine_trace_preserves_nanosecond_timestamps_as_decimal_strings() -> No
     }
     original: dict[str, Any] = {
         "spans": [original_span, "ignored"],
-        "agent_runs": [{"event": {"timestamp": 1_786_430_000_000_000_001}}],
+        "agent_runs": [
+            {"event": {"timestamp": 1_786_430_000_000_000_001}},
+            {"event": {"timestamp": 1}},
+        ],
     }
 
     wire = _engine_trace(original)
@@ -526,6 +534,7 @@ def test_engine_trace_preserves_nanosecond_timestamps_as_decimal_strings() -> No
     assert wire["spans"][0]["start_time_unix_nano"] == "1786430000000000000"
     assert wire["spans"][0]["end_time_unix_nano"] is None
     assert wire["agent_runs"][0]["event"]["timestamp"] == "1786430000000000001"
+    assert wire["agent_runs"][1]["event"]["timestamp"] == "1"
     assert original_span["start_time_unix_nano"] == 1_786_430_000_000_000_000
     assert _engine_trace({"spans": None}) == {"spans": None}
 
@@ -546,6 +555,8 @@ def test_wire_json_value_preserves_types_and_rejects_lossy_values() -> None:
         _wire_json_value({"bytes": b"opaque"})
     with pytest.raises(ValueError, match="non-finite"):
         _wire_json_value({"value": float("nan")})
+    with pytest.raises(ValueError, match="duplicate keys"):
+        _wire_json_value({1: "integer", "1": "string"})
 
 
 def test_engine_client_rejects_startup_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -675,7 +686,7 @@ def test_engine_client_rejects_invalid_protocol_actions(
 ) -> None:
     client = EngineClient()
     iterator = iter(responses)
-    monkeypatch.setattr(client, "_request", lambda request: next(iterator))
+    monkeypatch.setattr(client, "_request_locked", lambda request, **kwargs: next(iterator))
 
     def invoke() -> None:
         if method == "start":
@@ -700,7 +711,7 @@ def test_engine_client_uses_authoritative_terminal_verdict(
             {"type": "result", "evaluation": {"phase": "complete", "verdict": "pass"}},
         ]
     )
-    monkeypatch.setattr(client, "_request", lambda request: next(responses))
+    monkeypatch.setattr(client, "_request_locked", lambda request, **kwargs: next(responses))
 
     completion = client.complete_case(
         "eval",
@@ -752,6 +763,102 @@ def test_passing_test_engine_finalize_failure_is_classified(
     assert recorded[0].code == "crash"
     assert isinstance(outcome.exception, pytest.fail.Exception)
     assert str(outcome.exception) == "Kensa engine finalization failed: stopped"
+
+
+def test_engine_nonpass_verdict_fails_passing_pytest_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = TrialFailure(
+        category="judge",
+        kind="threshold",
+        message="score was below threshold",
+    )
+
+    class Runtime:
+        nodeid = "test_eval"
+
+        def finalize_engine(self, status: str, original: Any) -> tuple[str, TrialFailure]:
+            del status, original
+            return "fail", failure
+
+        def metadata(self, **values: Any) -> Any:
+            return values
+
+    class Outcome:
+        excinfo = None
+
+        def __init__(self) -> None:
+            self.exception: BaseException | None = None
+
+        def force_exception(self, exception: BaseException) -> None:
+            self.exception = exception
+
+    state = SimpleNamespace(set_active_phase=lambda *_: None)
+    item = SimpleNamespace(config=object(), nodeid="test_eval")
+    recorded: list[Any] = []
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pytest_plugin, "_runtime_for_item", lambda _: Runtime())
+        patcher.setattr(pytest_plugin, "_state", lambda _: state)
+        patcher.setattr(
+            pytest_plugin, "_record_trial", lambda _config, value: recorded.append(value)
+        )
+        hook = pytest_plugin.pytest_runtest_call(cast(Any, item))
+        next(hook)
+        outcome = Outcome()
+        with pytest.raises(StopIteration):
+            hook.send(outcome)
+
+    assert recorded[0]["status"] == "fail"
+    assert recorded[0]["failure"] == failure
+    assert isinstance(outcome.exception, pytest.fail.Exception)
+    assert str(outcome.exception) == failure.message
+
+
+def test_engine_pass_on_raising_pytest_item_marks_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        nodeid = "test_eval"
+
+        def finalize_engine(self, status: str, failure: Any) -> tuple[str, None]:
+            del status, failure
+            return "pass", None
+
+        def metadata(self, **values: Any) -> Any:
+            return values
+
+    class Outcome:
+        excinfo = (None, AssertionError("failed locally"), None)
+
+        def force_exception(self, exception: BaseException) -> None:
+            raise AssertionError(f"unexpected replacement: {exception}")
+
+    interruptions: list[tuple[Any, ...]] = []
+    state = SimpleNamespace(
+        set_active_phase=lambda *_: None,
+        mark_incomplete=lambda *args, **kwargs: interruptions.append((*args, kwargs)),
+    )
+    item = SimpleNamespace(config=object(), nodeid="test_eval")
+    recorded: list[Any] = []
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pytest_plugin, "_runtime_for_item", lambda _: Runtime())
+        patcher.setattr(pytest_plugin, "_state", lambda _: state)
+        patcher.setattr(
+            pytest_plugin, "_record_trial", lambda _config, value: recorded.append(value)
+        )
+        hook = pytest_plugin.pytest_runtest_call(cast(Any, item))
+        next(hook)
+        with pytest.raises(StopIteration):
+            hook.send(Outcome())
+
+    assert recorded[0]["status"] == "pass"
+    assert interruptions == [
+        (
+            "verdict_mismatch",
+            "Kensa engine passed a trial whose pytest call raised",
+            {"nodeid": "test_eval"},
+        )
+    ]
 
 
 def test_engine_client_forces_stuck_process_shutdown() -> None:
@@ -839,6 +946,110 @@ def test_engine_client_close_suppresses_invalid_cancellation() -> None:
     assert client._active_evaluations == set()
 
 
+def test_engine_client_close_reports_reset_failure() -> None:
+    client = _raw_client(_Process())
+    client._handshake_complete = True
+
+    shutdown_error = client.close()
+
+    assert shutdown_error is not None
+    assert shutdown_error.code == "crash"
+    assert client._closed
+
+
+def test_engine_client_close_reaps_after_unexpected_handshake_error() -> None:
+    process = _Process()
+    process.stdout = _Stream(read_error=RuntimeError("unexpected"))
+    client = _raw_client(process)
+    client._handshake_complete = True
+
+    client.close()
+
+    assert client._closed
+    assert process.stdin is not None
+    assert process.stdin.closed
+    assert process.wait_calls == 1
+
+
+def test_engine_client_close_reaps_before_reraising_interrupt() -> None:
+    process = _Process()
+    process.stdout = _Stream(read_error=KeyboardInterrupt())
+    client = _raw_client(process)
+    client._handshake_complete = True
+
+    with pytest.raises(KeyboardInterrupt):
+        client.close()
+
+    assert client._closed
+    assert process.stdin is not None
+    assert process.stdin.closed
+    assert process.wait_calls == 1
+
+
+def test_engine_client_close_bounds_unresponsive_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = tmp_path / "unresponsive-engine.py"
+    engine.write_text(
+        """
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    envelope = json.loads(line)
+    request = envelope["request"]
+    if request["type"] == "handshake":
+        response = {
+            "type": "handshake",
+            "protocol_version": "kensa.engine.v1",
+            "engine_version": "test",
+        }
+    elif request["type"] == "start_case":
+        response = {"type": "action", "action": "invoke_agent", "case_id": "one"}
+    else:
+        time.sleep(60)
+        continue
+    print(json.dumps({"id": envelope["id"], "ok": True, "response": response}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("kensa.engine._RESPONSE_TIMEOUT_S", 0.05)
+    client = EngineClient((sys.executable, str(engine)))
+    client.start_case("active", {"id": "one", "input": None, "metadata": {}})
+
+    started = time.monotonic()
+    client.close()
+
+    assert time.monotonic() - started < 2
+    assert client._closed
+    assert client._process.poll() is not None
+
+
+def test_engine_client_cancel_all_attempts_every_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _raw_client(_Process())
+    client._active_evaluations = {"first", "second"}
+    attempted: list[str] = []
+
+    def cancel(evaluation_id: str, reason: str) -> None:
+        del reason
+        attempted.append(evaluation_id)
+        if evaluation_id == "first":
+            raise KensaEngineError("failed", code="transport")
+        client._active_evaluations.discard(evaluation_id)
+
+    monkeypatch.setattr(client, "_cancel_locked", cancel)
+
+    with pytest.raises(KensaEngineError, match="failed") as exc_info:
+        client.cancel_all("session ended")
+
+    assert exc_info.value.code == "transport"
+    assert set(attempted) == {"first", "second"}
+
+
 @pytest.mark.parametrize(
     ("process", "message", "code"),
     [
@@ -846,6 +1057,11 @@ def test_engine_client_close_suppresses_invalid_cancellation() -> None:
         (
             _Process(stdin=_Stream(write_error=BrokenPipeError("closed"))),
             "Could not write",
+            "transport",
+        ),
+        (
+            _Process(),
+            "Could not read",
             "transport",
         ),
         (_Process(), "stopped before responding", "crash"),
@@ -867,6 +1083,8 @@ def test_engine_client_rejects_transport_failures(
     client = _raw_client(process)
     if message == "pipes are unavailable":
         process.stdin = None
+    if message == "Could not read":
+        process.stdout = _Stream(read_error=OSError("closed"))
     request = (
         {"type": "test", "unsafe": 9_007_199_254_740_992}
         if code == "invalid_message"
@@ -939,6 +1157,11 @@ def test_session_engine_close_is_non_throwing_and_terminal() -> None:
 
     assert engine.cancelled
     assert engine.closed
+    assert state.complete is False
+    assert state.interruption == {
+        "kind": "engine_shutdown",
+        "message": "cancellation failed: cancel failed; shutdown failed: close failed",
+    }
     with pytest.raises(KensaEngineError, match="session is closed") as exc_info:
         _ = state.engine
     assert exc_info.value.code == "closed"
@@ -1026,6 +1249,37 @@ def test_runtime_rejects_lossy_engine_evidence_as_case_failure() -> None:
             kensa_case(id="unsafe", input=9_007_199_254_740_992),
             lambda: None,
         )
+
+
+def test_runtime_classifies_invalid_trace_evidence_as_case_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubEngine:
+        completed = False
+
+        def start_case(self, evaluation_id: str, case: Any) -> None:
+            del evaluation_id, case
+
+        def complete_case(self, *_: Any, **__: Any) -> EngineCompletion:
+            self.completed = True
+            return EngineCompletion(verdict="pass", failure=None)
+
+    engine = StubEngine()
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test-trace",
+        group_id="test-trace",
+        case_id="test-trace",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    runtime.run_case(kensa_case(id="trace", input=None), lambda: "ok")
+    monkeypatch.setattr(runtime.trace, "to_dict", lambda: {"unsafe": b"bytes"})
+
+    with pytest.raises(KensaCaseError, match="trial evidence must be JSON-serializable"):
+        runtime.finalize_engine("pass", None)
+
+    assert not engine.completed
 
 
 def test_runtime_uses_and_validates_engine_terminal_failure() -> None:

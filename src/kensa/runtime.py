@@ -771,15 +771,15 @@ class KensaTrialRuntime:
             and failure.category in {"agent", "simulator"}
             else None
         )
-        observation = {
-            "output": self.output if self.output_recorded else None,
-            "output_recorded": self.output_recorded,
-            "trace": _engine_trace(self.trace.to_dict()),
-            "failure": observation_failure,
-        }
         from kensa.engine import KensaEngineError, _wire_json_value
 
         try:
+            observation = {
+                "output": self.output if self.output_recorded else None,
+                "output_recorded": self.output_recorded,
+                "trace": _engine_trace(self.trace.to_dict()),
+                "failure": observation_failure,
+            }
             observation = cast(dict[str, Any], _wire_json_value(observation))
             if failure_payload is not None:
                 failure_payload = cast(dict[str, Any], _wire_json_value(failure_payload))

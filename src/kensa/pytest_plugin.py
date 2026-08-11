@@ -7,7 +7,6 @@ import os
 import re
 import time
 from collections import Counter
-from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -318,10 +317,23 @@ class KensaSessionState:
         self._engine_closed = True
         if engine is None:
             return
-        with suppress(Exception):
+        failures: list[str] = []
+        try:
             engine.cancel_all(reason)
-        with suppress(Exception):
-            engine.close()
+        except Exception as exc:
+            failures.append(f"cancellation failed: {exc}")
+        try:
+            shutdown_error = engine.close()
+        except Exception as exc:
+            failures.append(f"shutdown failed: {exc}")
+        else:
+            if shutdown_error is not None:
+                failures.append(f"shutdown failed: {shutdown_error}")
+        if failures:
+            self.mark_incomplete(
+                "engine_shutdown",
+                "; ".join(failures),
+            )
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -604,7 +616,8 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
         yield
         return
 
-    _state(item.config).set_active_phase(item.nodeid, "call")
+    state = _state(item.config)
+    state.set_active_phase(item.nodeid, "call")
     start = time.monotonic()
     outcome = yield
     duration_ms = (time.monotonic() - start) * 1000
@@ -623,12 +636,15 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
             item.config,
             runtime.metadata(status=status, duration_ms=duration_ms, failure=failure),
         )
+        if status != "pass":
+            message = failure.message if failure is not None else f"Kensa verdict: {status}"
+            outcome.force_exception(pytest.fail.Exception(message, pytrace=False))
         return
 
     exc = excinfo[1]
-    status, failure = _classify_exception(exc, phase="call")
+    local_status, local_failure = _classify_exception(exc, phase="call")
     try:
-        status, failure = runtime.finalize_engine(status, failure)
+        status, failure = runtime.finalize_engine(local_status, local_failure)
     except Exception as engine_error:
         _record_engine_failure(item, runtime, duration_ms, engine_error)
         outcome.force_exception(
@@ -638,6 +654,12 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
             )
         )
         return
+    if status == "pass":
+        state.mark_incomplete(
+            "verdict_mismatch",
+            "Kensa engine passed a trial whose pytest call raised",
+            nodeid=runtime.nodeid,
+        )
     _record_trial(
         item.config,
         runtime.metadata(
@@ -799,13 +821,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
         pytest.ExitCode.USAGE_ERROR,
     }:
         state.mark_incomplete("pytest_error", f"pytest exited with status {int(exitstatus)}")
+    state.close_engine("pytest session finished")
     state.trials.sort(key=trial_sort_key)
     state.aggregates = aggregate_trials(state.trials)
     if state.write_artifacts and (state.trials or state.control is not None):
         _write_artifacts(state)
     if any(aggregate.verdict != "pass" for aggregate in state.aggregates):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
-    state.close_engine("pytest session finished")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
