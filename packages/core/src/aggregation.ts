@@ -6,7 +6,7 @@ import {
   parseFailure,
   type EvaluationFailure,
 } from "./evaluation.js";
-import { parseJsonValue, type JsonValue } from "./json.js";
+import { canonicalJson, parseJsonValue, type JsonValue } from "./json.js";
 
 const trialStatuses = [
   "pass",
@@ -81,6 +81,15 @@ const buildRunInputSchema = z.strictObject({
   complete: z.boolean(),
   interruption: interruptionSchema,
   trials: trialsSchema,
+});
+const runResultSchema = z.strictObject({
+  schema_version: z.literal("kensa.result.v1"),
+  run_id: z.string().min(1),
+  complete: z.boolean(),
+  interruption: interruptionSchema,
+  trials: trialsSchema,
+  aggregates: z.array(jsonSchema),
+  summary: jsonSchema,
 });
 
 export type Trial = z.infer<typeof trialSchema>;
@@ -240,6 +249,27 @@ export function buildRunResult(input: {
     aggregates: aggregateTrials(trials),
     summary: summarizeTrials(trials),
   };
+}
+
+export function verifyRunResult(input: unknown): RunResult {
+  const result = parseInput(
+    runResultSchema,
+    input,
+    "run result violates the core contract",
+  );
+  const expected = buildRunResult({
+    run_id: result.run_id,
+    complete: result.complete,
+    interruption: result.interruption,
+    trials: result.trials,
+  });
+  if (canonicalJson(result) !== canonicalJson(expected)) {
+    throw new KensaCoreError(
+      "invalid_input",
+      "run result does not match its canonical aggregation",
+    );
+  }
+  return expected;
 }
 
 function aggregateGroup(groupId: string, group: Trial[]): TrialAggregate[] {

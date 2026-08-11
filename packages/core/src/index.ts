@@ -43,6 +43,7 @@ export {
   buildRunResult,
   parseTrials,
   summarizeTrials,
+  verifyRunResult,
   type AggregateVerdict,
   type CostLatencySummary,
   type ReliabilityCohort,
@@ -92,3 +93,19 @@ export {
   type InspectStatus,
   type TraceSummary,
 } from "./mining.js";
+export {
+  buildSyncBatch,
+  buildSyncReceipt,
+  previewSync,
+  verifySyncBatch,
+  verifySyncPlan,
+  verifySyncReceipt,
+  type EvidenceSyncArtifact,
+  type ResultSyncArtifact,
+  type SyncArtifact,
+  type SyncBatch,
+  type SyncConflict,
+  type SyncPlan,
+  type SyncPointer,
+  type SyncReceipt,
+} from "./sync.js";
