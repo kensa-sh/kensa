@@ -1,7 +1,12 @@
 import { z } from "zod";
 
 import { KensaCoreError, parseInput } from "./errors.js";
-import { jsonValueSchema, type JsonValue } from "./json.js";
+import {
+  canonicalJson,
+  jsonObjectSchema,
+  jsonValueSchema,
+  type JsonValue,
+} from "./json.js";
 
 export const failureCategories = [
   "agent",
@@ -17,13 +22,13 @@ const failureSchema = z.strictObject({
   category: z.enum(failureCategories),
   kind: z.string().trim().min(1),
   message: z.string().trim().min(1),
-  evidence: z.record(z.string(), jsonValueSchema),
+  evidence: jsonObjectSchema,
 });
 
 const caseSchema = z.strictObject({
   id: z.string().trim().min(1),
   input: jsonValueSchema,
-  metadata: z.record(z.string(), jsonValueSchema),
+  metadata: jsonObjectSchema,
 });
 
 const traceSchema = z
@@ -130,28 +135,30 @@ export type EvaluationCheck = z.infer<typeof checkSchema>;
 export type EvaluationVerdict = "pass" | "fail" | "error" | "skipped";
 export type EvaluationAction = "invoke_agent" | "evaluate_check";
 
-interface AwaitingObservation {
+export interface AwaitingObservation {
   phase: "awaiting_observation";
   case: EvaluationCase;
 }
 
-interface AwaitingCheck {
+export interface AwaitingCheck {
   phase: "awaiting_check";
   case: EvaluationCase;
   observation: EvaluationObservation;
 }
 
-interface Complete {
+export interface Complete {
   phase: "complete";
   case: EvaluationCase;
   observation: EvaluationObservation;
   check: EvaluationCheck;
+  failure: EvaluationFailure | null;
   verdict: EvaluationVerdict;
 }
 
-interface Cancelled {
+export interface Cancelled {
   phase: "cancelled";
   case: EvaluationCase;
+  observation: EvaluationObservation | null;
   reason: string;
   failure: EvaluationFailure;
   verdict: "error";
@@ -200,6 +207,10 @@ export function startCase(input: unknown): AwaitingObservation {
 }
 
 export function observeCase(
+  state: AwaitingObservation,
+  input: unknown,
+): AwaitingCheck;
+export function observeCase(
   state: EvaluationState,
   input: unknown,
 ): AwaitingCheck {
@@ -215,6 +226,7 @@ export function observeCase(
   };
 }
 
+export function checkCase(state: AwaitingCheck, input: unknown): Complete;
 export function checkCase(state: EvaluationState, input: unknown): Complete {
   if (state.phase !== "awaiting_check") {
     throw new EvaluationTransitionError(
@@ -227,15 +239,28 @@ export function checkCase(state: EvaluationState, input: unknown): Complete {
       "a failed observation requires an error check outcome",
     );
   }
+  if (
+    state.observation.failure !== null &&
+    canonicalJson(state.observation.failure) !== canonicalJson(check.failure)
+  ) {
+    throw new EvaluationTransitionError(
+      "observation and check failures must identify the same failure",
+    );
+  }
   return {
     phase: "complete",
     case: state.case,
     observation: state.observation,
     check,
+    failure: state.observation.failure ?? check.failure,
     verdict: verdictFor(check.outcome),
   };
 }
 
+export function cancelCase(
+  state: AwaitingObservation | AwaitingCheck,
+  input: unknown,
+): Cancelled;
 export function cancelCase(state: EvaluationState, input: unknown): Cancelled {
   if (state.phase === "complete" || state.phase === "cancelled") {
     throw new EvaluationTransitionError(
@@ -250,6 +275,7 @@ export function cancelCase(state: EvaluationState, input: unknown): Cancelled {
   return {
     phase: "cancelled",
     case: state.case,
+    observation: state.phase === "awaiting_check" ? state.observation : null,
     reason,
     verdict: "error",
     failure: {
