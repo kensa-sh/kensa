@@ -1,0 +1,26 @@
+[
+  {
+    "name": "recursive ordering",
+    "input": { "z": 1, "a": { "y": true, "x": [2, 1] } },
+    "canonical": "{\"a\":{\"x\":[2,1],\"y\":true},\"z\":1}",
+    "sha256": "e172c61f22679ed2ead60852b556db14e27afe5de0bc09bfddf2c5b9b68f78ac"
+  },
+  {
+    "name": "unicode code units",
+    "input": { "é": "nfc", "é": "nfd" },
+    "canonical": "{\"é\":\"nfd\",\"é\":\"nfc\"}",
+    "sha256": "2571d7f8a735ecac7c10838f25335b0a0a2f665ebc75a5bd3398c77af13efd98"
+  },
+  {
+    "name": "prototype-shaped keys",
+    "input": { "__proto__": { "safe": true }, "constructor": 1 },
+    "canonical": "{\"__proto__\":{\"safe\":true},\"constructor\":1}",
+    "sha256": "80285ec0409eb6745d7083a8c7c69142c788b639c1fe48965c51845534fc5f0e"
+  },
+  {
+    "name": "interoperable numbers",
+    "input": { "null": null, "array": [-0, 1e-7, 9007199254740991] },
+    "canonical": "{\"array\":[0,1e-7,9007199254740991],\"null\":null}",
+    "sha256": "2072e65a070a2541aec35bc168276d00ae814b3de545f29c81c1eeef2bf134f1"
+  }
+]

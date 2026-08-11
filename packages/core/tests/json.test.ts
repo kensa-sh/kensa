@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, digestJson, jsonValueSchema } from "../src/index.js";
+import {
+  canonicalJson,
+  CoreValidationError,
+  digestJson,
+  parseJsonValue,
+} from "../src/index.js";
 
 describe("canonical JSON", () => {
   it("sorts object keys recursively without reordering arrays", () => {
@@ -22,15 +27,36 @@ describe("canonical JSON", () => {
   });
 
   it("rejects unsafe JSON values", () => {
-    expect(jsonValueSchema.safeParse(undefined).success).toBe(false);
-    expect(jsonValueSchema.safeParse(Number.POSITIVE_INFINITY).success).toBe(
-      false,
+    expect(() => parseJsonValue(undefined)).toThrow(CoreValidationError);
+    expect(() => parseJsonValue(Number.POSITIVE_INFINITY)).toThrow(
+      CoreValidationError,
     );
-    expect(jsonValueSchema.safeParse(9_007_199_254_740_992).success).toBe(
-      false,
+    expect(() => parseJsonValue(9_007_199_254_740_992)).toThrow(
+      CoreValidationError,
     );
-    expect(() => canonicalJson(undefined)).toThrow();
-    expect(() => canonicalJson(new Date())).toThrow();
-    expect(() => canonicalJson(9_007_199_254_740_992)).toThrow();
+    expect(() => canonicalJson(undefined)).toThrow(CoreValidationError);
+    expect(() => canonicalJson(new Date())).toThrow(CoreValidationError);
+    expect(() => canonicalJson(9_007_199_254_740_992)).toThrow(
+      CoreValidationError,
+    );
+  });
+
+  it("preserves interoperable numeric boundaries", () => {
+    expect(canonicalJson(Number.MAX_SAFE_INTEGER)).toBe("9007199254740991");
+    expect(canonicalJson(-0)).toBe("0");
+    expect(canonicalJson(1e-7)).toBe("1e-7");
+  });
+
+  it("preserves prototype-shaped keys", () => {
+    const value = JSON.parse('{"__proto__":{"safe":true},"constructor":1}');
+    expect(canonicalJson(value)).toBe(
+      '{"__proto__":{"safe":true},"constructor":1}',
+    );
+  });
+
+  it("rejects cyclic objects", () => {
+    const value: Record<string, unknown> = {};
+    value.self = value;
+    expect(() => parseJsonValue(value)).toThrow(CoreValidationError);
   });
 });
