@@ -4,6 +4,7 @@ import {
   cancelCase,
   checkCase,
   EvaluationTransitionError,
+  nextAction,
   observeCase,
   startCase,
 } from "../src/index.js";
@@ -26,12 +27,14 @@ const trace = {
 describe("evaluation transitions", () => {
   it("derives a passing verdict after an observation and check", () => {
     const started = startCase(testCase);
+    expect(nextAction(started)).toBe("invoke_agent");
     const observed = observeCase(started, {
       output: "hello",
       output_recorded: true,
       trace,
       failure: null,
     });
+    expect(nextAction(observed)).toBe("evaluate_check");
     const complete = checkCase(observed, {
       id: "pytest",
       status: "pass",
@@ -40,6 +43,7 @@ describe("evaluation transitions", () => {
 
     expect(complete.verdict).toBe("pass");
     expect(complete.observation.output).toBe("hello");
+    expect(nextAction(complete)).toBeNull();
   });
 
   it.each(["fail", "error", "skipped"] as const)(
@@ -125,6 +129,7 @@ describe("evaluation transitions", () => {
       phase: "cancelled",
       reason: "pytest stopped",
     });
+    expect(nextAction(cancelled)).toBeNull();
     expect(() => cancelCase(cancelled, "again")).toThrow(
       EvaluationTransitionError,
     );
