@@ -1,0 +1,139 @@
+import {
+  cancelCase,
+  checkCase,
+  EvaluationTransitionError,
+  observeCase,
+  startCase,
+  type EvaluationState,
+} from "@kensa/core";
+import { ZodError } from "zod";
+
+import {
+  ENGINE_VERSION,
+  PROTOCOL_VERSION,
+  requestEnvelopeSchema,
+  type EngineFailure,
+  type EngineRequest,
+  type ResponseEnvelope,
+} from "./protocol.js";
+
+export class KensaEngine {
+  readonly #evaluations = new Map<string, EvaluationState>();
+  #handshakeComplete = false;
+
+  processLine(line: string): ResponseEnvelope {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      return failure(null, "invalid_message", "message is not valid JSON");
+    }
+    const requestId = requestIdFrom(raw);
+    try {
+      const envelope = requestEnvelopeSchema.parse(raw);
+      if (!this.#handshakeComplete && envelope.request.type !== "handshake") {
+        return failure(envelope.id, "invalid_transition", "handshake must be the first request");
+      }
+      return { id: envelope.id, ok: true, response: this.#dispatch(envelope.request) };
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return failure(requestId, "invalid_message", "message violates the engine contract", {
+          issues: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
+        });
+      }
+      if (error instanceof EvaluationTransitionError) {
+        return failure(requestId, "invalid_transition", error.message);
+      }
+      if (error instanceof UnknownEvaluationError || error instanceof VersionMismatchError) {
+        return failure(requestId, error.code, error.message);
+      }
+      return failure(requestId, "internal", errorMessage(error));
+    }
+  }
+
+  #dispatch(request: EngineRequest): Record<string, unknown> {
+    switch (request.type) {
+      case "handshake":
+        if (this.#handshakeComplete) {
+          throw new EvaluationTransitionError("handshake has already completed");
+        }
+        if (request.protocol_version !== PROTOCOL_VERSION) {
+          throw new VersionMismatchError(request.protocol_version);
+        }
+        this.#handshakeComplete = true;
+        return {
+          type: "handshake",
+          protocol_version: PROTOCOL_VERSION,
+          engine_version: ENGINE_VERSION,
+        };
+      case "start_case": {
+        if (this.#evaluations.has(request.evaluation_id)) {
+          throw new EvaluationTransitionError(
+            `evaluation ${request.evaluation_id} has already started`,
+          );
+        }
+        const state = startCase(request.case);
+        this.#evaluations.set(request.evaluation_id, state);
+        return { type: "action", action: "invoke_agent", case_id: state.case.id };
+      }
+      case "observe": {
+        const state = this.#evaluation(request.evaluation_id);
+        const observed = observeCase(state, request.observation);
+        this.#evaluations.set(request.evaluation_id, observed);
+        return { type: "action", action: "evaluate_check", case_id: observed.case.id };
+      }
+      case "check": {
+        const state = this.#evaluation(request.evaluation_id);
+        const complete = checkCase(state, request.check);
+        this.#evaluations.set(request.evaluation_id, complete);
+        return { type: "result", evaluation: complete };
+      }
+      case "cancel": {
+        const state = this.#evaluation(request.evaluation_id);
+        const cancelled = cancelCase(state, request.reason);
+        this.#evaluations.set(request.evaluation_id, cancelled);
+        return { type: "result", evaluation: cancelled };
+      }
+    }
+  }
+
+  #evaluation(id: string): EvaluationState {
+    const state = this.#evaluations.get(id);
+    if (state === undefined) {
+      throw new UnknownEvaluationError(id);
+    }
+    return state;
+  }
+}
+
+class UnknownEvaluationError extends Error {
+  readonly code = "unknown_evaluation" as const;
+}
+
+class VersionMismatchError extends Error {
+  readonly code = "version_mismatch" as const;
+
+  constructor(received: string) {
+    super(`unsupported protocol version ${received}; expected ${PROTOCOL_VERSION}`);
+  }
+}
+
+function failure(
+  id: string | null,
+  code: EngineFailure["code"],
+  message: string,
+  details: Record<string, unknown> = {},
+): ResponseEnvelope {
+  return { id, ok: false, failure: { code, message, details } };
+}
+
+function requestIdFrom(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || !("id" in value)) {
+    return null;
+  }
+  return typeof value.id === "string" ? value.id : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown engine error";
+}
