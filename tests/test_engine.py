@@ -567,6 +567,66 @@ def test_engine_trace_preserves_nanosecond_timestamps_as_decimal_strings() -> No
     assert _engine_trace({"spans": None}) == {"spans": None}
 
 
+def test_engine_build_run_preserves_nanosecond_timestamps_as_decimal_strings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = EngineClient()
+    requests: list[dict[str, Any]] = []
+
+    def request(payload: dict[str, Any]) -> dict[str, Any]:
+        requests.append(payload)
+        return {"type": "run_result", "result": {"run_id": "run"}}
+
+    monkeypatch.setattr(client, "_request", request)
+
+    result = client.build_run(
+        run_id="run",
+        complete=True,
+        interruption=None,
+        trials=[
+            {
+                "trace": {
+                    "spans": [
+                        {
+                            "start_time_unix_nano": 1_786_430_000_000_000_000,
+                            "end_time_unix_nano": 1_786_430_000_000_000_001,
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    assert result == {"run_id": "run"}
+    spans = requests[0]["trials"][0]["trace"]["spans"]
+    assert spans[0]["start_time_unix_nano"] == "1786430000000000000"
+    assert spans[0]["end_time_unix_nano"] == "1786430000000000001"
+    client.close()
+
+
+def test_engine_client_rejects_invalid_run_result_and_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = EngineClient()
+    monkeypatch.setattr(client, "_request", lambda payload: {"type": "wrong"})
+    with pytest.raises(KensaEngineError, match="invalid run result"):
+        client.build_run(
+            run_id="run",
+            complete=True,
+            interruption=None,
+            trials=[],
+        )
+
+    monkeypatch.setattr(
+        client,
+        "_request_locked",
+        lambda payload: {"type": "reset", "released": True},
+    )
+    with pytest.raises(KensaEngineError, match="invalid reset"):
+        client.reset()
+    client.close()
+
+
 def test_wire_json_value_preserves_types_and_rejects_lossy_values() -> None:
     assert _wire_json_value(
         {
@@ -1193,6 +1253,27 @@ def test_session_engine_close_is_non_throwing_and_terminal() -> None:
     with pytest.raises(KensaEngineError, match="session is closed") as exc_info:
         _ = state.engine
     assert exc_info.value.code == "closed"
+
+
+def test_session_engine_close_records_reported_shutdown_error() -> None:
+    class StubEngine:
+        def cancel_all(self, reason: str) -> None:
+            del reason
+
+        def close(self) -> KensaEngineError:
+            return KensaEngineError("engine reported failure", code="shutdown")
+
+    config = SimpleNamespace(getoption=lambda name: None)
+    state = pytest_plugin.KensaSessionState(cast(Any, config))
+    state._engine = cast(Any, StubEngine())
+    state._engine_resolved = True
+
+    state.close_engine()
+
+    assert state.interruption == {
+        "kind": "engine_shutdown",
+        "message": "shutdown failed: engine reported failure",
+    }
 
 
 def test_runtime_rejects_non_json_engine_input_and_reuses_verdict() -> None:

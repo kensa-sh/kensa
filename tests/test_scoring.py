@@ -402,6 +402,93 @@ def test_aggregate_trials_excludes_skipped_trials() -> None:
     assert aggregate_trials([skipped]) == []
 
 
+@pytest.mark.parametrize(
+    ("trials", "verdict"),
+    [
+        (
+            [
+                TrialMetadata(
+                    nodeid="timeout",
+                    group_id="group",
+                    case_id="case",
+                    trial_index=1,
+                    configured_trials=1,
+                    status="fail",
+                    failure=TrialFailure(
+                        category="agent",
+                        kind="timeout",
+                        message="timed out",
+                    ),
+                )
+            ],
+            "error",
+        ),
+        (
+            [
+                TrialMetadata(
+                    nodeid="partial",
+                    group_id="group",
+                    case_id="case",
+                    trial_index=1,
+                    configured_trials=2,
+                    status="pass",
+                )
+            ],
+            "partial",
+        ),
+        (
+            [
+                TrialMetadata(
+                    nodeid="failed",
+                    group_id="group",
+                    case_id="case",
+                    trial_index=1,
+                    configured_trials=1,
+                    status="fail",
+                    failure=TrialFailure(
+                        category="agent",
+                        kind="assertion",
+                        message="failed",
+                    ),
+                )
+            ],
+            "fail",
+        ),
+        (
+            [
+                TrialMetadata(
+                    nodeid="passing",
+                    group_id="group",
+                    case_id="case",
+                    trial_index=1,
+                    configured_trials=2,
+                    status="pass",
+                ),
+                TrialMetadata(
+                    nodeid="failing",
+                    group_id="group",
+                    case_id="case",
+                    trial_index=2,
+                    configured_trials=2,
+                    status="fail",
+                    failure=TrialFailure(
+                        category="agent",
+                        kind="assertion",
+                        message="failed",
+                    ),
+                ),
+            ],
+            "flaky",
+        ),
+    ],
+)
+def test_aggregate_trials_derives_legacy_fallback_verdicts(
+    trials: list[TrialMetadata],
+    verdict: str,
+) -> None:
+    assert aggregate_trials(trials)[0].verdict == verdict
+
+
 def test_run_summary_excludes_setup_and_teardown_from_all_metrics() -> None:
     summary = run_summary(
         {

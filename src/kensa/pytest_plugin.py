@@ -298,7 +298,8 @@ class KensaSessionState:
 
     def mark_incomplete(self, kind: str, message: str, **details: Any) -> None:
         self.complete = False
-        self.interruption = {"kind": kind, "message": message, **details}
+        if self.interruption is None:
+            self.interruption = {"kind": kind, "message": message, **details}
 
     @property
     def engine(self) -> EngineClient | None:

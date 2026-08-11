@@ -144,20 +144,29 @@ const resultResponse = z.strictObject({
     cancelledEvaluationResponse,
   ]),
 });
+const runResultValueResponse = z.strictObject({
+  schema_version: z.literal("kensa.result.v1"),
+  run_id: z.string().min(1),
+  complete: z.boolean(),
+  interruption: z.unknown(),
+  trials: z.unknown(),
+  aggregates: z.unknown(),
+  summary: z.unknown(),
+});
 const runResultResponse = z
   .strictObject({
     type: z.literal("run_result"),
-    result: z.unknown(),
+    result: runResultValueResponse,
   })
   .superRefine((response, context) => {
     validateCoreValue(() => {
-      const input = response.result as {
-        run_id: string;
-        complete: boolean;
-        interruption: unknown;
-        trials: unknown;
-      };
-      const rebuilt = buildRunResult(input);
+      const result = response.result;
+      const rebuilt = buildRunResult({
+        run_id: result.run_id,
+        complete: result.complete,
+        interruption: result.interruption,
+        trials: result.trials,
+      });
       if (canonicalJson(rebuilt) !== canonicalJson(response.result)) {
         throw new CoreValidationError(
           "run result contradicts core derivation",

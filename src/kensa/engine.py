@@ -189,13 +189,23 @@ class EngineClient:
         interruption: Mapping[str, Any] | None,
         trials: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
+        wire_trials = [
+            cast(
+                dict[str, Any],
+                _wire_json_value(
+                    dict(trial),
+                    exact_integer_keys=_TRACE_INTEGER_KEYS,
+                ),
+            )
+            for trial in trials
+        ]
         response = self._request(
             {
                 "type": "build_run",
                 "run_id": run_id,
                 "complete": complete,
                 "interruption": interruption,
-                "trials": [dict(trial) for trial in trials],
+                "trials": wire_trials,
             }
         )
         result = response.get("result")

@@ -77,6 +77,9 @@ describe("KensaEngine", () => {
       }),
     ).toThrow();
     expect(() =>
+      responseSchema.parse({ type: "run_result", result: null }),
+    ).toThrow(ZodError);
+    expect(() =>
       responseSchema.parse({
         ...(responses.cancelled as Record<string, unknown>),
         evaluation: {

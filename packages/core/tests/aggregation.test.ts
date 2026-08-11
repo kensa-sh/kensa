@@ -200,6 +200,8 @@ describe("run aggregation", () => {
       trial({ trace: { cost_usd: 2 } }),
       trial({ trace: { llm_turns: 1, cost_usd: 0 } }),
       trial({ trace: { llm_turns: "2", cost_usd: "bad" } }),
+      trial({ trace: { llm_turns: [], cost_usd: " " } }),
+      trial({ trace: { llm_turns: "1e999" } }),
       trial({
         status: "error",
         failure: failure("agent", "timeout"),
@@ -239,6 +241,30 @@ describe("run aggregation", () => {
     expect(summarizeTrials(precise).cost_latency.mean_llm_turns).toBe(
       1e-16 / 3,
     );
+    const percentileTrials = Array.from({ length: 31 }, (_, index) =>
+      trial({
+        nodeid: `percentile-${index}`,
+        group_id: `percentile-${index}`,
+        case_id: `percentile-${index}`,
+        case: {},
+        duration_ms: index,
+      }),
+    );
+    expect(summarizeTrials(percentileTrials).cost_latency.latency_p95_ms).toBe(
+      28,
+    );
+    expect(
+      summarizeTrials([
+        trial({ duration_ms: 1 }),
+        trial({
+          nodeid: "median-second",
+          group_id: "median-second",
+          case_id: "median-second",
+          case: {},
+          duration_ms: 3,
+        }),
+      ]).cost_latency.latency_p50_ms,
+    ).toBe(2);
   });
 
   it("rejects invalid trials and run identities", () => {
@@ -271,7 +297,7 @@ describe("run aggregation", () => {
       buildRunResult({
         run_id: "run",
         complete: true,
-        interruption: {},
+        interruption: { kind: "stop", message: "stopped" },
         trials: [],
       }),
     ).toThrow("complete run");
@@ -310,5 +336,62 @@ describe("run aggregation", () => {
         ],
       }),
     ).toThrow("inconsistent configured trials");
+    expect(() =>
+      buildRunResult({
+        run_id: "run",
+        complete: false,
+        interruption: { kind: "stop", message: "stopped", extra: true },
+        trials: [],
+      }),
+    ).toThrow(CoreValidationError);
+    expect(() =>
+      buildRunResult({
+        run_id: "run",
+        complete: false,
+        interruption: null,
+        trials: [
+          trial({ configured_trials: 2 }),
+          trial({
+            nodeid: "other",
+            trial_index: 2,
+            configured_trials: 2,
+            case_id: "other",
+            case: {},
+          }),
+        ],
+      }),
+    ).toThrow("inconsistent case IDs");
+    expect(() => aggregateTrials([trial(), trial()])).toThrow(
+      "duplicate node IDs",
+    );
+    expect(() => summarizeTrials([trial(), trial()])).toThrow(
+      "duplicate node IDs",
+    );
+    expect(() =>
+      buildRunResult({
+        run_id: "run",
+        complete: "yes" as unknown as boolean,
+        interruption: null,
+        trials: [],
+      }),
+    ).toThrow(CoreValidationError);
+  });
+
+  it("normalizes interruption defaults", () => {
+    expect(
+      buildRunResult({
+        run_id: "run",
+        complete: false,
+        interruption: { kind: "stop", message: "stopped" },
+        trials: [],
+      }).interruption,
+    ).toEqual({
+      kind: "stop",
+      message: "stopped",
+      nodeid: null,
+      case_id: null,
+      trial_index: null,
+      phase: null,
+    });
   });
 });

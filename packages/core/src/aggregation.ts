@@ -66,6 +66,22 @@ const trialSchema = z
   });
 
 const trialsSchema = z.array(trialSchema);
+const interruptionSchema = z
+  .strictObject({
+    kind: z.string().min(1),
+    message: z.string(),
+    nodeid: z.string().nullable().default(null),
+    case_id: z.string().nullable().default(null),
+    trial_index: z.number().int().positive().nullable().default(null),
+    phase: z.enum(["setup", "call", "teardown"]).nullable().default(null),
+  })
+  .nullable();
+const buildRunInputSchema = z.strictObject({
+  run_id: z.string().min(1),
+  complete: z.boolean(),
+  interruption: interruptionSchema,
+  trials: trialsSchema,
+});
 
 export type Trial = z.infer<typeof trialSchema>;
 export type TrialStatus = (typeof trialStatuses)[number];
@@ -128,7 +144,7 @@ export interface RunResult {
   schema_version: "kensa.result.v1";
   run_id: string;
   complete: boolean;
-  interruption: JsonValue;
+  interruption: z.infer<typeof interruptionSchema>;
   trials: Trial[];
   aggregates: TrialAggregate[];
   summary: RunSummary;
@@ -139,7 +155,8 @@ export function parseTrials(input: unknown): Trial[] {
 }
 
 export function aggregateTrials(input: unknown): TrialAggregate[] {
-  const trials = parseTrials(input);
+  const trials = parseTrials(input).sort(compareTrials);
+  validateTrialIdentities(trials);
   const groups = new Map<string, Trial[]>();
   for (const trial of trials) {
     const group = groups.get(trial.group_id) ?? [];
@@ -152,7 +169,8 @@ export function aggregateTrials(input: unknown): TrialAggregate[] {
 }
 
 export function summarizeTrials(input: unknown): RunSummary {
-  const trials = parseTrials(input);
+  const trials = parseTrials(input).sort(compareTrials);
+  validateTrialIdentities(trials);
   const scored = trials.filter((trial) => !trial.smoke);
   const eligible = scored.filter(
     (trial) =>
@@ -191,21 +209,20 @@ export function buildRunResult(input: {
   interruption: unknown;
   trials: unknown;
 }): RunResult {
-  const runId = parseInput(
-    z.string().min(1),
-    input.run_id,
-    "run ID is invalid",
+  const parsed = parseInput(
+    buildRunInputSchema,
+    input,
+    "run input violates the core contract",
   );
-  const trials = parseTrials(input.trials).sort(compareTrials);
-  const interruption = parseJsonValue(input.interruption);
-  if (input.complete && interruption !== null) {
+  const trials = parsed.trials.sort(compareTrials);
+  if (parsed.complete && parsed.interruption !== null) {
     throw new KensaCoreError(
       "invalid_input",
       "complete run cannot contain an interruption",
     );
   }
   if (
-    input.complete &&
+    parsed.complete &&
     trials.some((trial) => trial.status === "provisional")
   ) {
     throw new KensaCoreError(
@@ -216,9 +233,9 @@ export function buildRunResult(input: {
   validateTrialIdentities(trials);
   return {
     schema_version: "kensa.result.v1",
-    run_id: runId,
-    complete: input.complete,
-    interruption,
+    run_id: parsed.run_id,
+    complete: parsed.complete,
+    interruption: parsed.interruption,
     trials,
     aggregates: aggregateTrials(trials),
     summary: summarizeTrials(trials),
@@ -311,13 +328,9 @@ function passKCurve(cohorts: ReliabilityCohort[]): ReliabilityPoint[] {
 function passHatK(successes: number, total: number, k: number): number | null {
   if (total < k) return null;
   if (successes < k) return 0;
-  return combinations(successes, k) / combinations(total, k);
-}
-
-function combinations(total: number, selected: number): number {
   let value = 1;
-  for (let index = 1; index <= selected; index += 1) {
-    value = (value * (total - selected + index)) / index;
+  for (let index = 0; index < k; index += 1) {
+    value *= (successes - index) / (total - index);
   }
   return value;
 }
@@ -389,6 +402,7 @@ function validateTrialIdentities(trials: Trial[]): void {
   const nodeids = new Set<string>();
   const indexes = new Set<string>();
   const configured = new Map<string, number>();
+  const caseIds = new Map<string, string>();
   for (const trial of trials) {
     if (nodeids.has(trial.nodeid))
       throw new KensaCoreError(
@@ -411,6 +425,14 @@ function validateTrialIdentities(trials: Trial[]): void {
       );
     }
     configured.set(trial.group_id, expected);
+    const expectedCaseId = caseIds.get(trial.group_id) ?? trial.case_id;
+    if (expectedCaseId !== trial.case_id) {
+      throw new KensaCoreError(
+        "invalid_input",
+        "trials in one group have inconsistent case IDs",
+      );
+    }
+    caseIds.set(trial.group_id, expectedCaseId);
   }
 }
 
@@ -426,14 +448,27 @@ function finiteCost(value: JsonValue | undefined): number | null {
 function finiteNumber(value: JsonValue | undefined): number | null {
   if (typeof value === "boolean" || value === null || value === undefined)
     return null;
-  const number = typeof value === "number" ? value : Number(value);
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const normalized = typeof value === "string" ? value.trim() : value;
+  if (
+    typeof normalized === "string" &&
+    !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(normalized)
+  ) {
+    return null;
+  }
+  const number =
+    typeof normalized === "number" ? normalized : Number(normalized);
   return Number.isFinite(number) ? number : null;
 }
 
 function percentile(values: number[], percent: number): number {
   if (values.length === 0) return 0;
   const ordered = [...values].sort((left, right) => left - right);
-  const index = Math.round((percent / 100) * (ordered.length - 1));
+  const scaled = percent * (ordered.length - 1);
+  const lower = Math.floor(scaled / 100);
+  const remainder = scaled % 100;
+  const index =
+    remainder > 50 || (remainder === 50 && lower % 2 === 1) ? lower + 1 : lower;
   return ordered[index]!;
 }
 
