@@ -20,7 +20,8 @@
     "./vitest": {
       "types": "./dist/vitest.d.ts",
       "import": "./dist/vitest.js"
-    }
+    },
+    "./build-manifest.json": "./dist/build-manifest.json"
   },
   "publishConfig": {
     "access": "public",
@@ -28,6 +29,7 @@
   },
   "scripts": {
     "build": "node ../../scripts/clean-package-dist.mjs && tsc -p tsconfig.build.json",
+    "prepack": "node ../../scripts/generate-build-manifest.mjs --output sdk/typescript/dist/build-manifest.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"

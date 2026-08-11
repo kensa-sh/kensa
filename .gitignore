@@ -185,3 +185,4 @@ node_modules/
 .pnpm-store/
 packages/*/coverage/
 sdk/*/coverage/
+coverage/
