@@ -113,19 +113,46 @@ jobs:
       - run: uv run pytest -q -m "not live"
       - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live
 
-  build:
+  build-wheels:
     needs: prepare
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+            audit: true
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            audit: true
+          - runner: windows-2025
+            target: win32-x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
       - run: uv python install 3.11
-      - run: uv sync --group dev --python 3.11
       - name: Verify package version
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
         run: |
           pkg_version="$(uv version --short)"
           lock_version="$(grep -A1 '^name = "kensa"$' uv.lock | grep -m1 '^version = ' | sed -E 's/^version = "(.*)"$/\1/')"
@@ -134,14 +161,18 @@ jobs:
             echo "::error::release ($VERSION) does not match pyproject.toml ($pkg_version) / uv.lock ($lock_version)"
             exit 1
           fi
-      - run: uv build --out-dir dist
+      - run: node scripts/build-engine-wheel.mjs ${{ matrix.target }}
+      - if: matrix.audit
+        run: uvx auditwheel show dist/*.whl
+      - run: uv run --no-project --python 3.11 scripts/verify-engine-wheel.py dist
       - uses: actions/upload-artifact@v7
         with:
-          name: dist
-          path: dist/
+          name: dist-wheel-${{ matrix.target }}
+          path: dist/*.whl
+          compression-level: 0
 
   tag:
-    needs: [prepare, test, lint, redaction, build]
+    needs: [prepare, test, lint, redaction, build-wheels]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -194,8 +225,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: dist
+          pattern: dist-wheel-*
           path: dist
+          merge-multiple: true
       - name: Publish to PyPI via Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
 
@@ -207,8 +239,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: dist
+          pattern: dist-wheel-*
           path: dist
+          merge-multiple: true
       - name: Create GitHub Release
         env:
           GH_REPO: ${{ github.repository }}

@@ -48,7 +48,20 @@ const executable = join(buildDirectory, target.executable);
 const metadata = join(buildDirectory, "engine-build.json");
 mkdirSync(buildDirectory, { recursive: true });
 
-run(process.env.BUN_BINARY ?? "bun", [
+const bunBinary = process.env.BUN_BINARY ?? "bun";
+const expectedBunVersion = readFileSync(
+  join(root, ".bun-version"),
+  "utf8",
+).trim();
+const actualBunVersion = capture(bunBinary, ["--version"]);
+if (actualBunVersion !== expectedBunVersion) {
+  process.stderr.write(
+    `Bun ${expectedBunVersion} is required; found ${actualBunVersion}\n`,
+  );
+  process.exit(2);
+}
+
+run(bunBinary, [
   "build",
   "--compile",
   `--target=${target.bun}`,
@@ -86,4 +99,19 @@ function run(command, args, environment = {}) {
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function capture(command, args) {
+  const result = spawnSync(command, args, {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.error !== undefined) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr);
+    process.exit(result.status ?? 1);
+  }
+  return result.stdout.trim();
 }

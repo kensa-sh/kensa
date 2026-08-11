@@ -61,14 +61,48 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
 
-  build:
-    runs-on: ubuntu-latest
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+            audit: true
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            audit: true
+          - runner: windows-2025
+            target: win32-x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
       - run: uv python install 3.11
-      - run: uv sync --group dev --python 3.11
-      - run: uv build
+      - run: node scripts/build-engine-wheel.mjs ${{ matrix.target }}
+      - if: matrix.audit
+        run: uvx auditwheel show dist/*.whl
+      - run: uv run --no-project --python 3.11 scripts/verify-engine-wheel.py dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          compression-level: 0
 
   # Run redaction with real spaCy/Presidio dependencies and the pinned small model.
   redaction:
