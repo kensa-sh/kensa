@@ -3,18 +3,36 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal, cast
 
 PROTOCOL_VERSION = "kensa.engine.v1"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
+_TRACE_INTEGER_KEYS = frozenset(
+    {
+        "end_time_unix_nano",
+        "start_time_unix_nano",
+        "time_unix_nano",
+        "timestamp",
+        "timestamp_unix_nano",
+    }
+)
+
+
+@dataclass(frozen=True)
+class EngineCompletion:
+    verdict: Literal["pass", "fail", "error", "skipped"]
+    failure: dict[str, Any] | None
 
 
 class KensaEngineError(RuntimeError):
@@ -53,19 +71,28 @@ class EngineClient:
         self._lock = Lock()
         self._request_number = 0
         self._closed = False
-        response = self._request(
-            {
-                "type": "handshake",
-                "protocol_version": PROTOCOL_VERSION,
-                "client": "kensa-python",
-            }
-        )
-        if (
-            response.get("type") != "handshake"
-            or response.get("protocol_version") != PROTOCOL_VERSION
-        ):
+        self._closing = False
+        self._handshake_complete = False
+        self._active_evaluations: set[str] = set()
+        try:
+            response = self._request(
+                {
+                    "type": "handshake",
+                    "protocol_version": PROTOCOL_VERSION,
+                    "client": "kensa-python",
+                }
+            )
+            if (
+                response.get("type") != "handshake"
+                or response.get("protocol_version") != PROTOCOL_VERSION
+            ):
+                raise KensaEngineError(
+                    "Kensa engine returned an invalid handshake", code="handshake"
+                )
+            self._handshake_complete = True
+        except BaseException:
             self.close()
-            raise KensaEngineError("Kensa engine returned an invalid handshake", code="handshake")
+            raise
 
     def start_case(self, evaluation_id: str, case: Mapping[str, Any]) -> None:
         response = self._request(
@@ -73,6 +100,7 @@ class EngineClient:
         )
         if response.get("type") != "action" or response.get("action") != "invoke_agent":
             raise KensaEngineError("Kensa engine did not request agent invocation", code="protocol")
+        self._active_evaluations.add(evaluation_id)
 
     def complete_case(
         self,
@@ -81,7 +109,7 @@ class EngineClient:
         observation: Mapping[str, Any],
         status: str,
         failure: Mapping[str, Any] | None,
-    ) -> str:
+    ) -> EngineCompletion:
         action = self._request(
             {
                 "type": "observe",
@@ -108,18 +136,22 @@ class EngineClient:
         verdict = evaluation.get("verdict")
         if verdict not in {"pass", "fail", "error", "skipped"}:
             raise KensaEngineError("Kensa engine returned an invalid verdict", code="protocol")
-        if evaluation.get("phase") != "complete" or verdict != status:
-            raise KensaEngineError(
-                "Kensa engine verdict contradicts the check observation",
-                code="protocol",
-            )
+        if evaluation.get("phase") != "complete":
+            raise KensaEngineError("Kensa engine returned a non-terminal result", code="protocol")
+        terminal_failure = evaluation.get("failure")
+        if terminal_failure is not None and not isinstance(terminal_failure, dict):
+            raise KensaEngineError("Kensa engine returned an invalid failure", code="protocol")
         requires_failure = verdict in {"fail", "error", "skipped"}
-        if requires_failure != (failure is not None):
+        if requires_failure != (terminal_failure is not None):
             raise KensaEngineError(
                 "Kensa engine verdict contradicts failure provenance",
                 code="protocol",
             )
-        return verdict
+        self._active_evaluations.discard(evaluation_id)
+        return EngineCompletion(
+            verdict=cast(Literal["pass", "fail", "error", "skipped"], verdict),
+            failure=terminal_failure,
+        )
 
     def cancel_case(self, evaluation_id: str, reason: str) -> None:
         response = self._request(
@@ -132,75 +164,138 @@ class EngineClient:
             or evaluation.get("phase") != "cancelled"
         ):
             raise KensaEngineError("Kensa engine returned an invalid cancellation", code="protocol")
+        self._active_evaluations.discard(evaluation_id)
+
+    def cancel_all(self, reason: str) -> None:
+        first_error: KensaEngineError | None = None
+        for evaluation_id in tuple(self._active_evaluations):
+            try:
+                self.cancel_case(evaluation_id, reason)
+            except KensaEngineError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._process.stdin is not None:
-            self._process.stdin.close()
-        try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._process.terminate()
+        with self._lock:
+            if self._closed or self._closing:
+                return
+            self._closing = True
             try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
+                if self._handshake_complete:
+                    for evaluation_id in tuple(self._active_evaluations):
+                        try:
+                            self._cancel_locked(evaluation_id, "Python engine client closed")
+                        except KensaEngineError:
+                            continue
+                    with suppress(KensaEngineError):
+                        self._request_locked({"type": "reset"}, allow_closing=True)
+                self._active_evaluations.clear()
+                self._close_stdin()
+                self._reap_process()
+            finally:
+                self._closed = True
+                self._closing = False
 
     def _request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
-            if self._closed:
-                raise KensaEngineError("Kensa engine client is closed", code="closed")
-            self._request_number += 1
-            request_id = str(self._request_number)
-            stdin = self._process.stdin
-            stdout = self._process.stdout
-            if stdin is None or stdout is None:
-                raise KensaEngineError("Kensa engine pipes are unavailable", code="transport")
-            try:
-                payload = json.dumps(
-                    _wire_json_value({"id": request_id, "request": request}),
-                    allow_nan=False,
-                )
-                stdin.write(payload + "\n")
-                stdin.flush()
-            except (BrokenPipeError, OSError, TypeError, ValueError) as exc:
-                raise KensaEngineError(
-                    f"Could not write to Kensa engine: {exc}", code="transport"
-                ) from exc
-            line = stdout.readline()
-            if not line:
-                status = self._process.poll()
-                raise KensaEngineError(
-                    f"Kensa engine stopped before responding (exit status {status})",
-                    code="crash",
-                )
-            try:
-                envelope = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise KensaEngineError(
-                    "Kensa engine returned malformed JSON", code="protocol"
-                ) from exc
-            if not isinstance(envelope, dict) or envelope.get("id") != request_id:
-                raise KensaEngineError(
-                    "Kensa engine returned a mismatched response", code="protocol"
-                )
-            if envelope.get("ok") is not True:
-                failure = envelope.get("failure")
-                code = failure.get("code") if isinstance(failure, dict) else "protocol"
-                message = failure.get("message") if isinstance(failure, dict) else None
-                details = failure.get("details") if isinstance(failure, dict) else None
-                raise KensaEngineError(
-                    message if isinstance(message, str) else "Kensa engine request failed",
-                    code=code if isinstance(code, str) else "protocol",
-                    details=details if isinstance(details, dict) else None,
-                )
-            response = envelope.get("response")
-            if not isinstance(response, dict):
-                raise KensaEngineError("Kensa engine response is not an object", code="protocol")
-            return response
+            return self._request_locked(request)
+
+    def _request_locked(
+        self,
+        request: Mapping[str, Any],
+        *,
+        allow_closing: bool = False,
+    ) -> dict[str, Any]:
+        if self._closed or (self._closing and not allow_closing):
+            raise KensaEngineError("Kensa engine client is closed", code="closed")
+        self._request_number += 1
+        request_id = str(self._request_number)
+        stdin = self._process.stdin
+        stdout = self._process.stdout
+        if stdin is None or stdout is None:
+            raise KensaEngineError("Kensa engine pipes are unavailable", code="transport")
+        try:
+            wire = _wire_json_value({"id": request_id, "request": request})
+            payload = json.dumps(wire, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise KensaEngineError(
+                f"Kensa engine request violates the JSON contract: {exc}",
+                code="invalid_message",
+            ) from exc
+        try:
+            stdin.write(payload + "\n")
+            stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise KensaEngineError(
+                f"Could not write to Kensa engine: {exc}", code="transport"
+            ) from exc
+        line = stdout.readline()
+        if not line:
+            status = self._process.poll()
+            raise KensaEngineError(
+                f"Kensa engine stopped before responding (exit status {status})",
+                code="crash",
+            )
+        try:
+            envelope = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise KensaEngineError("Kensa engine returned malformed JSON", code="protocol") from exc
+        if not isinstance(envelope, dict) or envelope.get("id") != request_id:
+            raise KensaEngineError("Kensa engine returned a mismatched response", code="protocol")
+        if envelope.get("ok") is not True:
+            failure = envelope.get("failure")
+            code = failure.get("code") if isinstance(failure, dict) else "protocol"
+            message = failure.get("message") if isinstance(failure, dict) else None
+            details = failure.get("details") if isinstance(failure, dict) else None
+            raise KensaEngineError(
+                message if isinstance(message, str) else "Kensa engine request failed",
+                code=code if isinstance(code, str) else "protocol",
+                details=details if isinstance(details, dict) else None,
+            )
+        response = envelope.get("response")
+        if not isinstance(response, dict):
+            raise KensaEngineError("Kensa engine response is not an object", code="protocol")
+        return response
+
+    def _cancel_locked(self, evaluation_id: str, reason: str) -> None:
+        response = self._request_locked(
+            {"type": "cancel", "evaluation_id": evaluation_id, "reason": reason},
+            allow_closing=True,
+        )
+        evaluation = response.get("evaluation")
+        if (
+            response.get("type") != "result"
+            or not isinstance(evaluation, dict)
+            or evaluation.get("phase") != "cancelled"
+        ):
+            raise KensaEngineError("Kensa engine returned an invalid cancellation", code="protocol")
+        self._active_evaluations.discard(evaluation_id)
+
+    def _close_stdin(self) -> None:
+        if self._process.stdin is None:
+            return
+        with suppress(OSError):
+            self._process.stdin.close()
+
+    def _reap_process(self) -> None:
+        try:
+            self._process.wait(timeout=5)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        with suppress(OSError):
+            self._process.terminate()
+        try:
+            self._process.wait(timeout=5)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        with suppress(OSError):
+            self._process.kill()
+        with suppress(OSError):
+            self._process.wait()
 
     def __enter__(self) -> EngineClient:
         return self
@@ -246,13 +341,41 @@ def _check_outcome(status: str) -> str:
         raise KensaEngineError(f"Unknown check status: {status!r}", code="protocol") from exc
 
 
-def _wire_json_value(value: Any) -> Any:
-    if isinstance(value, bool) or value is None or isinstance(value, (float, str)):
+def _wire_json_value(
+    value: Any,
+    *,
+    exact_integer_keys: frozenset[str] = frozenset(),
+    field: str | None = None,
+) -> Any:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field or 'value'} contains a non-finite number")
         return value
     if isinstance(value, int):
-        return str(value) if abs(value) > _MAX_SAFE_INTEGER else value
+        if abs(value) <= _MAX_SAFE_INTEGER:
+            return value
+        if field in exact_integer_keys:
+            return str(value)
+        location = field if field is not None else "value"
+        raise ValueError(f"{location} contains an integer outside the interoperable JSON range")
     if isinstance(value, Mapping):
-        return {str(key): _wire_json_value(item) for key, item in value.items()}
+        return {
+            str(key): _wire_json_value(
+                item,
+                exact_integer_keys=exact_integer_keys,
+                field=str(key),
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
-        return [_wire_json_value(item) for item in value]
-    return value
+        return [
+            _wire_json_value(
+                item,
+                exact_integer_keys=exact_integer_keys,
+                field=field,
+            )
+            for item in value
+        ]
+    raise TypeError(f"{field or 'value'} is not JSON-serializable")

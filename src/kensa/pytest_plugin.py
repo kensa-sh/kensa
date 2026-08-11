@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections import Counter
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -219,6 +220,7 @@ class KensaSessionState:
         self.interruption: dict[str, Any] | None = None
         self._engine: EngineClient | None = None
         self._engine_resolved = False
+        self._engine_closed = False
 
     @property
     def artifact_dir(self) -> Path:
@@ -299,6 +301,8 @@ class KensaSessionState:
 
     @property
     def engine(self) -> EngineClient | None:
+        if self._engine_closed:
+            raise KensaEngineError("Kensa engine session is closed", code="closed")
         if not self._engine_resolved:
             self._engine_resolved = True
             try:
@@ -308,10 +312,16 @@ class KensaSessionState:
                     raise
         return self._engine
 
-    def close_engine(self) -> None:
-        if self._engine is not None:
-            self._engine.close()
-            self._engine = None
+    def close_engine(self, reason: str = "pytest session closed") -> None:
+        engine = self._engine
+        self._engine = None
+        self._engine_closed = True
+        if engine is None:
+            return
+        with suppress(Exception):
+            engine.cancel_all(reason)
+        with suppress(Exception):
+            engine.close()
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -578,6 +588,10 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     try:
         yield
     finally:
+        try:
+            runtime.cancel_engine("pytest trial ended before engine finalization")
+        except Exception as exc:
+            state.mark_incomplete("engine_cancellation", str(exc), nodeid=runtime.nodeid)
         if watchdog_active:
             state.set_active_trial(None)
         reset_current_runtime(token)
@@ -598,24 +612,30 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
     excinfo = outcome.excinfo
     if excinfo is None:
         try:
-            status = runtime.finalize_engine("pass", None)
-        except KensaEngineError as exc:
+            status, failure = runtime.finalize_engine("pass", None)
+        except Exception as exc:
             _record_engine_failure(item, runtime, duration_ms, exc)
             outcome.force_exception(
-                pytest.fail.Exception(f"Kensa engine failure: {exc}", pytrace=False)
+                pytest.fail.Exception(f"Kensa engine finalization failed: {exc}", pytrace=False)
             )
             return
-        _record_trial(item.config, runtime.metadata(status=status, duration_ms=duration_ms))
+        _record_trial(
+            item.config,
+            runtime.metadata(status=status, duration_ms=duration_ms, failure=failure),
+        )
         return
 
     exc = excinfo[1]
     status, failure = _classify_exception(exc, phase="call")
     try:
-        status = runtime.finalize_engine(status, failure)
-    except KensaEngineError as engine_error:
+        status, failure = runtime.finalize_engine(status, failure)
+    except Exception as engine_error:
         _record_engine_failure(item, runtime, duration_ms, engine_error)
         outcome.force_exception(
-            pytest.fail.Exception(f"Kensa engine failure: {engine_error}", pytrace=False)
+            pytest.fail.Exception(
+                f"Kensa engine finalization failed: {engine_error}",
+                pytrace=False,
+            )
         )
         return
     _record_trial(
@@ -632,7 +652,7 @@ def _record_engine_failure(
     item: pytest.Item,
     runtime: KensaTrialRuntime,
     duration_ms: float,
-    error: KensaEngineError,
+    error: Exception,
 ) -> None:
     _, failure = _classify_exception(error, phase="call")
     _record_trial(
@@ -785,13 +805,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
         _write_artifacts(state)
     if any(aggregate.verdict != "pass" for aggregate in state.aggregates):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
-    state.close_engine()
+    state.close_engine("pytest session finished")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
     state = getattr(config, "_kensa_state", None)
     if isinstance(state, KensaSessionState):
-        state.close_engine()
+        state.close_engine("pytest unconfigured")
 
 
 def _write_artifacts(state: KensaSessionState) -> None:

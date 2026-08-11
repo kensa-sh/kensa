@@ -17,6 +17,7 @@ from kensa.case import kensa_case
 from kensa.engine import (
     PROTOCOL_VERSION,
     EngineClient,
+    EngineCompletion,
     KensaEngineError,
     _check_outcome,
     _engine_command,
@@ -29,9 +30,15 @@ from kensa.runtime import KensaTrial, KensaTrialRuntime, _engine_trace
 
 
 class _Stream:
-    def __init__(self, *lines: str, write_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *lines: str,
+        write_error: BaseException | None = None,
+        close_error: OSError | None = None,
+    ) -> None:
         self.lines = list(lines)
         self.write_error = write_error
+        self.close_error = close_error
         self.writes: list[str] = []
         self.closed = False
 
@@ -49,6 +56,8 @@ class _Stream:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _Process:
@@ -57,15 +66,26 @@ class _Process:
         *responses: str,
         stdin: _Stream | None = None,
         wait_timeouts: int = 0,
+        wait_errors: int = 0,
+        terminate_error: OSError | None = None,
+        kill_error: OSError | None = None,
     ) -> None:
         self.stdin: _Stream | None = stdin if stdin is not None else _Stream()
         self.stdout = _Stream(*responses)
         self.wait_timeouts = wait_timeouts
+        self.wait_errors = wait_errors
+        self.terminate_error = terminate_error
+        self.kill_error = kill_error
+        self.wait_calls = 0
         self.terminated = False
         self.killed = False
 
     def wait(self, timeout: int | None = None) -> int:
         del timeout
+        self.wait_calls += 1
+        if self.wait_errors:
+            self.wait_errors -= 1
+            raise OSError("wait failed")
         if self.wait_timeouts:
             self.wait_timeouts -= 1
             raise subprocess.TimeoutExpired("engine", 5)
@@ -73,9 +93,13 @@ class _Process:
 
     def terminate(self) -> None:
         self.terminated = True
+        if self.terminate_error is not None:
+            raise self.terminate_error
 
     def kill(self) -> None:
         self.killed = True
+        if self.kill_error is not None:
+            raise self.kill_error
 
     def poll(self) -> int:
         return 7
@@ -87,6 +111,9 @@ def _raw_client(process: _Process) -> Any:
     client._lock = Lock()
     client._request_number = 0
     client._closed = False
+    client._closing = False
+    client._handshake_complete = False
+    client._active_evaluations = set()
     return client
 
 
@@ -128,7 +155,7 @@ def test_engine_client_runs_case_and_cancellation() -> None:
             status="pass",
             failure=None,
         )
-        assert verdict == "pass"
+        assert verdict == EngineCompletion(verdict="pass", failure=None)
 
         client.start_case(
             "cancelled",
@@ -322,13 +349,143 @@ def test_agent(case):
     )
 
     result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*Kensa engine failure: Kensa engine stopped before responding*"])
+    result.stdout.fnmatch_lines(
+        ["*Kensa engine finalization failed: Kensa engine stopped before responding*"]
+    )
     result_files = list((artifact_dir / "results").glob("*.json"))
     assert len(result_files) == 1
     payload = json.loads(result_files[0].read_text(encoding="utf-8"))
     assert payload["trials"][0]["status"] == "error"
     assert payload["trials"][0]["failure"]["category"] == "infrastructure"
     assert payload["trials"][0]["failure"]["kind"] == "crash"
+
+
+def test_engine_finalization_failure_cancels_active_evaluation(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    requests_path = tmp_path / "requests.jsonl"
+    engine = tmp_path / "rejecting-engine.py"
+    engine.write_text(
+        f"""
+import json
+import sys
+from pathlib import Path
+
+requests_path = Path({str(requests_path)!r})
+for line in sys.stdin:
+    envelope = json.loads(line)
+    request = envelope["request"]
+    with requests_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(request) + "\\n")
+    if request["type"] == "handshake":
+        response = {{
+            "type": "handshake",
+            "protocol_version": "kensa.engine.v1",
+            "engine_version": "test",
+        }}
+    elif request["type"] == "start_case":
+        response = {{"type": "action", "action": "invoke_agent", "case_id": "one"}}
+    elif request["type"] == "observe":
+        response = {{"type": "action", "action": "wrong"}}
+    elif request["type"] == "cancel":
+        response = {{
+            "type": "result",
+            "evaluation": {{
+                "phase": "cancelled",
+                "verdict": "error",
+                "failure": {{
+                    "category": "harness",
+                    "kind": "cancelled",
+                    "message": request["reason"],
+                    "evidence": {{}},
+                }},
+            }},
+        }}
+    else:
+        response = {{"type": "reset", "released": 0}}
+    print(json.dumps({{"id": envelope["id"], "ok": True, "response": response}}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "KENSA_ENGINE_COMMAND",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(engine))}",
+    )
+    artifact_dir = tmp_path / "artifacts"
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import kensa_case
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="one", input="hello")])
+def test_agent(case):
+    assert case.run(lambda value: value) == "hello"
+"""
+    )
+
+    result = pytester.runpytest(
+        "-q",
+        "--kensa-write-artifacts",
+        f"--kensa-artifact-dir={artifact_dir}",
+    )
+
+    result.assert_outcomes(failed=1)
+    requests = [json.loads(line) for line in requests_path.read_text(encoding="utf-8").splitlines()]
+    assert [request["type"] for request in requests] == [
+        "handshake",
+        "start_case",
+        "observe",
+        "cancel",
+        "reset",
+    ]
+    assert "ended before engine finalization" in requests[3]["reason"]
+    result_path = next((artifact_dir / "results").glob("*.json"))
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["trials"][0]["failure"]["category"] == "infrastructure"
+
+
+def test_missing_default_engine_preserves_python_artifacts(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class MissingEngine:
+        def __init__(self) -> None:
+            raise KensaEngineError("missing", code="startup")
+
+    monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
+    monkeypatch.setattr(pytest_plugin, "EngineClient", MissingEngine)
+    artifact_dir = tmp_path / "artifacts"
+    pytester.makepyfile(
+        test_eval="""
+import pytest
+from kensa.pytest import ConversationResponse, kensa_case
+
+class Agent:
+    def respond(self, messages):
+        return ConversationResponse(content="hello")
+
+@pytest.mark.kensa
+@pytest.mark.parametrize("case", [kensa_case(id="fallback", input=None)])
+def test_agent(case):
+    assert case.run(Agent()).output == "hello"
+"""
+    )
+
+    result = pytester.runpytest(
+        "-q",
+        "--kensa-write-artifacts",
+        f"--kensa-artifact-dir={artifact_dir}",
+    )
+
+    result.assert_outcomes(passed=1)
+    result_path = next((artifact_dir / "results").glob("*.json"))
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["complete"] is True
+    assert payload["trials"][0]["status"] == "pass"
 
 
 def test_engine_command_uses_built_development_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,18 +530,22 @@ def test_engine_trace_preserves_nanosecond_timestamps_as_decimal_strings() -> No
     assert _engine_trace({"spans": None}) == {"spans": None}
 
 
-def test_wire_json_value_preserves_types_and_safe_integers() -> None:
+def test_wire_json_value_preserves_types_and_rejects_lossy_values() -> None:
     assert _wire_json_value(
         {
             "values": [True, None, 1.5, "text", 9_007_199_254_740_991],
-            1: (9_007_199_254_740_992,),
-            "bytes": b"opaque",
+            1: (1,),
         }
     ) == {
         "values": [True, None, 1.5, "text", 9_007_199_254_740_991],
-        "1": ["9007199254740992"],
-        "bytes": b"opaque",
+        "1": [1],
     }
+    with pytest.raises(ValueError, match="interoperable JSON range"):
+        _wire_json_value({"value": 9_007_199_254_740_992})
+    with pytest.raises(TypeError, match="not JSON-serializable"):
+        _wire_json_value({"bytes": b"opaque"})
+    with pytest.raises(ValueError, match="non-finite"):
+        _wire_json_value({"value": float("nan")})
 
 
 def test_engine_client_rejects_startup_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,6 +571,42 @@ def test_engine_client_rejects_invalid_handshake(monkeypatch: pytest.MonkeyPatch
     assert exc_info.value.code == "handshake"
     assert process.stdin is not None
     assert process.stdin.closed
+    assert process.wait_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("response", "message", "code"),
+    [
+        ("not-json\n", "malformed JSON", "protocol"),
+        (
+            _response(
+                {
+                    "message": "unsupported protocol",
+                    "code": "version_mismatch",
+                },
+                ok=False,
+            ),
+            "unsupported protocol",
+            "version_mismatch",
+        ),
+    ],
+)
+def test_engine_client_reaps_failed_handshakes(
+    monkeypatch: pytest.MonkeyPatch,
+    response: str,
+    message: str,
+    code: str,
+) -> None:
+    process = _Process(response)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(KensaEngineError, match=message) as exc_info:
+        EngineClient(("engine",))
+
+    assert exc_info.value.code == code
+    assert process.stdin is not None
+    assert process.stdin.closed
+    assert process.wait_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -436,10 +633,36 @@ def test_engine_client_rejects_invalid_handshake(monkeypatch: pytest.MonkeyPatch
                 {"type": "action", "action": "evaluate_check"},
                 {
                     "type": "result",
+                    "evaluation": {"phase": "cancelled", "verdict": "pass"},
+                },
+            ],
+            "non-terminal result",
+        ),
+        (
+            "complete",
+            [
+                {"type": "action", "action": "evaluate_check"},
+                {
+                    "type": "result",
+                    "evaluation": {
+                        "phase": "complete",
+                        "verdict": "fail",
+                        "failure": "invalid",
+                    },
+                },
+            ],
+            "invalid failure",
+        ),
+        (
+            "complete",
+            [
+                {"type": "action", "action": "evaluate_check"},
+                {
+                    "type": "result",
                     "evaluation": {"phase": "complete", "verdict": "fail"},
                 },
             ],
-            "contradicts the check observation",
+            "failure provenance",
         ),
         ("cancel", [{"type": "result", "evaluation": {"phase": "complete"}}], "cancellation"),
     ],
@@ -467,7 +690,7 @@ def test_engine_client_rejects_invalid_protocol_actions(
     client.close()
 
 
-def test_engine_client_rejects_contradictory_failure_provenance(
+def test_engine_client_uses_authoritative_terminal_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = EngineClient()
@@ -479,13 +702,13 @@ def test_engine_client_rejects_contradictory_failure_provenance(
     )
     monkeypatch.setattr(client, "_request", lambda request: next(responses))
 
-    with pytest.raises(KensaEngineError, match="failure provenance"):
-        client.complete_case(
-            "eval",
-            observation={},
-            status="pass",
-            failure={"category": "agent"},
-        )
+    completion = client.complete_case(
+        "eval",
+        observation={},
+        status="fail",
+        failure={"category": "agent"},
+    )
+    assert completion == EngineCompletion(verdict="pass", failure=None)
     with pytest.raises(KensaEngineError, match="Unknown check status"):
         _check_outcome("unknown")
     client.close()
@@ -495,7 +718,7 @@ def test_passing_test_engine_finalize_failure_is_classified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Runtime:
-        def finalize_engine(self, status: str, failure: Any) -> str:
+        def finalize_engine(self, status: str, failure: Any) -> tuple[str, Any]:
             del status, failure
             raise KensaEngineError("stopped", code="crash")
 
@@ -528,7 +751,7 @@ def test_passing_test_engine_finalize_failure_is_classified(
 
     assert recorded[0].code == "crash"
     assert isinstance(outcome.exception, pytest.fail.Exception)
-    assert str(outcome.exception) == "Kensa engine failure: stopped"
+    assert str(outcome.exception) == "Kensa engine finalization failed: stopped"
 
 
 def test_engine_client_forces_stuck_process_shutdown() -> None:
@@ -544,6 +767,78 @@ def test_engine_client_forces_stuck_process_shutdown() -> None:
     assert process.stdin.closed
 
 
+def test_engine_client_shutdown_suppresses_process_errors() -> None:
+    process = _Process(
+        stdin=_Stream(close_error=OSError("close failed")),
+        wait_errors=3,
+        terminate_error=OSError("terminate failed"),
+        kill_error=OSError("kill failed"),
+    )
+    client = _raw_client(process)
+
+    client.close()
+
+    assert client._closed
+    assert process.terminated
+    assert process.killed
+    assert process.wait_calls == 3
+
+
+def test_engine_client_shutdown_handles_missing_stdin_and_termination() -> None:
+    process = _Process(wait_timeouts=1)
+    process.stdin = None
+    client = _raw_client(process)
+
+    client.close()
+
+    assert client._closed
+    assert process.terminated
+    assert not process.killed
+    assert process.wait_calls == 2
+
+
+def test_engine_client_close_cancels_active_evaluations() -> None:
+    process = _Process(
+        _response(
+            {"type": "result", "evaluation": {"phase": "cancelled"}},
+            request_id="1",
+        ),
+        _response({"type": "reset", "released": 0}, request_id="2"),
+    )
+    client = _raw_client(process)
+    client._handshake_complete = True
+    client._active_evaluations.add("active")
+
+    client.close()
+
+    assert process.stdin is not None
+    requests = [json.loads(line)["request"] for line in process.stdin.writes]
+    assert requests == [
+        {
+            "type": "cancel",
+            "evaluation_id": "active",
+            "reason": "Python engine client closed",
+        },
+        {"type": "reset"},
+    ]
+    assert client._active_evaluations == set()
+
+
+def test_engine_client_close_suppresses_invalid_cancellation() -> None:
+    process = _Process(
+        _response({"type": "wrong"}, request_id="1"),
+        _response({"type": "reset", "released": 1}, request_id="2"),
+    )
+    client = _raw_client(process)
+    client._handshake_complete = True
+    client._active_evaluations.add("active")
+
+    client.close()
+
+    assert client._closed
+    assert client._active_evaluations == set()
+
+
 @pytest.mark.parametrize(
     ("process", "message", "code"),
     [
@@ -557,6 +852,11 @@ def test_engine_client_forces_stuck_process_shutdown() -> None:
         (_Process("not-json\n"), "malformed JSON", "protocol"),
         (_Process(_response({}, request_id="wrong")), "mismatched response", "protocol"),
         (_Process(_response([], request_id="1")), "response is not an object", "protocol"),
+        (
+            _Process(),
+            "violates the JSON contract",
+            "invalid_message",
+        ),
     ],
 )
 def test_engine_client_rejects_transport_failures(
@@ -567,9 +867,14 @@ def test_engine_client_rejects_transport_failures(
     client = _raw_client(process)
     if message == "pipes are unavailable":
         process.stdin = None
+    request = (
+        {"type": "test", "unsafe": 9_007_199_254_740_992}
+        if code == "invalid_message"
+        else {"type": "test"}
+    )
 
     with pytest.raises(KensaEngineError, match=message) as exc_info:
-        client._request({"type": "test"})
+        client._request(request)
 
     assert exc_info.value.code == code
 
@@ -609,6 +914,36 @@ def test_closed_engine_client_rejects_requests() -> None:
         client._request({"type": "test"})
 
 
+def test_session_engine_close_is_non_throwing_and_terminal() -> None:
+    class StubEngine:
+        def __init__(self) -> None:
+            self.cancelled = False
+            self.closed = False
+
+        def cancel_all(self, reason: str) -> None:
+            self.cancelled = "session" in reason
+            raise KensaEngineError("cancel failed", code="transport")
+
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("close failed")
+
+    config = SimpleNamespace(getoption=lambda name: None)
+    state = pytest_plugin.KensaSessionState(cast(Any, config))
+    engine = StubEngine()
+    state._engine = cast(Any, engine)
+    state._engine_resolved = True
+
+    state.close_engine("pytest session closed")
+    state.close_engine("pytest session closed again")
+
+    assert engine.cancelled
+    assert engine.closed
+    with pytest.raises(KensaEngineError, match="session is closed") as exc_info:
+        _ = state.engine
+    assert exc_info.value.code == "closed"
+
+
 def test_runtime_rejects_non_json_engine_input_and_reuses_verdict() -> None:
     class StubEngine:
         def __init__(self) -> None:
@@ -617,9 +952,9 @@ def test_runtime_rejects_non_json_engine_input_and_reuses_verdict() -> None:
         def start_case(self, evaluation_id: str, case: Any) -> None:
             del evaluation_id, case
 
-        def complete_case(self, *_: Any, **__: Any) -> str:
+        def complete_case(self, *_: Any, **__: Any) -> EngineCompletion:
             self.completed += 1
-            return "pass"
+            return EngineCompletion(verdict="pass", failure=None)
 
     engine = StubEngine()
     runtime = KensaTrialRuntime(
@@ -643,6 +978,105 @@ def test_runtime_rejects_non_json_engine_input_and_reuses_verdict() -> None:
         engine=cast(Any, engine),
     )
     good_runtime.run_case(kensa_case(id="good", input=None), lambda: None)
-    assert good_runtime.finalize_engine("pass", None) == "pass"
-    assert good_runtime.finalize_engine("error", None) == "pass"
+    assert good_runtime.finalize_engine("pass", None) == ("pass", None)
+    assert good_runtime.finalize_engine("error", None) == ("pass", None)
     assert engine.completed == 1
+
+
+def test_runtime_rejects_lossy_engine_evidence_as_case_failure() -> None:
+    class StubEngine:
+        completed = False
+
+        def start_case(self, evaluation_id: str, case: Any) -> None:
+            del evaluation_id, case
+
+        def complete_case(self, *_: Any, **__: Any) -> EngineCompletion:
+            self.completed = True
+            return EngineCompletion(verdict="pass", failure=None)
+
+    engine = StubEngine()
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test-evidence",
+        group_id="test-evidence",
+        case_id="test-evidence",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    runtime.run_case(
+        kensa_case(id="unsafe", input=None),
+        lambda: 9_007_199_254_740_992,
+    )
+
+    with pytest.raises(KensaCaseError, match=r"trial evidence.*interoperable JSON range"):
+        runtime.finalize_engine("pass", None)
+
+    assert not engine.completed
+
+    input_runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test-input",
+        group_id="test-input",
+        case_id="test-input",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    with pytest.raises(KensaCaseError, match=r"input.*interoperable JSON range"):
+        input_runtime.run_case(
+            kensa_case(id="unsafe", input=9_007_199_254_740_992),
+            lambda: None,
+        )
+
+
+def test_runtime_uses_and_validates_engine_terminal_failure() -> None:
+    terminal = {
+        "category": "judge",
+        "kind": "threshold",
+        "message": "score was below threshold",
+        "evidence": {"score": 0.2},
+    }
+
+    class StubEngine:
+        def __init__(self, completion: EngineCompletion) -> None:
+            self.completion = completion
+
+        def start_case(self, evaluation_id: str, case: Any) -> None:
+            del evaluation_id, case
+
+        def complete_case(self, *_: Any, **__: Any) -> EngineCompletion:
+            return self.completion
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test-terminal",
+        group_id="test-terminal",
+        case_id="test-terminal",
+        no_judge=False,
+        engine=cast(Any, StubEngine(EngineCompletion(verdict="fail", failure=terminal))),
+    )
+    runtime.run_case(kensa_case(id="terminal", input=None), lambda: "ok")
+    assert runtime.finalize_engine("pass", None) == (
+        "fail",
+        TrialFailure.model_validate(terminal),
+    )
+
+    invalid_runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test-invalid-terminal",
+        group_id="test-invalid-terminal",
+        case_id="test-invalid-terminal",
+        no_judge=False,
+        engine=cast(
+            Any,
+            StubEngine(
+                EngineCompletion(
+                    verdict="fail",
+                    failure={"category": "judge", "kind": "threshold"},
+                )
+            ),
+        ),
+    )
+    invalid_runtime.run_case(kensa_case(id="terminal", input=None), lambda: "ok")
+    with pytest.raises(KensaEngineError, match="invalid terminal failure") as exc_info:
+        invalid_runtime.finalize_engine("pass", None)
+    assert exc_info.value.code == "protocol"
