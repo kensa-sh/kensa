@@ -54,7 +54,7 @@ kensa = "kensa.pytest_plugin"
 [project.optional-dependencies]
 redaction = [
   "detect-secrets==1.5.0",
-  "phonenumbers>=8.13",
+  "phonenumbers>=9.0.36",
   "presidio-analyzer==2.2.362",
   "spacy>=3.8,<3.9",
 ]
