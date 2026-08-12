@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "kensa",
-  "description": "Kensa turns agent traces into pytest evals that run in CI.",
+  "description": "Kensa turns agent traces into Python or TypeScript evals that run in CI.",
   "appearance": {
     "default": "dark",
     "strict": true
@@ -45,7 +45,6 @@
         "pages": [
           "introduction",
           "quickstart",
-          "journeys",
           "concepts"
         ]
       },

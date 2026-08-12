@@ -10,7 +10,7 @@ keywords:
   - traces
 ---
 
-Generated from traces or written from scratch, your evals live in your repo as executable pytest or Vitest files. Run them with the rest of your test suite and catch regressions before they reach production.
+Kensa turns agent traces into Python or TypeScript evals that run in CI. Generated from traces or written from scratch, they live in your repo and run with the rest of your test suite.
 
 ```python
 import pytest
@@ -43,7 +43,7 @@ def test_refund_policy(case, kensa_run):
     assert verdict.passed, verdict.reasoning
 ```
 
-This is a normal pytest test that any CI already running your Python suite can run. TypeScript projects use the same core semantics through the [TypeScript SDK](/typescript) and Vitest.
+Python projects install `kensa` and import the pytest authoring API from `kensa.pytest`. TypeScript projects install `@kensa/sdk` and import its Vitest adapter from `@kensa/sdk/vitest`.
 
 <Check>Prefer the guided path? [Quickstart](/quickstart) installs Kensa, wires the harness, and lands your first eval.</Check>
 
@@ -57,9 +57,6 @@ This is a normal pytest test that any CI already running your Python suite can r
   <Card title="Use TypeScript and Vitest" href="/typescript" cta="Open TypeScript guide" arrow="true">
     Define an evaluation with `@kensa/sdk` and run it in your existing Vitest suite.
   </Card>
-  <Card title="Choose another journey" href="/journeys" cta="Compare journeys" arrow="true">
-    Start from local evidence, Python, TypeScript, CI, or a connected trace source.
-  </Card>
   <Card title="Drive it from your agent" href="/skills" cta="Use the skill" arrow="true">
     The `kensa-evals` skill walks Claude Code, Codex, or Cursor through the eval lifecycle.
   </Card>
@@ -68,20 +65,20 @@ This is a normal pytest test that any CI already running your Python suite can r
   </Card>
 </Columns>
 
-## How it works
+## Python trace-to-eval workflow
 
 <Columns cols={2}>
   <Card title="Traces in">
     Import minimized, redacted trace evidence from Langfuse or a JSON / JSONL / OTLP export - or capture it locally.
   </Card>
   <Card title="Behavior out">
-    Your coding agent mines imports into reviewable eval ideas you approve and materialize as pytest files.
+    For Python projects, your coding agent mines imports into reviewable eval ideas you approve and materialize as pytest files.
   </Card>
   <Card title="Assertions gate the judge">
     Deterministic assertions run first. The `judge(...)` call only runs if they pass, so obvious regressions never spend tokens.
   </Card>
   <Card title="Ship in CI">
-    Evals are plain pytest. Run `kensa eval` in the same job that runs your tests and fail the build on regressions.
+    Run Python evals with pytest or TypeScript evals with Vitest and fail the build on regressions.
   </Card>
 </Columns>
 
@@ -90,7 +87,6 @@ This is a normal pytest test that any CI already running your Python suite can r
 | If you want to | Go to |
 |---|---|
 | Get running in a few minutes | [Quickstart](/quickstart) |
-| Choose between local, Python, TypeScript, CI, or connected paths | [Choose a journey](/journeys) |
 | Author TypeScript evals | [TypeScript SDK](/typescript) |
 | Understand the mental model | [Concepts](/concepts) |
 | Define cases and trials | [Cases](/cases) |
@@ -98,7 +94,7 @@ This is a normal pytest test that any CI already running your Python suite can r
 | Bring in existing traces | [Tracing & imports](/tracing) |
 | Look up exact commands | [CLI reference](/cli) |
 
-## Data flow
+## Python data flow
 
 Traces from real runs become regression tests. Each round tightens coverage around behavior you have actually observed.
 
@@ -111,7 +107,7 @@ flowchart LR
   E --> F["Verdicts<br/>term / JSON / Markdown"]
 ```
 
-Inside each eval, pytest runs your case through the harness, collects a trace, and evaluates it.
+Inside each Python eval, pytest runs your case through the harness, collects a trace, and evaluates it.
 
 ## Compatible coding agents
 

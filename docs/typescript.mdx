@@ -1,6 +1,6 @@
 ---
 title: TypeScript SDK
-description: Author Kensa evaluations in TypeScript and run them with Vitest.
+description: Write Kensa evals in TypeScript with Vitest.
 sidebarTitle: TypeScript
 keywords:
   - typescript
@@ -9,7 +9,7 @@ keywords:
   - evaluation
 ---
 
-`@kensa/sdk` provides TypeScript authoring helpers and a Vitest adapter. It imports `@kensa/core` directly, so local TypeScript evals do not start a Python process, child engine, or local service.
+Install `@kensa/sdk` and import its Vitest adapter from `@kensa/sdk/vitest`. The adapter registers normal Vitest tests, so Kensa runs with the rest of your TypeScript test suite.
 
 ## Install
 
@@ -17,7 +17,7 @@ keywords:
 pnpm add -D @kensa/sdk vitest
 ```
 
-## Write a Vitest eval
+## Write an eval
 
 `kensaTest(...)` registers a normal Vitest test. `observe` calls your agent and returns its output and trace evidence. `check` turns that observation into a typed check result.
 
@@ -78,30 +78,6 @@ The default expected verdict is `pass`. Pass `{ expectedVerdict: "fail" }` as th
 
 ## Run without Vitest
 
-Use `defineCase(...)` and `runEvaluation(...)` from `@kensa/sdk` when another TypeScript test runner or application owns execution:
+When another test runner or application owns execution, import `defineCase(...)` and `runEvaluation(...)` from `@kensa/sdk`. Both callbacks may be synchronous or asynchronous. Callback exceptions propagate to the caller, and invalid values fail closed.
 
-```typescript
-import { defineCase, runEvaluation } from "@kensa/sdk";
-
-const evaluationCase = defineCase({
-  id: "greeting",
-  input: "Hello",
-  metadata: {},
-});
-
-const result = await runEvaluation({
-  case: evaluationCase,
-  observe: runAgent,
-  check: checkGreeting,
-});
-```
-
-Both callbacks may be synchronous or asynchronous. Callback exceptions propagate to the caller. Invalid cases, observations, and check results fail closed through the core contract.
-
-## Release identity
-
-Every release includes the same `kensa.build_manifest.v1` document in `@kensa/core`, `@kensa/sdk`, the Python wheel, and the release assets. The npm packages export it as `@kensa/core/build-manifest.json` and `@kensa/sdk/build-manifest.json`.
-
-Pin the SDK release and record both `digest` and `contract_digest` when another system consumes Kensa artifacts. The manifest identifies the exact core, engine, Python SDK, TypeScript SDK, contracts, schemas, and conformance fixtures in that release. Do not coordinate those identities as a loose list of package versions.
-
-See [Artifact and release migration](/migration) before consuming artifacts produced by another Kensa version.
+For artifact compatibility across Kensa versions, see [Artifact and release migration](/migration).
