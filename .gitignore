@@ -179,3 +179,8 @@ plans/
 .kensa/*
 !.kensa/.gitignore
 tests/evals/.kensa_doctor_tmp/
+
+# TypeScript workspaces
+node_modules/
+.pnpm-store/
+packages/*/coverage/

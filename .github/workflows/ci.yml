@@ -9,6 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test:coverage
+      - run: pnpm format:check
+      - run: pnpm build
+      - run: pnpm check:core-platform
+
   test:
     runs-on: ubuntu-latest
     strategy:
