@@ -43,7 +43,7 @@ docs/
   assertions.mdx
   judge.mdx
   tracing.mdx
-  pytest.mdx
+  python.mdx
   skills.mdx
   cli.mdx
   ci.mdx
