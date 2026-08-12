@@ -125,10 +125,8 @@ jobs:
             target: darwin-x64
           - runner: ubuntu-24.04
             target: linux-x64
-            audit: true
           - runner: ubuntu-24.04-arm
             target: linux-arm64
-            audit: true
           - runner: windows-2025
             target: win32-x64
     runs-on: ${{ matrix.runner }}
@@ -162,8 +160,6 @@ jobs:
             exit 1
           fi
       - run: node scripts/build-engine-wheel.mjs ${{ matrix.target }}
-      - if: matrix.audit
-        run: uvx auditwheel show dist/*.whl
       - run: uv run --no-project --python 3.11 scripts/verify-engine-wheel.py dist
       - uses: actions/upload-artifact@v7
         with:

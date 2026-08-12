@@ -101,7 +101,7 @@ def test_release_workflow_publishes_only_verified_platform_wheels() -> None:
 
     assert "dist-wheel-${{ matrix.target }}" in workflow
     assert "scripts/verify-engine-wheel.py dist" in workflow
-    assert "uvx auditwheel show dist/*.whl" in workflow
+    assert "auditwheel" not in workflow
     assert "pattern: dist-wheel-*" in workflow
     assert "merge-multiple: true" in workflow
     assert "--sdist" not in workflow

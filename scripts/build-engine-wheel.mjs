@@ -63,7 +63,9 @@ if (actualBunVersion !== expectedBunVersion) {
   process.exit(2);
 }
 
-run(process.env.PNPM_BINARY ?? "pnpm", ["--filter", "@kensa/core", "build"]);
+const pnpmBinary =
+  process.env.PNPM_BINARY ?? (platform === "win32" ? "pnpm.cmd" : "pnpm");
+run(pnpmBinary, ["--filter", "@kensa/core", "build"]);
 run(process.execPath, [
   join(root, "scripts", "generate-build-manifest.mjs"),
   "--output",
