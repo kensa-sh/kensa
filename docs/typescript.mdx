@@ -1,0 +1,83 @@
+---
+title: TypeScript SDK
+description: Write Kensa evals in TypeScript with Vitest.
+sidebarTitle: TypeScript
+keywords:
+  - typescript
+  - vitest
+  - sdk
+  - evaluation
+---
+
+Install `@kensa/sdk` and import its Vitest adapter from `@kensa/sdk/vitest`. The adapter registers normal Vitest tests, so Kensa runs with the rest of your TypeScript test suite.
+
+## Install
+
+```bash
+pnpm add -D @kensa/sdk vitest
+```
+
+## Write an eval
+
+`kensaTest(...)` registers a normal Vitest test. `observe` calls your agent and returns its output and trace evidence. `check` turns that observation into a typed check result.
+
+```typescript title="refund.eval.test.ts"
+import { kensaTest } from "@kensa/sdk/vitest";
+
+const emptyTrace = {
+  spans: [],
+  agent_runs: [],
+  tools: [],
+  tool_calls: [],
+  incomplete: false,
+  incomplete_reason: null,
+  duration_ms: 0,
+  cost_usd: null,
+  known_cost_usd: null,
+  cost_available: false,
+  llm_turns: 0,
+};
+
+kensaTest("does not issue an unsupported refund", {
+  case: {
+    id: "refund_without_order_history",
+    input: "Refund my last charge. I do not have an order ID.",
+    metadata: {},
+  },
+  observe: async (evaluationCase) => ({
+    output: await refundAgent(evaluationCase.input),
+    output_recorded: true,
+    trace: emptyTrace,
+    failure: null,
+  }),
+  check: ({ observation }) => {
+    const passed = observation.output === "I need order history first.";
+    return {
+      id: "refund_policy",
+      outcome: passed ? "satisfied" : "unsatisfied",
+      failure: passed
+        ? null
+        : {
+            category: "agent",
+            kind: "assertion",
+            message: "The agent offered an unsupported refund.",
+            evidence: { output: observation.output },
+          },
+    };
+  },
+});
+```
+
+Run it with your existing Vitest command:
+
+```bash
+pnpm vitest run
+```
+
+The default expected verdict is `pass`. Pass `{ expectedVerdict: "fail" }` as the third argument when a non-passing result is the behavior under test. Use `verify(result)` in that options object for additional assertions on the completed evaluation.
+
+## Run without Vitest
+
+When another test runner or application owns execution, import `defineCase(...)` and `runEvaluation(...)` from `@kensa/sdk`. Both callbacks may be synchronous or asynchronous. Callback exceptions propagate to the caller, and invalid values fail closed.
+
+For artifact compatibility across Kensa versions, see [Artifact and release migration](/migration).

@@ -10,9 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
 from kensa._smoke import is_smoke_trial
-from kensa.results import RunResult, TrialResult
+from kensa.results import RunInterruption, RunResult, TrialResult
 from kensa.runtime import TrialMetadata
 
 
@@ -52,57 +51,6 @@ def trial_sort_key(trial: TrialMetadata) -> tuple[str, int, str]:
     return trial.group_id, trial.trial_index, trial.nodeid
 
 
-def aggregate_trials(trials: list[TrialMetadata]) -> list[KensaAggregate]:
-    groups: dict[str, list[TrialMetadata]] = {}
-    for trial in trials:
-        groups.setdefault(trial.group_id, []).append(trial)
-    aggregates: list[KensaAggregate] = []
-    for group_id, group_trials in sorted(groups.items()):
-        all_trials = sorted(group_trials, key=lambda trial: trial.trial_index)
-        ordered = [trial for trial in all_trials if trial.status != "skipped"]
-        if not ordered:
-            continue
-        total = len(ordered)
-        passed = sum(1 for trial in ordered if trial.status == "pass")
-        errored = sum(1 for trial in ordered if trial.status == "error")
-        failed = sum(1 for trial in ordered if trial.status == "fail")
-        skipped = len(all_trials) - total
-        configured = max(trial.configured_trials for trial in all_trials)
-        partial = total + skipped < configured
-        timed_out = any(
-            trial.failure is not None and trial.failure.kind == "timeout" for trial in ordered
-        )
-        if timed_out:
-            verdict = "error"
-        elif partial:
-            verdict = "partial"
-        elif errored:
-            verdict = "error"
-        elif passed == total:
-            verdict = "pass"
-        elif failed == total:
-            verdict = "fail"
-        else:
-            verdict = "flaky"
-        aggregates.append(
-            KensaAggregate(
-                group_id=group_id,
-                case_id=ordered[0].case_id,
-                configured_trials=configured,
-                total=total,
-                passed=passed,
-                failed=failed,
-                errored=errored,
-                partial=partial,
-                verdict=verdict,
-                trials=ordered,
-                skipped=skipped,
-                smoke=any(trial.is_smoke for trial in all_trials),
-            )
-        )
-    return aggregates
-
-
 def upsert_trial(trials: list[TrialMetadata], metadata: TrialMetadata) -> None:
     for index, existing in enumerate(trials):
         if existing.nodeid == metadata.nodeid:
@@ -117,9 +65,9 @@ def write_run_artifacts(
     trials: list[TrialMetadata],
     result_path: Path,
     artifact_dir: Path,
+    core_result: Mapping[str, Any],
     complete: bool = True,
     interruption: dict[str, Any] | None = None,
-    core_result: Mapping[str, Any] | None = None,
 ) -> list[KensaAggregate]:
     ordered_trials = sorted(trials, key=trial_sort_key)
     trial_payloads = [
@@ -128,24 +76,51 @@ def write_run_artifacts(
         )
         for trial in ordered_trials
     ]
-    payload = (
-        dict(core_result)
-        if core_result is not None
-        else {
-            "schema_version": "kensa.result.v1",
-            "run_id": run_id,
-            "complete": complete,
-            "interruption": interruption,
-            "trials": trial_payloads,
-            "aggregates": derive_v1_aggregates(trial_payloads),
-            "summary": derive_v1_summary(trial_payloads),
-        }
-    )
+    payload = dict(core_result)
     result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
-    _write_text_atomic(result_path, result.model_dump_json(indent=2))
+    expected_interruption = (
+        RunInterruption.model_validate(interruption) if interruption is not None else None
+    )
+    expected_trials = tuple(
+        (
+            trial_payload["nodeid"],
+            trial_payload["group_id"],
+            trial_payload["case_id"],
+            trial_payload["trial_index"],
+            trial_payload["configured_trials"],
+            trial_payload["status"],
+        )
+        for trial_payload in trial_payloads
+    )
+    actual_trials = tuple(
+        (
+            trial.nodeid,
+            trial.group_id,
+            trial.case_id,
+            trial.trial_index,
+            trial.configured_trials,
+            trial.status,
+        )
+        for trial in result.trials
+    )
+    contradictions: list[str] = []
+    if result.run_id != run_id:
+        contradictions.append("run_id")
+    if result.complete is not complete:
+        contradictions.append("complete")
+    if result.interruption != expected_interruption:
+        contradictions.append("interruption")
+    if actual_trials != expected_trials:
+        contradictions.append("trials")
+    if contradictions:
+        raise ValueError(
+            "Kensa core result contradicts the requested artifact: " + ", ".join(contradictions)
+        )
     result_trials = [trial_result_to_metadata(trial) for trial in result.trials]
+    aggregates = _metadata_aggregates(result, ordered_trials)
+    _write_text_atomic(result_path, result.model_dump_json(indent=2))
     _write_trace_artifact(run_id, result_trials, artifact_dir)
-    return _metadata_aggregates(result, ordered_trials)
+    return aggregates
 
 
 def aggregates_from_core_result(
@@ -263,7 +238,6 @@ def _write_text_atomic(path: Path, content: str) -> None:
 
 __all__ = [
     "KensaAggregate",
-    "aggregate_trials",
     "trial_from_dict",
     "trial_result_to_metadata",
     "trial_sort_key",

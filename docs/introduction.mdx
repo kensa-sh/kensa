@@ -1,113 +1,91 @@
 ---
 title: Introduction
-description: Kensa turns agent traces into pytest evals that run in CI.
+description: Kensa turns agent traces into Python or TypeScript evals that run in CI.
 sidebarTitle: Introduction
 keywords:
   - agent evals
   - pytest
+  - typescript
+  - vitest
   - regression tests
   - llm judge
   - traces
 ---
 
-Generated from traces or written from scratch, your evals live in your repo as plain, executable pytest files. Run them with the rest of your test suite and catch regressions before they reach production.
+Kensa turns agent traces into Python or TypeScript evals that run in CI. Generated from traces or written from scratch, they live in your repo and run with the rest of your test suite.
+
+## Choose your SDK
+
+| | Python | TypeScript |
+|---|---|---|
+| Install | `kensa` | `@kensa/sdk` and `vitest` |
+| Test runner | pytest | Vitest |
+| Authoring API | `kensa.pytest` | `@kensa/sdk/vitest` |
+| Run | `kensa eval` or `pytest` | `vitest run` |
+| Additional surface | Trace capture, imports, mining, judges, and the Kensa CLI | Runner-neutral evaluation through `@kensa/sdk` |
+
+### Python with pytest
 
 ```python
 import pytest
 
-from kensa.pytest import judge, kensa_case
+from kensa.pytest import kensa_case
 
 
 @pytest.mark.kensa(trials=3)
 @pytest.mark.parametrize(
     "case",
-    [
-        kensa_case(
-            id="refund_without_order_history",
-            input="I was charged $29 yesterday. No order ID, but please refund it.",
-        )
-    ],
+    [kensa_case(id="refund_without_order_history", input="Refund my last charge.")],
 )
 def test_refund_policy(case, kensa_run):
     result = case.run(kensa_run)
-
-    assert result.trace.tools.include(["lookup_customer"])
     assert result.trace.tools.exclude(["issue_refund"])
-
-    verdict = judge(
-        result,
-        "The response must not promise an unsupported refund.",
-        input=case.input,
-        trace=result.trace,
-    )
-    assert verdict.passed, verdict.reasoning
 ```
 
-Nothing in this file is special: it is a pytest test that any CI already running your Python suite can run.
+### TypeScript with Vitest
 
-<Check>Prefer the guided path? [Quickstart](/quickstart) installs Kensa, wires the harness, and lands your first eval.</Check>
+```typescript
+import { kensaTest } from "@kensa/sdk/vitest";
 
-<Columns cols={2}>
-  <Card title="Run your first eval" href="/quickstart" cta="Open quickstart" arrow="true">
-    Add Kensa, run `kensa init`, and turn one realistic case into a passing eval.
-  </Card>
-  <Card title="Learn the mental model" href="/concepts" cta="Read concepts" arrow="true">
-    Understand how cases, traces, assertions, judges, and trials fit together.
-  </Card>
-  <Card title="Drive it from your agent" href="/skills" cta="Use the skill" arrow="true">
-    The `kensa-evals` skill walks Claude Code, Codex, or Cursor through the eval lifecycle.
-  </Card>
-  <Card title="Look up a command" href="/cli" cta="CLI reference" arrow="true">
-    `init`, `doctor`, `connect`, `import`, and `eval` - every flag in one place.
-  </Card>
-</Columns>
+kensaTest("does not issue an unsupported refund", {
+  case: {
+    id: "refund_without_order_history",
+    input: "Refund my last charge.",
+    metadata: {},
+  },
+  observe: observeRefund,
+  check: checkRefundPolicy,
+});
+```
 
-## How it works
+`observeRefund` calls your agent and returns its output and trace evidence. `checkRefundPolicy` evaluates that observation. See the [TypeScript SDK](/typescript) guide for the complete callback shapes.
 
-<Columns cols={2}>
-  <Card title="Traces in">
-    Import minimized, redacted trace evidence from Langfuse or a JSON / JSONL / OTLP export - or capture it locally.
-  </Card>
-  <Card title="Behavior out">
-    Your coding agent mines imports into reviewable eval ideas you approve and materialize as pytest files.
-  </Card>
-  <Card title="Assertions gate the judge">
-    Deterministic assertions run first. The `judge(...)` call only runs if they pass, so obvious regressions never spend tokens.
-  </Card>
-  <Card title="Ship in CI">
-    Evals are plain pytest. Run `kensa eval` in the same job that runs your tests and fail the build on regressions.
-  </Card>
-</Columns>
+## Shared evaluation model
+
+Both SDKs follow the same sequence while keeping your agent code in its native runtime.
+
+```mermaid
+flowchart LR
+  P["Python + pytest"] --> C["Case"]
+  T["TypeScript + Vitest"] --> C
+  C --> O["Observe agent"]
+  O --> E["Output + trace"]
+  E --> K["Check"]
+  K --> V["Verdict"]
+```
+
+Python owns pytest fixtures, callbacks, instrumentation, and the trace-to-eval CLI workflow. Its bundled engine owns evaluation state, normalization, aggregation, reporting, and result construction. TypeScript imports the shared semantic core in process and uses Vitest only as the test adapter.
 
 ## Where to start
 
 | If you want to | Go to |
 |---|---|
-| Get running in a few minutes | [Quickstart](/quickstart) |
+| Start with Python and pytest | [Python quickstart](/quickstart) |
+| Start with TypeScript and Vitest | [TypeScript SDK](/typescript) |
 | Understand the mental model | [Concepts](/concepts) |
-| Define cases and trials | [Cases](/cases) |
-| Assert on traces and output | [Assertions](/assertions) |
 | Bring in existing traces | [Tracing & imports](/tracing) |
-| Look up exact commands | [CLI reference](/cli) |
-
-## Data flow
-
-Traces from real runs become regression tests. Each round tightens coverage around behavior you have actually observed.
-
-```mermaid
-flowchart LR
-  A["Traces<br/>Langfuse · JSON/JSONL/OTLP"] --> B["<code>kensa import</code>"]
-  B --> C["<code>kensa-inspect</code><br/>eval ideas"]
-  C --> D["<code>tests/evals/test_*.py</code><br/>generated or hand-written"]
-  D --> E["<code>kensa eval</code><br/>(pytest)"]
-  E --> F["Verdicts<br/>term / JSON / Markdown"]
-```
-
-Inside each eval, pytest runs your case through the harness, collects a trace, and evaluates it.
-
-## Compatible coding agents
-
-Kensa scaffolds setup instructions and the `kensa-evals` skill for Claude Code, Codex, and Cursor. If none are detected, `kensa init` still prints a copyable setup prompt.
+| Run either SDK in CI | [CI](/ci) |
+| Use the Python CLI | [CLI reference](/cli) |
 
 ## License
 

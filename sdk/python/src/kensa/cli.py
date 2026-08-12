@@ -44,6 +44,7 @@ from kensa.constants import (
     TRACE_IMPORTS_DIR,
     WORKFLOW_TEXT,
 )
+from kensa.engine import EngineClient, KensaEngineError
 from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
 from kensa.llm import DEFAULT_LLM_MODEL
 from kensa.models import (
@@ -53,7 +54,7 @@ from kensa.models import (
     KensaProjectConfig,
     RedactionModelChoice,
 )
-from kensa.scoring import run_summary
+from kensa.results import load_run_result
 from kensa.traces import (
     ImportResult,
     _import_trace_records,
@@ -867,13 +868,36 @@ def _cmd_eval(args: Any, pytest_args: list[str]) -> int:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
     artifact = artifact_dir / "results" / f"{run_id}.json"
     control_path = artifact_dir / "state" / f"{run_id}.json"
-    write_run_artifacts(
-        run_id=run_id,
-        trials=[],
-        result_path=artifact,
-        artifact_dir=artifact_dir,
-        complete=False,
-    )
+    try:
+        with EngineClient() as engine:
+            core_result = engine.build_run(
+                run_id=run_id,
+                complete=False,
+                interruption=None,
+                trials=[],
+            )
+        write_run_artifacts(
+            run_id=run_id,
+            trials=[],
+            result_path=artifact,
+            artifact_dir=artifact_dir,
+            core_result=core_result,
+            complete=False,
+        )
+    except (KensaEngineError, ValueError) as exc:
+        message = f"Kensa engine startup failed: {exc}"
+        if json_output:
+            cli_output.print_json_envelope(
+                command="eval",
+                ok=False,
+                exit_code=2,
+                summary="Kensa eval could not start the engine.",
+                data={"paths": paths, "workers": workers, "pytest_args": pytest_args},
+                errors=[message],
+            )
+        else:
+            click.echo(message, err=True)
+        return 2
     write_control(
         control_path,
         WatchdogControl(
@@ -1134,10 +1158,8 @@ def _latest_result_artifact(result_dir: Path) -> Path | None:
 
 
 def _write_markdown_report(source: Path, destination: Path) -> None:
-    data = json.loads(source.read_text())
-    summary = data.get("summary")
-    if not isinstance(summary, dict):
-        summary = run_summary(data)
+    result = load_run_result(source)
+    summary = result.summary.model_dump(mode="json")
     curve = summary["pass_k_curve"]
     lines = ["# Kensa Eval Report", "", "## Reliability", ""]
     if curve:
@@ -1199,7 +1221,7 @@ def _write_markdown_report(source: Path, destination: Path) -> None:
             f"- **{aggregate['verdict']}** `{aggregate['group_id']}`: "
             f"{aggregate['passed']}/{aggregate['total']} passed"
         )
-        for aggregate in data.get("aggregates", [])
+        for aggregate in (item.model_dump(mode="json") for item in result.aggregates)
     )
     destination.write_text("\n".join(lines) + "\n")
 

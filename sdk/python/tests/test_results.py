@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from kensa.artifacts import write_run_artifacts
+from kensa.engine import EngineClient
 from kensa.errors import TrialFailure
 from kensa.results import (
     AggregateResult,
@@ -67,11 +68,20 @@ def _write(
     interruption: dict[str, Any] | None = None,
 ) -> Path:
     result_path = tmp_path / "result.json"
+    selected_trials = [] if trials is None else trials
+    with EngineClient() as engine:
+        core_result = engine.build_run(
+            run_id="run-1",
+            complete=complete,
+            interruption=interruption,
+            trials=[trial.to_dict() for trial in selected_trials],
+        )
     write_run_artifacts(
         run_id="run-1",
-        trials=[] if trials is None else trials,
+        trials=selected_trials,
         result_path=result_path,
         artifact_dir=tmp_path,
+        core_result=core_result,
         complete=complete,
         interruption=interruption,
     )
@@ -199,18 +209,7 @@ def test_result_v1_accepts_additive_structured_tool_calls(tmp_path: Path) -> Non
     assert result.trials[0].trace["tool_calls"] == [tool_call]
 
 
-def test_loader_keeps_checked_in_v1_artifact_compatible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import kensa.artifacts as artifacts
-    import kensa.results as results
-
-    def reject_current_derivation(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("v1 validation used mutable derivation code")
-
-    monkeypatch.setattr(artifacts, "aggregate_trials", reject_current_derivation)
-    monkeypatch.setattr(results, "run_summary", reject_current_derivation, raising=False)
-
+def test_loader_keeps_checked_in_v1_artifact_compatible() -> None:
     result = load_run_result(_V1_RESULT_FIXTURE)
 
     assert result.run_id == "compatibility-v1"
@@ -331,15 +330,11 @@ def test_writer_retains_v1_legacy_cost_derivation(
     assert summary.cost_known_trials == expected_known_trials
 
 
-@pytest.mark.parametrize("llm_turns", [[], 10**400])
-def test_loader_ignores_invalid_llm_turn_values(
-    tmp_path: Path,
-    llm_turns: Any,
-) -> None:
+def test_loader_ignores_invalid_llm_turn_values(tmp_path: Path) -> None:
     result_path = _write(tmp_path, trials=[_trial()])
     payload = json.loads(result_path.read_text())
-    payload["trials"][0]["trace"]["llm_turns"] = llm_turns
-    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = llm_turns
+    payload["trials"][0]["trace"]["llm_turns"] = []
+    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = []
     payload["summary"]["cost_latency"]["mean_llm_turns"] = 0.0
     result_path.write_text(json.dumps(payload))
 
@@ -348,7 +343,18 @@ def test_loader_ignores_invalid_llm_turn_values(
     assert result.summary.cost_latency.mean_llm_turns == 0.0
 
 
-def test_loader_wraps_derivation_failures_with_artifact_path(
+def test_loader_rejects_non_interoperable_integer_values(tmp_path: Path) -> None:
+    result_path = _write(tmp_path, trials=[_trial()])
+    payload = json.loads(result_path.read_text())
+    payload["trials"][0]["trace"]["llm_turns"] = 10**400
+    payload["aggregates"][0]["trials"][0]["trace"]["llm_turns"] = 10**400
+    result_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="outside the interoperable JSON range"):
+        load_run_result(result_path)
+
+
+def test_loader_wraps_engine_verification_failures_with_artifact_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,17 +362,24 @@ def test_loader_wraps_derivation_failures_with_artifact_path(
 
     result_path = _write(tmp_path, trials=[_trial()])
 
-    def fail_derivation(trials: list[dict[str, Any]]) -> dict[str, Any]:
-        del trials
-        raise TypeError("invalid derived value")
+    class FailingEngine:
+        def __enter__(self) -> FailingEngine:
+            return self
 
-    monkeypatch.setattr(results, "derive_v1_summary", fail_derivation)
+        def __exit__(self, *_: object) -> None:
+            return None
 
-    with pytest.raises(ValueError, match="derivation failed") as exc_info:
+        def build_run(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise results.KensaEngineError("verification unavailable")
+
+    monkeypatch.setattr(results, "EngineClient", FailingEngine)
+
+    with pytest.raises(ValueError, match="engine verification failed") as exc_info:
         load_run_result(result_path)
 
     assert str(result_path) in str(exc_info.value)
-    assert "invalid derived value" in str(exc_info.value)
+    assert "verification unavailable" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -498,11 +511,14 @@ def test_models_are_strict_frozen_and_recursively_forbid_unknown_fields(tmp_path
         "duplicate",
         "duplicate_index",
         "aggregate_membership",
+        "aggregate_unknown_nodeid",
+        "aggregate_duplicate_reference",
         "aggregate_identity",
         "aggregate_count",
         "aggregate_verdict",
         "failure_count",
         "summary_metric",
+        "boolean_number",
         "complete_interruption",
     ],
 )
@@ -530,6 +546,10 @@ def test_loader_rejects_cross_section_inconsistency(
         payload["trials"].append(duplicate)
     elif mutation == "aggregate_membership":
         payload["aggregates"][0]["trials"] = payload["aggregates"][0]["trials"][:1]
+    elif mutation == "aggregate_unknown_nodeid":
+        payload["aggregates"][0]["trials"][0]["nodeid"] = "ghost"
+    elif mutation == "aggregate_duplicate_reference":
+        payload["aggregates"][0]["trials"].append(payload["aggregates"][0]["trials"][0])
     elif mutation == "aggregate_identity":
         payload["aggregates"][0]["group_id"] = "other-group"
     elif mutation == "aggregate_count":
@@ -540,6 +560,9 @@ def test_loader_rejects_cross_section_inconsistency(
         payload["summary"]["error_counts"]["agent"] = 1
     elif mutation == "summary_metric":
         payload["summary"]["cost_latency"]["latency_mean_ms"] = 999.0
+    elif mutation == "boolean_number":
+        payload["trials"][0]["output"] = {"value": 1}
+        payload["aggregates"][0]["trials"][0]["output"] = {"value": True}
     elif mutation == "complete_interruption":
         payload["interruption"] = {"kind": "crash", "message": "worker crashed"}
     result_path.write_text(json.dumps(payload))
@@ -566,6 +589,8 @@ def test_failed_validation_does_not_replace_existing_artifact(tmp_path: Path) ->
     result_path = _write(tmp_path, trials=[_trial()])
     original = result_path.read_bytes()
     duplicate = _trial()
+    payload = json.loads(original)
+    payload["trials"].append(payload["trials"][0])
 
     with pytest.raises(ValueError, match="duplicate"):
         write_run_artifacts(
@@ -573,6 +598,70 @@ def test_failed_validation_does_not_replace_existing_artifact(tmp_path: Path) ->
             trials=[duplicate, duplicate],
             result_path=result_path,
             artifact_dir=tmp_path,
+            core_result=payload,
         )
 
     assert result_path.read_bytes() == original
+
+
+def test_unknown_aggregate_trial_does_not_replace_existing_artifact(tmp_path: Path) -> None:
+    trial = _trial()
+    result_path = _write(tmp_path, trials=[trial])
+    original = result_path.read_bytes()
+    payload = json.loads(original)
+    payload["aggregates"][0]["trials"][0]["nodeid"] = "ghost"
+
+    with pytest.raises(ValueError, match="does not match top-level trials"):
+        write_run_artifacts(
+            run_id="run-1",
+            trials=[trial],
+            result_path=result_path,
+            artifact_dir=tmp_path,
+            core_result=payload,
+        )
+
+    assert result_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["run_id", "complete", "interruption", "trials"])
+def test_writer_rejects_contradictory_core_results(tmp_path: Path, field: str) -> None:
+    trial = _trial()
+    complete = field != "interruption"
+    interruption = {"kind": "crash", "message": "requested"} if field == "interruption" else None
+    with EngineClient() as engine:
+        if field == "interruption":
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=False,
+                interruption={"kind": "crash", "message": "response"},
+                trials=[trial.to_dict()],
+            )
+        elif field == "trials":
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=True,
+                interruption=None,
+                trials=[_trial(case_id="other").to_dict()],
+            )
+        else:
+            core_result = engine.build_run(
+                run_id="run-1",
+                complete=True,
+                interruption=None,
+                trials=[trial.to_dict()],
+            )
+    if field == "run_id":
+        core_result["run_id"] = "other"
+    elif field == "complete":
+        core_result["complete"] = False
+
+    with pytest.raises(ValueError, match=field):
+        write_run_artifacts(
+            run_id="run-1",
+            trials=[trial],
+            result_path=tmp_path / "result.json",
+            artifact_dir=tmp_path,
+            core_result=core_result,
+            complete=complete,
+            interruption=interruption,
+        )

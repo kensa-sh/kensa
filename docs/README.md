@@ -43,10 +43,12 @@ docs/
   assertions.mdx
   judge.mdx
   tracing.mdx
-  pytest.mdx
+  python.mdx
+  typescript.mdx
   skills.mdx
   cli.mdx
   ci.mdx
+  migration.mdx
   changelog.mdx
   logo/                # wordmark (light/dark)
   favicon.png

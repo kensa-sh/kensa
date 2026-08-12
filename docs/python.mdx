@@ -1,8 +1,9 @@
 ---
-title: Pytest plugin
-description: The marker, fixtures, and harness that make Kensa evals plain pytest tests.
-sidebarTitle: Pytest
+title: Python SDK
+description: Write Kensa evals in Python with pytest.
+sidebarTitle: Python
 keywords:
+  - python
   - pytest
   - fixtures
   - kensa_run
@@ -10,11 +11,13 @@ keywords:
   - marker
 ---
 
-Kensa is a pytest plugin. Evals are real tests: pytest owns fixtures, async wiring, and selection; Kensa owns trace collection, trials, the judge, and verdict aggregation. Install with the rest of your dev dependencies:
+Kensa is a pytest plugin. Evals are real tests: pytest owns fixtures, async wiring, selection, and Python callbacks. The session-scoped Kensa engine owns evaluation state, normalization, aggregation, reporting, and result construction. Install with the rest of your dev dependencies:
 
 ```bash
 uv add --dev kensa     # or: python -m pip install kensa
 ```
+
+Released wheels bundle the platform engine, so Python users do not install Node, pnpm, or Bun. Repository contributors building an editable checkout should follow the [migration guide](/migration#python-installs).
 
 ## Anatomy of an eval
 
@@ -244,6 +247,8 @@ result: RunResult = load_run_result(".kensa/results/run-123.json")
 
 Invalid or unsupported artifacts raise a path-specific `ValueError`; the loader never returns
 partial data or accepts legacy schemas.
+
+Do not hand-edit legacy or unversioned artifacts. Follow [Artifact and release migration](/migration#result-artifacts) to rebuild derived results and reports from their source evals and evidence.
 
 ## Plugin options
 

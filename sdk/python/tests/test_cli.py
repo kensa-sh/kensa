@@ -566,6 +566,48 @@ def test_eval_json_rejects_incompatible_pytest_worker_options(
     assert payload["errors"] == [expected_error]
 
 
+def test_eval_reports_initial_engine_failure_in_terminal_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class MissingEngine:
+        def __init__(self) -> None:
+            raise cli.KensaEngineError("missing engine", code="startup")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "EngineClient", MissingEngine)
+
+    code = main(["eval"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err == "Kensa engine startup failed: missing engine\n"
+
+
+def test_eval_reports_initial_engine_failure_in_json_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class MissingEngine:
+        def __init__(self) -> None:
+            raise cli.KensaEngineError("missing engine", code="startup")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "EngineClient", MissingEngine)
+
+    code = main(["eval", "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert captured.err == ""
+    assert payload["summary"] == "Kensa eval could not start the engine."
+    assert payload["errors"] == ["Kensa engine startup failed: missing engine"]
+
+
 @pytest.mark.parametrize(
     ("workers", "pytest_args", "expected_xdist"),
     [
@@ -1633,7 +1675,10 @@ def test_readme_cli_quickstart_leads_with_setup_inspect_approve_eval_flow() -> N
 def test_readme_header_centers_banner_tagline_and_badges() -> None:
     readme = (REPO_ROOT / "README.md").read_text()
     header = readme.split("Generated from traces", 1)[0]
-    tagline = '<p align="center">Kensa turns agent traces into pytest evals that run in CI.</p>'
+    tagline = (
+        '<p align="center">Kensa turns agent traces into Python or TypeScript evals '
+        "that run in CI.</p>"
+    )
     badge_block = (
         '<p align="center">\n'
         '  <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml">'

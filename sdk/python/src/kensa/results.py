@@ -8,7 +8,7 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-from kensa._result_v1 import derive_v1_aggregates, derive_v1_summary
+from kensa.engine import EngineClient, KensaEngineError, _json_values_equal
 from kensa.errors import FailureCategory, TrialFailure
 
 RunStatus: TypeAlias = Literal["pass", "fail", "error", "skipped", "provisional"]
@@ -179,35 +179,28 @@ class RunResult(ResultModel):
         if list(self.trials) != expected_order:
             raise ValueError("trials are not in deterministic order")
 
+        trials_by_nodeid = {trial.nodeid: trial for trial in self.trials}
+        aggregate_nodeids: list[str] = []
         for aggregate in self.aggregates:
             if any(
                 trial.group_id != aggregate.group_id or trial.case_id != aggregate.case_id
                 for trial in aggregate.trials
             ):
                 raise ValueError("aggregate contains a trial with mismatched identifiers")
+            for trial in aggregate.trials:
+                top_level = trials_by_nodeid.get(trial.nodeid)
+                if top_level is None or not _json_values_equal(
+                    trial.model_dump(mode="json"),
+                    top_level.model_dump(mode="json"),
+                ):
+                    raise ValueError(
+                        "aggregate contains a trial that does not match top-level trials"
+                    )
+                aggregate_nodeids.append(trial.nodeid)
+        if len(aggregate_nodeids) != len(set(aggregate_nodeids)):
+            raise ValueError("aggregates contain duplicate trial references")
 
-        trial_payloads = [trial.model_dump(mode="json") for trial in self.trials]
-        expected_aggregates = derive_v1_aggregates(trial_payloads)
-        actual_aggregates = [aggregate.model_dump(mode="json") for aggregate in self.aggregates]
-        if actual_aggregates != expected_aggregates:
-            raise ValueError("aggregates do not match top-level trials")
-
-        expected_summary = derive_v1_summary(trial_payloads)
-        if _normalized_numbers(self.summary.model_dump(mode="json")) != _normalized_numbers(
-            expected_summary
-        ):
-            raise ValueError("summary does not match top-level trials")
         return self
-
-
-def _normalized_numbers(value: object) -> object:
-    if isinstance(value, float):
-        return round(value, 12)
-    if isinstance(value, list):
-        return [_normalized_numbers(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _normalized_numbers(item) for key, item in value.items()}
-    return value
 
 
 def load_run_result(path: str | Path) -> RunResult:
@@ -233,17 +226,38 @@ def load_run_result(path: str | Path) -> RunResult:
         )
 
     try:
-        return RunResult.model_validate_json(contents)
+        result = RunResult.model_validate_json(contents)
     except ValidationError as exc:
         error = exc.errors(include_input=False, include_url=False)[0]
         location = ".".join(str(part) for part in error["loc"])
         cause = f"{location}: {error['msg']}" if location else str(error["msg"])
         raise ValueError(f"Invalid Kensa result artifact {result_path}: {cause}") from exc
-    except Exception as exc:
-        cause = str(exc).strip() or type(exc).__name__
+    try:
+        with EngineClient() as engine:
+            canonical_payload = engine.build_run(
+                run_id=result.run_id,
+                complete=result.complete,
+                interruption=(
+                    result.interruption.model_dump(mode="json")
+                    if result.interruption is not None
+                    else None
+                ),
+                trials=[trial.model_dump(mode="json") for trial in result.trials],
+            )
+        canonical = RunResult.model_validate_json(json.dumps(canonical_payload, allow_nan=False))
+    except (KensaEngineError, ValidationError, TypeError, ValueError) as exc:
         raise ValueError(
-            f"Invalid Kensa result artifact {result_path}: derivation failed: {cause}"
+            f"Invalid Kensa result artifact {result_path}: engine verification failed: {exc}"
         ) from exc
+    if not _json_values_equal(
+        result.model_dump(mode="json"),
+        canonical.model_dump(mode="json"),
+    ):
+        raise ValueError(
+            f"Invalid Kensa result artifact {result_path}: "
+            "result does not match canonical engine derivation"
+        )
+    return result
 
 
 __all__ = [

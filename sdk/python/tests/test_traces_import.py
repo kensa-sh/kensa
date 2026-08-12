@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -182,21 +183,33 @@ def _trace_view_model() -> traces_module.TraceView:
     )
 
 
-def test_trace_normalization_falls_back_only_for_implicit_missing_engine(
+@pytest.mark.parametrize("configured", [None, "missing"])
+def test_trace_normalization_fails_closed_for_missing_engine(
     monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
 ) -> None:
     class MissingEngine:
         def __init__(self) -> None:
             raise traces_module.KensaEngineError("missing", code="startup")
 
-    monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
+    if configured is None:
+        monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
+    else:
+        monkeypatch.setenv("KENSA_ENGINE_COMMAND", configured)
     monkeypatch.setattr(traces_module, "EngineClient", MissingEngine)
 
-    trace = _trace_view_model()
-    assert traces_module._normalize_trace_views([trace]) == [trace.to_dict()]
-
-    monkeypatch.setenv("KENSA_ENGINE_COMMAND", "missing")
     with pytest.raises(ValueError, match="Could not start Kensa evidence engine"):
+        traces_module._normalize_trace_views([_trace_view_model()])
+
+
+def test_trace_normalization_rejects_backward_timestamps() -> None:
+    trace = replace(
+        _trace_view_model(),
+        started_at_unix_nano=2,
+        ended_at_unix_nano=1,
+    )
+
+    with pytest.raises(ValueError, match="Could not normalize trace evidence"):
         traces_module._normalize_trace_views([trace])
 
 
@@ -1759,7 +1772,6 @@ def test_trace_import_internal_edge_paths(
     assert traces_module._unix_nano_or_none("  ") is None
     assert traces_module._unix_nano_or_none("2026-06-30T00:00:00") == 1_782_777_600_000_000_000
     assert traces_module._unix_nano_or_none(object()) is None
-    assert traces_module._aggregate_status("ok", []) == "ok"
     assert traces_module._status_from_value(True) == "error"
     assert traces_module._status_from_value(2) == "error"
     assert traces_module._status_from_value("2") == "error"
@@ -1787,23 +1799,6 @@ def test_trace_import_internal_edge_paths(
         {"kvlistValue": {"values": [{"key": "nested", "value": {"boolValue": True}}]}}
     ) == {"nested": True}
     assert traces_module._otlp_value({"unknown": "value"}) == {"unknown": "value"}
-    ok_span = traces_module.SpanView(
-        id="span",
-        trace_id="trace",
-        parent_id=None,
-        name="span",
-        kind="span",
-        tool_name=None,
-        started_at_unix_nano=None,
-        ended_at_unix_nano=None,
-        duration_ms=0.0,
-        status="ok",
-        status_message=None,
-        input=None,
-        output=None,
-        usage=traces_module.UsageView(),
-    )
-    assert traces_module._aggregate_status("unknown", [ok_span]) == "ok"
     with pytest.raises(ValueError, match="trace record must be a JSON object"):
         traces_module._validate_json_trace_record(cast(dict[str, Any], []))
     with pytest.raises(ValueError, match="span row must be a JSON object"):

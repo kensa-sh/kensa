@@ -367,60 +367,56 @@ def test_cli_edge_paths(
     result_dir = tmp_path / ".kensa" / "results"
     result_dir.mkdir(parents=True)
     artifact = result_dir / "run.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "aggregates": [
-                    {
-                        "verdict": "pass",
-                        "group_id": "g",
-                        "case_id": "domain_case",
-                        "passed": 1,
-                        "total": 1,
-                    }
-                ]
-            }
-        )
+    trial = TrialMetadata(
+        nodeid="n",
+        group_id="g",
+        case_id="domain_case",
+        trial_index=1,
+        configured_trials=1,
+        status="pass",
     )
+
+    def write_valid_artifact() -> None:
+        with cli.EngineClient() as engine:
+            core_result = engine.build_run(
+                run_id="run",
+                complete=True,
+                interruption=None,
+                trials=[trial.to_dict()],
+            )
+        cli.write_run_artifacts(
+            run_id="run",
+            trials=[trial],
+            result_path=artifact,
+            artifact_dir=tmp_path / ".kensa",
+            core_result=core_result,
+        )
+
+    write_valid_artifact()
     cli._write_markdown_report(artifact, tmp_path / "report.md")
     assert "Kensa Eval Report" in (tmp_path / "report.md").read_text()
     artifact.write_text("{")
     assert cli._latest_eval_readiness().evals_ready is False
     skipped_readiness = cli._eval_readiness({"aggregates": [{}, {"verdict": "fail"}]})
     assert skipped_readiness.evals_ready is False
-    artifact.write_text(
-        json.dumps(
-            {
-                "aggregates": [
-                    {
-                        "verdict": "pass",
-                        "group_id": "g",
-                        "case_id": "domain_case",
-                        "passed": 1,
-                        "total": 1,
-                    }
-                ]
-            }
-        )
-    )
+    write_valid_artifact()
 
     def successful_eval(*args: Any, **kwargs: Any) -> SimpleNamespace:
         del args
         control = read_control(Path(kwargs["control_path"]))
+        with cli.EngineClient() as engine:
+            core_result = engine.build_run(
+                run_id=control.run_id,
+                complete=True,
+                interruption=None,
+                trials=[trial.to_dict()],
+            )
         cli.write_run_artifacts(
             run_id=control.run_id,
-            trials=[
-                TrialMetadata(
-                    nodeid="n",
-                    group_id="g",
-                    case_id="domain_case",
-                    trial_index=1,
-                    configured_trials=1,
-                    status="pass",
-                )
-            ],
+            trials=[trial],
             result_path=control.result_path,
             artifact_dir=control.artifact_dir,
+            core_result=core_result,
         )
         return SimpleNamespace(returncode=0, stdout="", stderr="", timeout=None)
 
@@ -687,6 +683,15 @@ def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
             status="pass",
         )
     ]
+    with cli.EngineClient() as engine:
+        core_result = engine.build_run(
+            run_id=state.run_id,
+            complete=True,
+            interruption=None,
+            trials=[trial.to_dict() for trial in state.trials],
+        )
+    state._core_result = core_result
+    state._engine_closed = True
     config_obj.__dict__["_kensa_state"] = state
     pytest_terminal_summary(cast(Any, term), 0, cast(Any, config_obj))
     assert any('"aggregates"' in line for line in term.lines)
@@ -696,9 +701,19 @@ def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     term_state = KensaSessionState(cast(Any, term_config))
     term_state.aggregates = [aggregate]
     term_state.trials = state.trials
+    term_state._core_result = core_result
+    term_state._engine_closed = True
     term_config.__dict__["_kensa_state"] = term_state
     pytest_terminal_summary(cast(Any, term), 0, cast(Any, term_config))
     assert "Cost: n/a" in term.lines
+
+    unavailable_config = Config("term")
+    unavailable_state = KensaSessionState(cast(Any, unavailable_config))
+    unavailable_state.trials = state.trials
+    unavailable_state._engine_closed = True
+    unavailable_config.__dict__["_kensa_state"] = unavailable_state
+    pytest_terminal_summary(cast(Any, term), 0, cast(Any, unavailable_config))
+    assert "Kensa engine summary unavailable" in term.lines
 
     class Outcome:
         def __init__(self, report: Any) -> None:

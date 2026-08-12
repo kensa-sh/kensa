@@ -518,8 +518,6 @@ def _normalize_trace_views(traces: list[TraceView]) -> list[dict[str, Any]]:
     try:
         client = EngineClient()
     except KensaEngineError as exc:
-        if os.environ.get("KENSA_ENGINE_COMMAND") is None and exc.code == "startup":
-            return payloads
         raise ValueError(f"Could not start Kensa evidence engine: {exc}") from exc
     try:
         normalized = client.normalize_trace_views(payloads)
@@ -759,22 +757,16 @@ def _json_record_trace_view(record: dict[str, Any], *, trace_source: TraceSource
     _validate_json_trace_record(record)
     trace_id = _required_trace_id(record)
     spans = [_json_span_view(span, trace_id=trace_id) for span in _dict_items(record.get("spans"))]
-    explicit_status = _status_from_value(
-        _first_value(record, "status", "status_code", "statusCode")
-    )
     started_at = _started_at_unix_nano(record)
     ended_at = _ended_at_unix_nano(record)
-    if spans:
-        started_at = started_at if started_at is not None else _min_span_start(spans)
-        ended_at = ended_at if ended_at is not None else _max_span_end(spans)
     return TraceView(
         id=trace_id,
         name=_string_or_none(_first_value(record, "name", "traceName", "type")),
         source=trace_source,
         started_at_unix_nano=started_at,
         ended_at_unix_nano=ended_at,
-        duration_ms=_duration_ms(started_at, ended_at),
-        status=_aggregate_status(explicit_status, spans),
+        duration_ms=0.0,
+        status=_status_from_value(_first_value(record, "status", "status_code", "statusCode")),
         input=_first_value(record, "input", "inputs"),
         output=_first_value(record, "output", "outputs"),
         spans=spans,
@@ -786,16 +778,14 @@ def _trace_view_from_grouped_spans(
     spans: list[SpanView],
     trace_source: TraceSource,
 ) -> TraceView:
-    started_at = _min_span_start(spans)
-    ended_at = _max_span_end(spans)
     return TraceView(
         id=trace_id,
         name=spans[0].name if spans else None,
         source=trace_source,
-        started_at_unix_nano=started_at,
-        ended_at_unix_nano=ended_at,
-        duration_ms=_duration_ms(started_at, ended_at),
-        status=_aggregate_status("unknown", spans),
+        started_at_unix_nano=None,
+        ended_at_unix_nano=None,
+        duration_ms=0.0,
+        status="unknown",
         input=None,
         output=None,
         spans=spans,
@@ -824,7 +814,7 @@ def _json_span_view(span: dict[str, Any], *, trace_id: str) -> SpanView:
         tool_name=tool_name,
         started_at_unix_nano=started_at,
         ended_at_unix_nano=ended_at,
-        duration_ms=_duration_ms(started_at, ended_at),
+        duration_ms=0.0,
         status=_status_from_value(_first_value(span, "status", "status_code", "statusCode")),
         status_message=_string_or_none(_first_value(span, "status_message", "status.message")),
         input=_first_value(span, "input", "inputs"),
@@ -848,17 +838,15 @@ def _import_otlp_trace_views(
     traces: list[TraceView] = []
     for trace_id, span_rows in grouped.items():
         spans = [_otlp_span_view(span, trace_id) for span in span_rows]
-        started_at = _min_span_start(spans)
-        ended_at = _max_span_end(spans)
         traces.append(
             TraceView(
                 id=trace_id,
                 name=spans[0].name if spans else None,
                 source=trace_source,
-                started_at_unix_nano=started_at,
-                ended_at_unix_nano=ended_at,
-                duration_ms=_duration_ms(started_at, ended_at),
-                status=_aggregate_status("unknown", spans),
+                started_at_unix_nano=None,
+                ended_at_unix_nano=None,
+                duration_ms=0.0,
+                status="unknown",
                 input=None,
                 output=None,
                 spans=spans,
@@ -887,7 +875,7 @@ def _otlp_span_view(
         tool_name=_tool_name_from_attrs(attrs),
         started_at_unix_nano=started_at,
         ended_at_unix_nano=ended_at,
-        duration_ms=_duration_ms(started_at, ended_at),
+        duration_ms=0.0,
         status=_status_from_value(status.get("code")),
         status_message=_string_or_none(status.get("message")),
         input=_first_value(
@@ -932,9 +920,6 @@ def _import_langfuse_trace_views(
         ]
         started_at = _started_at_unix_nano(trace)
         ended_at = _ended_at_unix_nano(trace)
-        if spans:
-            started_at = started_at if started_at is not None else _min_span_start(spans)
-            ended_at = ended_at if ended_at is not None else _max_span_end(spans)
         views.append(
             TraceView(
                 id=trace_id,
@@ -942,11 +927,8 @@ def _import_langfuse_trace_views(
                 source=trace_source,
                 started_at_unix_nano=started_at,
                 ended_at_unix_nano=ended_at,
-                duration_ms=_duration_ms(started_at, ended_at),
-                status=_aggregate_status(
-                    _status_from_value(_first_value(trace, "status", "level", "error")),
-                    spans,
-                ),
+                duration_ms=0.0,
+                status=_status_from_value(_first_value(trace, "status", "level", "error")),
                 input=_first_value(trace, "input"),
                 output=_first_value(trace, "output"),
                 spans=spans,
@@ -971,18 +953,16 @@ def _langfuse_observation_trace_views(
         spans = [
             _langfuse_observation_span_view(observation, trace_id) for observation in observations
         ]
-        started_at = _min_span_start(spans)
-        ended_at = _max_span_end(spans)
         first = observations[0] if observations else {}
         views.append(
             TraceView(
                 id=trace_id,
                 name=_string_or_none(_first_value(first, "traceName", "trace_name")),
                 source=trace_source,
-                started_at_unix_nano=started_at,
-                ended_at_unix_nano=ended_at,
-                duration_ms=_duration_ms(started_at, ended_at),
-                status=_aggregate_status("unknown", spans),
+                started_at_unix_nano=None,
+                ended_at_unix_nano=None,
+                duration_ms=0.0,
+                status="unknown",
                 input=None,
                 output=None,
                 spans=spans,
@@ -1019,7 +999,7 @@ def _langfuse_observation_span_view(
         tool_name=tool_name,
         started_at_unix_nano=started_at,
         ended_at_unix_nano=ended_at,
-        duration_ms=_duration_ms(started_at, ended_at),
+        duration_ms=0.0,
         status=_status_from_value(_first_value(observation, "status", "level", "error")),
         status_message=_string_or_none(
             _first_value(observation, "status_message", "statusMessage")
@@ -1311,36 +1291,6 @@ def _unix_nano_or_none(value: Any) -> int | None:
             parsed = parsed.replace(tzinfo=UTC)
         return int(parsed.timestamp() * 1_000_000_000)
     return None
-
-
-def _duration_ms(started_at: int | None, ended_at: int | None) -> float:
-    if started_at is None or ended_at is None:
-        return 0.0
-    return max(0.0, (ended_at - started_at) / 1_000_000)
-
-
-def _min_span_start(spans: list[SpanView]) -> int | None:
-    starts = [span.started_at_unix_nano for span in spans if span.started_at_unix_nano is not None]
-    return min(starts) if starts else None
-
-
-def _max_span_end(spans: list[SpanView]) -> int | None:
-    ends = [span.ended_at_unix_nano for span in spans if span.ended_at_unix_nano is not None]
-    return max(ends) if ends else None
-
-
-def _aggregate_status(
-    explicit_status: Literal["ok", "error", "unknown"],
-    spans: list[SpanView],
-) -> Literal["ok", "error", "unknown"]:
-    if explicit_status != "unknown":
-        return explicit_status
-    statuses = [span.status for span in spans]
-    if any(status == "error" for status in statuses):
-        return "error"
-    if statuses and all(status == "ok" for status in statuses):
-        return "ok"
-    return "unknown"
 
 
 def _string_or_none(value: Any) -> str | None:
