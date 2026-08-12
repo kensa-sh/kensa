@@ -141,9 +141,21 @@ jobs:
         with:
           node-version: 22.17
           cache: pnpm
+      - name: Resolve baseline Bun download
+        if: matrix.target == 'win32-x64'
+        id: windows_bun
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < .bun-version)"
+          echo "url=https://github.com/oven-sh/bun/releases/download/bun-v$version/bun-windows-x64-baseline.zip" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
+        if: matrix.target != 'win32-x64'
         with:
           bun-version-file: .bun-version
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.target == 'win32-x64'
+        with:
+          bun-download-url: ${{ steps.windows_bun.outputs.url }}
       - uses: astral-sh/setup-uv@v7
       - run: pnpm install --frozen-lockfile
       - run: uv python install 3.11

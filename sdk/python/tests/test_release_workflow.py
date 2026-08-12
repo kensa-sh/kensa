@@ -107,6 +107,16 @@ def test_release_workflow_publishes_only_verified_platform_wheels() -> None:
     assert "--sdist" not in workflow
 
 
+def test_wheel_workflows_install_the_baseline_windows_runtime() -> None:
+    for workflow_path in (CI_WORKFLOW, RELEASE_WORKFLOW):
+        workflow = workflow_path.read_text()
+
+        assert "version=\"$(tr -d '\\r\\n' < .bun-version)\"" in workflow
+        assert 'bun-v$version/bun-windows-x64-baseline.zip" >> "$GITHUB_OUTPUT"' in workflow
+        assert "if: matrix.target != 'win32-x64'" in workflow
+        assert "bun-download-url: ${{ steps.windows_bun.outputs.url }}" in workflow
+
+
 def test_release_workflow_uses_npm_trusted_publishing() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
     package_job = workflow.split("\n  package-npm:\n", maxsplit=1)[1].split(
