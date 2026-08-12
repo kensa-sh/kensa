@@ -45,5 +45,5 @@ dev = [
   "hatchling>=1.32.0",
   "pytest-asyncio>=1.4.0",
   "ruff>=0.15.20",
-  "ty>=0.0.40",
+  "ty>=0.0.69",
 ]
