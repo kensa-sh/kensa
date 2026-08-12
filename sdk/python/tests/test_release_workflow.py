@@ -50,6 +50,19 @@ def test_ci_does_not_merge_release_pull_requests() -> None:
     assert "repos/${GH_REPO}/pulls/${PR_NUMBER}/merge" not in workflow
 
 
+def test_ci_reports_stable_build_status_after_build_jobs() -> None:
+    workflow = CI_WORKFLOW.read_text()
+    jobs_after_build = workflow.split("\n  build:\n", maxsplit=1)[1]
+    build_job = jobs_after_build.split("\n  redaction:\n", maxsplit=1)[0]
+
+    assert "if: ${{ always() }}" in build_job
+    assert "needs: [typescript, wheels]" in build_job
+    assert "TYPESCRIPT_RESULT: ${{ needs.typescript.result }}" in build_job
+    assert "WHEELS_RESULT: ${{ needs.wheels.result }}" in build_job
+    assert 'test "$TYPESCRIPT_RESULT" = "success"' in build_job
+    assert 'test "$WHEELS_RESULT" = "success"' in build_job
+
+
 def test_release_workflow_requires_a_merged_release_pull_request() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
 

@@ -112,6 +112,19 @@ jobs:
           path: dist/*.whl
           compression-level: 0
 
+  build:
+    if: ${{ always() }}
+    needs: [typescript, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful build jobs
+        env:
+          TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
+          WHEELS_RESULT: ${{ needs.wheels.result }}
+        run: |
+          test "$TYPESCRIPT_RESULT" = "success"
+          test "$WHEELS_RESULT" = "success"
+
   # Run redaction with real spaCy/Presidio dependencies and the pinned small model.
   redaction:
     runs-on: ubuntu-latest
