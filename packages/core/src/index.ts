@@ -43,6 +43,7 @@ export {
   buildRunResult,
   parseTrials,
   summarizeTrials,
+  verifyRunResult,
   type AggregateVerdict,
   type CostLatencySummary,
   type ReliabilityCohort,
@@ -92,3 +93,36 @@ export {
   type InspectStatus,
   type TraceSummary,
 } from "./mining.js";
+export {
+  buildSyncBatch,
+  buildSyncReceipt,
+  previewSync,
+  verifySyncBatch,
+  verifySyncPlan,
+  verifySyncReceipt,
+  type EvidenceSyncArtifact,
+  type ProtectionResultSyncArtifact,
+  type ProtectionSuiteSyncArtifact,
+  type ResultSyncArtifact,
+  type SyncArtifact,
+  type SyncBatch,
+  type SyncConflict,
+  type SyncPlan,
+  type SyncPointer,
+  type SyncReceipt,
+} from "./sync.js";
+export {
+  bootstrapProtectionSuite,
+  verifyProtectionSuite,
+  type ProtectionBindings,
+  type ProtectionCase,
+  type ProtectionCriterion,
+  type ProtectionSuite,
+} from "./protection.js";
+export {
+  buildProtectionResult,
+  verifyProtectionResult,
+  type GitHubRunContext,
+  type ProtectionCriterionOutcome,
+  type ProtectionResult,
+} from "./protection-result.js";

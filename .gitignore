@@ -184,3 +184,4 @@ tests/evals/.kensa_doctor_tmp/
 node_modules/
 .pnpm-store/
 packages/*/coverage/
+sdk/*/coverage/

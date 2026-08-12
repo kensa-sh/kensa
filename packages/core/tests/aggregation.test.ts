@@ -8,6 +8,7 @@ import {
   CoreValidationError,
   parseTrials,
   summarizeTrials,
+  verifyRunResult,
   type EvaluationFailure,
   type Trial,
 } from "../src/index.js";
@@ -64,6 +65,16 @@ describe("run aggregation", () => {
     });
 
     expect(result).toEqual(fixture);
+    expect(verifyRunResult(fixture)).toEqual(fixture);
+  });
+
+  it("rejects malformed and noncanonical run results", () => {
+    expect(() => verifyRunResult({ ...fixture, extra: true })).toThrow(
+      CoreValidationError,
+    );
+    expect(() => verifyRunResult({ ...fixture, aggregates: [] })).toThrow(
+      "canonical aggregation",
+    );
   });
 
   it("derives fail, flaky, error, partial, timeout, and skipped-only groups", () => {
