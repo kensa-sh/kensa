@@ -6,6 +6,7 @@ import {
   EvaluationTransitionError,
   KensaCoreError,
   nextAction,
+  normalizeTraceViews,
   observeCase,
   startCase,
   type AwaitingCheck,
@@ -246,6 +247,14 @@ export class KensaEngine {
               interruption: request.interruption,
               trials: request.trials,
             }),
+          },
+          commit: () => {},
+        };
+      case "normalize_traces":
+        return {
+          response: {
+            type: "trace_views",
+            traces: normalizeTraceViews(request.traces),
           },
           commit: () => {},
         };

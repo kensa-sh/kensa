@@ -627,6 +627,40 @@ def test_engine_client_rejects_invalid_run_result_and_reset(
     client.close()
 
 
+def test_engine_client_normalizes_trace_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = EngineClient()
+    requests: list[dict[str, Any]] = []
+
+    def request(payload: dict[str, Any]) -> dict[str, Any]:
+        requests.append(payload)
+        return {"type": "trace_views", "traces": payload["traces"]}
+
+    monkeypatch.setattr(client, "_request", request)
+    normalized = client.normalize_trace_views(
+        [{"id": "trace", "started_at_unix_nano": 1_786_430_000_000_000_000}]
+    )
+
+    assert normalized == [{"id": "trace", "started_at_unix_nano": "1786430000000000000"}]
+    assert requests[0]["type"] == "normalize_traces"
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "trace_views", "traces": [None]},
+    )
+    with pytest.raises(KensaEngineError, match="invalid trace views"):
+        client.normalize_trace_views([])
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda payload: {"type": "trace_views", "traces": [{"id": "different"}]},
+    )
+    with pytest.raises(KensaEngineError, match="contradictory identities"):
+        client.normalize_trace_views([{"id": "requested"}])
+    client.close()
+
+
 def test_wire_json_value_preserves_types_and_rejects_lossy_values() -> None:
     assert _wire_json_value(
         {

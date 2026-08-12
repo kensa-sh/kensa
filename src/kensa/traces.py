@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from kensa.constants import KENSA_DIR
+from kensa.engine import EngineClient, KensaEngineError
 from kensa.redact import (
     RedactionGateError,
     RedactionResult,
@@ -476,10 +477,11 @@ def _write_redacted_import(
         trace_source=trace_source,
     )
     trace_views = _pseudonymize_trace_ids(trace_views)
-    span_count = sum(len(trace.spans) for trace in trace_views)
+    normalized_traces = _normalize_trace_views(trace_views)
+    span_count = sum(len(trace["spans"]) for trace in normalized_traces)
     output = Path(out)
     results: list[RedactionResult] = [
-        redactor.redact_trace_view(trace.to_dict()) for trace in trace_views
+        redactor.redact_trace_view(trace) for trace in normalized_traces
     ]
     artifact_bytes = "".join(
         json.dumps(result.trace, sort_keys=True) + "\n" for result in results
@@ -492,7 +494,7 @@ def _write_redacted_import(
         artifact_sha256=hashlib.sha256(artifact_bytes).hexdigest(),
         limit=limit,
         max_payload_bytes=max_payload_bytes,
-        records_written=len(trace_views),
+        records_written=len(normalized_traces),
         span_count=span_count,
         bytes_read=bytes_read,
         redaction=redaction_manifest,
@@ -502,13 +504,32 @@ def _write_redacted_import(
         provider=provenance_provider,
         source=stored_source,
         out_path=output,
-        records_written=len(trace_views),
+        records_written=len(normalized_traces),
         bytes_read=bytes_read,
         span_count=span_count,
         manifest_path=manifest_path,
         redaction=redaction_manifest,
         warnings=warnings,
     )
+
+
+def _normalize_trace_views(traces: list[TraceView]) -> list[dict[str, Any]]:
+    payloads = [trace.to_dict() for trace in traces]
+    try:
+        client = EngineClient()
+    except KensaEngineError as exc:
+        if os.environ.get("KENSA_ENGINE_COMMAND") is None and exc.code == "startup":
+            return payloads
+        raise ValueError(f"Could not start Kensa evidence engine: {exc}") from exc
+    try:
+        normalized = client.normalize_trace_views(payloads)
+    except KensaEngineError as exc:
+        client.close()
+        raise ValueError(f"Could not normalize trace evidence: {exc}") from exc
+    shutdown_error = client.close()
+    if shutdown_error is not None:
+        raise ValueError(f"Could not close Kensa evidence engine: {shutdown_error}")
+    return normalized
 
 
 def _redaction_warnings(

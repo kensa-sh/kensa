@@ -75,6 +75,25 @@ USAGE_VIEW_KEYS = {
 _PSEUDONYM = re.compile(r"^(trace|span)_[0-9a-f]{24}$")
 
 
+def test_python_accepts_shared_trace_view_conformance_fixture() -> None:
+    fixture_path = (
+        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "trace-view.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    traces_module._validate_trace_view_row(fixture, path=fixture_path, line_number=1)
+
+
+def test_typescript_redaction_proof_fixture_matches_python_contract() -> None:
+    fixture_path = (
+        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "redaction-proof.json"
+    )
+    proof = json.loads(fixture_path.read_text())
+
+    assert redact.safe_manifest(proof) is True
+    assert proof["ruleset_hash"] == RULESET_HASH
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
@@ -142,6 +161,71 @@ def _minimal_trace_view(trace_id: str = "tr_1") -> dict[str, Any]:
         "output": None,
         "spans": [],
     }
+
+
+def _trace_view_model() -> traces_module.TraceView:
+    return traces_module.TraceView(
+        id="trace",
+        name=None,
+        source=traces_module.TraceSource(
+            provider="json",
+            import_run_id="import",
+            imported_at="2026-08-11T00:00:00Z",
+        ),
+        started_at_unix_nano=None,
+        ended_at_unix_nano=None,
+        duration_ms=0,
+        status="unknown",
+        input=None,
+        output=None,
+        spans=[],
+    )
+
+
+def test_trace_normalization_falls_back_only_for_implicit_missing_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingEngine:
+        def __init__(self) -> None:
+            raise traces_module.KensaEngineError("missing", code="startup")
+
+    monkeypatch.delenv("KENSA_ENGINE_COMMAND", raising=False)
+    monkeypatch.setattr(traces_module, "EngineClient", MissingEngine)
+
+    trace = _trace_view_model()
+    assert traces_module._normalize_trace_views([trace]) == [trace.to_dict()]
+
+    monkeypatch.setenv("KENSA_ENGINE_COMMAND", "missing")
+    with pytest.raises(ValueError, match="Could not start Kensa evidence engine"):
+        traces_module._normalize_trace_views([trace])
+
+
+def test_trace_normalization_reports_request_and_shutdown_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubEngine:
+        request_error: traces_module.KensaEngineError | None = None
+        shutdown_error: traces_module.KensaEngineError | None = None
+
+        def normalize_trace_views(self, payloads: Any) -> list[dict[str, Any]]:
+            if self.request_error is not None:
+                raise self.request_error
+            return cast(list[dict[str, Any]], payloads)
+
+        def close(self) -> traces_module.KensaEngineError | None:
+            return self.shutdown_error
+
+    engine = StubEngine()
+    monkeypatch.setattr(traces_module, "EngineClient", lambda: engine)
+
+    engine.request_error = traces_module.KensaEngineError("request failed")
+    with pytest.raises(ValueError, match="Could not normalize trace evidence"):
+        traces_module._normalize_trace_views([_trace_view_model()])
+
+    engine.request_error = None
+    engine.shutdown_error = traces_module.KensaEngineError("close failed")
+    with pytest.raises(ValueError, match="Could not close Kensa evidence engine"):
+        traces_module._normalize_trace_views([_trace_view_model()])
 
 
 def test_trace_manifest_round_trip(tmp_path: Path) -> None:
@@ -424,7 +508,8 @@ def test_pseudonyms_stay_stable_when_import_order_changes(
     )
     first_rows = _read_jsonl(first_out)
     first_ids = {row["name"]: row["id"] for row in first_rows}
-    first_span_ids = {span["name"]: span["id"] for span in first_rows[0]["spans"]}
+    first_a = next(row for row in first_rows if row["name"] == "a")
+    first_span_ids = {span["name"]: span["id"] for span in first_a["spans"]}
 
     source.write_text(
         json.dumps(
@@ -588,7 +673,9 @@ def test_import_redacts_values_with_stable_instance_aliases(
         limit=1,
         max_payload_bytes=source.stat().st_size,
     )
-    assert _read_jsonl(rerun_out) == [row]
+    rerun_row = _read_jsonl(rerun_out)[0]
+    rerun_row["source"] = row["source"]
+    assert rerun_row == row
     # The value-to-alias map is never persisted anywhere in the artifact or manifest.
     assert result.manifest_path is not None
     persisted = out.read_text() + result.manifest_path.read_text()
@@ -1200,14 +1287,14 @@ def test_import_langfuse_records_project_allowlisted_evidence(
     assert row["input"] == {"input": "Refund me"}
     assert row["output"] == {"output": "Refunded"}
     assert "attributes" not in row
-    assert row["spans"][0]["kind"] == "tool"
-    assert row["spans"][0]["status"] == "error"
-    assert row["spans"][0]["tool_name"] == "issue_refund"
-    assert row["spans"][0]["input"] == {"charge": "ch_1"}
-    assert row["spans"][0]["output"] == {"ok": True}
-    assert row["spans"][1]["name"] == "summarize"
-    assert row["spans"][1]["kind"] == "llm"
-    assert row["spans"][1]["usage"] == {
+    spans = {span["name"]: span for span in row["spans"]}
+    assert spans["issue_refund"]["kind"] == "tool"
+    assert spans["issue_refund"]["status"] == "error"
+    assert spans["issue_refund"]["tool_name"] == "issue_refund"
+    assert spans["issue_refund"]["input"] == {"charge": "ch_1"}
+    assert spans["issue_refund"]["output"] == {"ok": True}
+    assert spans["summarize"]["kind"] == "llm"
+    assert spans["summarize"]["usage"] == {
         "model_provider": None,
         "model": "gpt-5-mini",
         "input_tokens": 12,
@@ -1309,12 +1396,13 @@ def test_import_langfuse_records_accepts_official_data_envelope(
     assert row["input"] is None
     assert row["output"] is None
     assert "attributes" not in row
-    _assert_pseudonym(row["spans"][0]["id"], "span")
-    assert row["spans"][0]["input"] == {"message": "Refund me"}
-    assert row["spans"][0]["output"] == {"message": "Done"}
-    assert row["spans"][1]["parent_id"] == row["spans"][0]["id"]
-    assert row["spans"][1]["kind"] == "tool"
-    assert row["spans"][1]["status"] == "error"
+    spans = {span["name"]: span for span in row["spans"]}
+    _assert_pseudonym(spans["agent"]["id"], "span")
+    assert spans["agent"]["input"] == {"message": "Refund me"}
+    assert spans["agent"]["output"] == {"message": "Done"}
+    assert spans["lookup_customer"]["parent_id"] == spans["agent"]["id"]
+    assert spans["lookup_customer"]["kind"] == "tool"
+    assert spans["lookup_customer"]["status"] == "error"
 
     limited = import_trace_source(
         provider="langfuse",

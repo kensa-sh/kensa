@@ -22,7 +22,9 @@ _RESPONSE_TIMEOUT_S = 5.0
 _TRACE_INTEGER_KEYS = frozenset(
     {
         "end_time_unix_nano",
+        "ended_at_unix_nano",
         "start_time_unix_nano",
+        "started_at_unix_nano",
         "time_unix_nano",
         "timestamp",
         "timestamp_unix_nano",
@@ -226,6 +228,46 @@ class EngineClient:
                 raise KensaEngineError("Kensa engine returned an invalid reset", code="protocol")
             self._active_evaluations.clear()
             return released
+
+    def normalize_trace_views(
+        self,
+        traces: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        wire_traces = cast(
+            list[Any],
+            _wire_json_value(
+                [dict(trace) for trace in traces],
+                exact_integer_keys=_TRACE_INTEGER_KEYS,
+            ),
+        )
+        response = self._request({"type": "normalize_traces", "traces": wire_traces})
+        normalized = response.get("traces")
+        if (
+            response.get("type") != "trace_views"
+            or not isinstance(normalized, list)
+            or not all(isinstance(trace, dict) for trace in normalized)
+        ):
+            raise KensaEngineError(
+                "Kensa engine returned invalid trace views",
+                code="protocol",
+            )
+        normalized_traces = cast(list[dict[str, Any]], normalized)
+        requested_ids = [trace.get("id") for trace in traces]
+        normalized_by_id = {
+            trace.get("id"): trace
+            for trace in normalized_traces
+            if isinstance(trace.get("id"), str)
+        }
+        if (
+            any(not isinstance(trace_id, str) for trace_id in requested_ids)
+            or len(normalized_by_id) != len(normalized_traces)
+            or set(requested_ids) != set(normalized_by_id)
+        ):
+            raise KensaEngineError(
+                "Kensa engine returned trace views with contradictory identities",
+                code="protocol",
+            )
+        return [normalized_by_id[trace_id] for trace_id in requested_ids]
 
     def close(self, *, notify_engine: bool = True) -> KensaEngineError | None:
         pending: BaseException | None = None
