@@ -321,6 +321,25 @@ def test_agent(case):
     assert "INTERNALERROR" not in result.stderr.str()
 
 
+def test_ordinary_pytest_session_does_not_start_engine(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KENSA_ENGINE_COMMAND", str(tmp_path / "missing-engine"))
+    pytester.makepyfile(
+        test_plain="""
+def test_plain():
+    pass
+"""
+    )
+
+    result = pytester.runpytest("-q")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.OK
+
+
 def test_engine_crash_during_finalize_records_infrastructure_failure(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,

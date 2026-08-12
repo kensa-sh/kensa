@@ -213,6 +213,7 @@ class KensaSessionState:
         self.run_id = configured_run_id or uuid4().hex
         self.trials: list[TrialMetadata] = []
         self.aggregates: list[KensaAggregate] = []
+        self.has_kensa_items = False
         self.complete = True
         self.interruption: dict[str, Any] | None = None
         self._engine: EngineClient | None = None
@@ -387,10 +388,14 @@ class KensaSessionState:
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
-    if not any(item.get_closest_marker("kensa") is not None for item in session.items):
+    state = _state(session.config)
+    state.has_kensa_items = any(
+        item.get_closest_marker("kensa") is not None for item in session.items
+    )
+    if not state.has_kensa_items:
         return
     try:
-        _ = _state(session.config).engine
+        _ = state.engine
     except KensaEngineError as exc:
         raise pytest.UsageError(f"Kensa engine startup failed: {exc}") from exc
 
@@ -582,6 +587,7 @@ def _runtime_for_item(item: pytest.Item) -> KensaTrialRuntime | None:
     if marker is None:
         return None
     state = _state(item.config)
+    state.has_kensa_items = True
     runtime = KensaTrialRuntime(
         trial=trial,
         nodeid=item.nodeid,
@@ -862,6 +868,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
     if _is_xdist_worker(session.config):
         return
     state = _state(session.config)
+    if not state.has_kensa_items and state.control is None:
+        return
     stopped = session.shouldstop or session.shouldfail
     if stopped:
         state.mark_incomplete("pytest_stopped", str(stopped))
