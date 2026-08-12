@@ -413,10 +413,11 @@ function aggregateStatus(status: TraceStatus, spans: TraceSpan[]): TraceStatus {
 }
 
 function compareSpans(left: TraceSpan, right: TraceSpan): number {
-  return compareNullableTimestamps(
+  const timestampOrder = compareNullableTimestamps(
     left.started_at_unix_nano,
     right.started_at_unix_nano,
   );
+  return timestampOrder || compareText(left.id, right.id);
 }
 
 function compareNullableTimestamps(

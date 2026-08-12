@@ -101,6 +101,28 @@ describe("portable trace evidence", () => {
     expect(normalizeTraceView(fixture)).toEqual(fixture);
   });
 
+  it("matches deterministic equal-timestamp span-order conformance", async () => {
+    const vector = JSON.parse(
+      readFileSync(
+        new URL("../conformance/trace-order.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      expected_order: string[];
+      forward: unknown;
+      reversed: unknown;
+    };
+
+    const forward = normalizeTraceView(vector.forward);
+    const reversed = normalizeTraceView(vector.reversed);
+
+    expect(forward.spans.map((item) => item.id)).toEqual(vector.expected_order);
+    expect(reversed.spans).toEqual(forward.spans);
+    await expect(sourceIdentity(vector.reversed)).resolves.toEqual(
+      await sourceIdentity(vector.forward),
+    );
+  });
+
   it("normalizes exact timestamps, span order, duration, and derived status", () => {
     const normalized = normalizeTraceView(trace());
 
@@ -323,7 +345,7 @@ describe("portable trace evidence", () => {
     );
   });
 
-  it("sorts null timestamps after known timestamps and preserves ties", () => {
+  it("sorts null timestamps after known timestamps and breaks ties by ID", () => {
     const normalized = normalizeTraceView(
       trace({
         spans: [
@@ -337,8 +359,8 @@ describe("portable trace evidence", () => {
 
     expect(normalized.spans.map((item) => item.id)).toEqual([
       "first",
-      "b",
       "a",
+      "b",
       "z",
     ]);
     expect(
