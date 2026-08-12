@@ -77,7 +77,7 @@ _PSEUDONYM = re.compile(r"^(trace|span)_[0-9a-f]{24}$")
 
 def test_python_accepts_shared_trace_view_conformance_fixture() -> None:
     fixture_path = (
-        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "trace-view.json"
+        Path(__file__).parents[3] / "packages" / "core" / "conformance" / "trace-view.json"
     )
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
 
@@ -86,7 +86,7 @@ def test_python_accepts_shared_trace_view_conformance_fixture() -> None:
 
 def test_typescript_redaction_proof_fixture_matches_python_contract() -> None:
     fixture_path = (
-        Path(__file__).parents[1] / "packages" / "core" / "conformance" / "redaction-proof.json"
+        Path(__file__).parents[3] / "packages" / "core" / "conformance" / "redaction-proof.json"
     )
     proof = json.loads(fixture_path.read_text())
 

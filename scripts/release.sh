@@ -18,7 +18,7 @@ Release flow:
   1. Run patch/minor/major to open a version-bump PR.
   2. Update docs/changelog.mdx in the PR.
   3. Merge the PR manually after CI passes.
-  4. The merge workflow publishes to PyPI and creates the GitHub Release.
+  4. The merge workflow publishes Python and TypeScript packages and creates the GitHub Release.
 
 Examples:
   ./scripts/release.sh patch --dry-run
@@ -32,7 +32,7 @@ version_valid() {
 }
 
 current_version() {
-  awk -F'"' '/^version = / { print $2; exit }' "$ROOT/pyproject.toml"
+  awk -F'"' '/^version = / { print $2; exit }' "$ROOT/sdk/python/pyproject.toml"
 }
 
 lock_version() {
@@ -144,8 +144,9 @@ assert_branch_available() {
 
 assert_version_files() {
   local version="$1"
-  [ "$(current_version)" = "$version" ] || die "pyproject.toml version does not match $version"
+  [ "$(current_version)" = "$version" ] || die "sdk/python/pyproject.toml version does not match $version"
   [ "$(lock_version)" = "$version" ] || die "uv.lock version does not match $version"
+  node "$ROOT/scripts/set-typescript-version.mjs" --check "$version" || die "TypeScript package versions do not match $version"
 }
 
 run_local_checks() {
@@ -164,8 +165,9 @@ Release PR for v$version.
 
 - [ ] Update \`docs/changelog.mdx\` for v$version.
 
-Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
-the GitHub Release for \`v$version\`.
+Merge this PR manually after CI passes. Merging publishes \`kensa==$version\`,
+\`@kensa/core@$version\`, and \`@kensa/sdk@$version\`, then creates the GitHub Release for
+\`v$version\`.
 EOF
 }
 
@@ -176,6 +178,7 @@ prepare_release_pr() {
   local current version tag branch title
 
   require_command git
+  require_command node
   require_command uv
 
   current="$(current_version)"
@@ -190,7 +193,7 @@ prepare_release_pr() {
     echo "would require clean main branch matching origin/main"
     echo "would require available branch: $branch"
     echo "would require available tag: $tag"
-    echo "would update pyproject.toml and uv.lock"
+    echo "would update Python and TypeScript package versions"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else
@@ -213,7 +216,8 @@ prepare_release_pr() {
   ensure_label "ignore-for-release" "Exclude from generated release notes" "ededed"
 
   git -C "$ROOT" switch -c "$branch"
-  uv version "$version" --no-sync >/dev/null
+  uv version --package kensa "$version" --no-sync >/dev/null
+  node "$ROOT/scripts/set-typescript-version.mjs" "$version"
   assert_version_files "$version"
 
   if [ "$run_tests" = true ]; then
@@ -222,7 +226,7 @@ prepare_release_pr() {
     echo "skip local checks; PR CI remains authoritative"
   fi
 
-  git -C "$ROOT" add pyproject.toml uv.lock
+  git -C "$ROOT" add sdk/python/pyproject.toml uv.lock packages/core/package.json packages/engine/package.json sdk/typescript/package.json
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
   release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release

@@ -61,14 +61,69 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
 
-  build:
-    runs-on: ubuntu-latest
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: windows-2025
+            target: win32-x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
+      - name: Resolve baseline Bun download
+        if: matrix.target == 'win32-x64'
+        id: windows_bun
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < .bun-version)"
+          echo "url=https://github.com/oven-sh/bun/releases/download/bun-v$version/bun-windows-x64-baseline.zip" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.target != 'win32-x64'
+        with:
+          bun-version-file: .bun-version
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.target == 'win32-x64'
+        with:
+          bun-download-url: ${{ steps.windows_bun.outputs.url }}
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
       - run: uv python install 3.11
-      - run: uv sync --group dev --python 3.11
-      - run: uv build
+      - run: node scripts/build-engine-wheel.mjs ${{ matrix.target }}
+      - run: uv run --no-project --python 3.11 scripts/verify-engine-wheel.py dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          compression-level: 0
+
+  build:
+    if: ${{ always() }}
+    needs: [typescript, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful build jobs
+        env:
+          TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
+          WHEELS_RESULT: ${{ needs.wheels.result }}
+        run: |
+          test "$TYPESCRIPT_RESULT" = "success"
+          test "$WHEELS_RESULT" = "success"
 
   # Run redaction with real spaCy/Presidio dependencies and the pinned small model.
   redaction:
@@ -87,6 +142,6 @@ jobs:
       - run: pnpm --filter kensa-engine build
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
-      - run: uv pip install ".[redaction]"
+      - run: uv sync --group dev --all-packages --extra redaction
       - run: uv run pytest -q -m "not live"
-      - run: uv run pytest tests/integration/test_live_redaction.py -q --run-live
+      - run: uv run pytest sdk/python/tests/integration/test_live_redaction.py -q --run-live

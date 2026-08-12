@@ -1,6 +1,13 @@
 {
   "name": "@kensa/sdk",
-  "version": "0.1.0",
+  "version": "0.19.1",
+  "description": "TypeScript and Vitest authoring SDK for Kensa evaluations",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kensa-sh/kensa.git",
+    "directory": "sdk/typescript"
+  },
   "type": "module",
   "files": [
     "dist"
@@ -13,10 +20,16 @@
     "./vitest": {
       "types": "./dist/vitest.d.ts",
       "import": "./dist/vitest.js"
-    }
+    },
+    "./build-manifest.json": "./dist/build-manifest.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc -p tsconfig.build.json",
+    "prepack": "node ../../scripts/generate-build-manifest.mjs --output sdk/typescript/dist/build-manifest.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"

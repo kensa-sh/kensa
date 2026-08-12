@@ -1,6 +1,13 @@
 {
   "name": "@kensa/core",
-  "version": "0.1.0",
+  "version": "0.19.1",
+  "description": "Platform-neutral Kensa evaluation semantics and portable contracts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kensa-sh/kensa.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "files": [
     "dist"
@@ -9,11 +16,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./build-manifest.json": "./dist/build-manifest.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc -p tsconfig.build.json",
     "check:platform": "pnpm build && node ../../.github/scripts/check-core-platform.mjs",
+    "prepack": "node ../../scripts/generate-build-manifest.mjs --output packages/core/dist/build-manifest.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -20,7 +20,7 @@ transition, an installed package without that engine keeps the existing Python p
 Pip users can install the same editable development environment with:
 
 ```bash
-python -m pip install -e . --group dev
+python -m pip install -e ./sdk/python --group './pyproject.toml:dev'
 ```
 
 ## Testing In Another Local Project
@@ -30,7 +30,7 @@ consumer uses your live checkout. For example, from a sibling project named `acm
 
 ```bash
 cd ~/Projects/acme
-uv add --editable ../kensa
+uv add --editable ../kensa/sdk/python
 uv run python -c "import kensa; print(kensa.__file__)"
 uv run pytest -q
 ```
@@ -40,15 +40,15 @@ For a one-off smoke test that does not update the consumer project's `pyproject.
 
 ```bash
 cd ~/Projects/acme
-uv run --with-editable ../kensa python -c "import kensa; print(kensa.__file__)"
-uv run --with-editable ../kensa pytest -q
+uv run --with-editable ../kensa/sdk/python python -c "import kensa; print(kensa.__file__)"
+uv run --with-editable ../kensa/sdk/python pytest -q
 ```
 
 With pip, install Kensa editable into the consumer project's active virtualenv:
 
 ```bash
 cd ~/Projects/acme
-python -m pip install -e ../kensa
+python -m pip install -e ../kensa/sdk/python
 python -c "import kensa; print(kensa.__file__)"
 pytest -q
 ```
@@ -57,7 +57,7 @@ For repeat use, add the editable path dependency to the consumer project's
 `requirements-dev.txt`:
 
 ```text
--e ../kensa
+-e ../kensa/sdk/python
 ```
 
 Pip does not have a direct equivalent of `uv run --with-editable` for a temporary command.
@@ -79,7 +79,7 @@ pnpm typecheck
 pnpm test:coverage
 pnpm format:check
 pnpm build
-uv build
+node scripts/build-engine-wheel.mjs
 ```
 
 With pip, run the same tools from the active virtualenv:
@@ -91,10 +91,10 @@ ty check
 pytest -q
 python -m coverage run -m pytest -q
 python -m coverage report
-python -m build
+python -m build --sdist sdk/python
 ```
 
-Coverage is intentionally strict: `src/kensa` must stay at 100%.
+Coverage is intentionally strict: `sdk/python/src/kensa` must stay at 100%.
 
 The default suite is offline. Tests marked `live` are skipped unless explicitly enabled.
 
@@ -128,7 +128,7 @@ surfaces that users run. They are opt-in because they require credentials and ma
 2. Run the live tests:
 
    ```bash
-   uv run pytest tests/integration --run-live
+   uv run pytest sdk/python/tests/integration --run-live
    ```
 
 The test harness loads `.env` with `python-dotenv` only when `--run-live` is present. Do not
@@ -137,12 +137,12 @@ commit `.env`, provider responses, or generated `.kensa` artifacts.
 Provider-specific subsets are available:
 
 ```bash
-uv run pytest tests/integration --run-live -m openai
-uv run pytest tests/integration --run-live -m anthropic
+uv run pytest sdk/python/tests/integration --run-live -m openai
+uv run pytest sdk/python/tests/integration --run-live -m anthropic
 ```
 
 CI does not run live provider tests. Maintainers can run them locally before releases or when
-changing `src/kensa/llm.py`, `src/kensa/judge.py`, or the pytest plugin.
+changing `sdk/python/src/kensa/llm.py`, `sdk/python/src/kensa/judge.py`, or the pytest plugin.
 
 ## Releases
 
@@ -155,8 +155,8 @@ Maintainers release from a clean, CI-green `main` checkout:
 
 Use `minor` or `major` when appropriate. The bump command opens a version-bump PR with a checklist
 to update `docs/changelog.mdx`. Update the changelog in that PR, wait for CI to pass, then merge the
-PR manually. Merging runs the release workflow, which creates the release tag, publishes to PyPI,
-and creates the GitHub Release with generated notes.
+PR manually. Merging runs the release workflow, which creates the release tag, publishes to PyPI
+and npm, and creates the GitHub Release with generated notes.
 
 ## Code Conventions
 

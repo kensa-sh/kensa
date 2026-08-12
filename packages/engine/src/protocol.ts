@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import packageMetadata from "../package.json" with { type: "json" };
+
 import {
   buildRunResult,
   canonicalJson,
@@ -10,7 +12,7 @@ import {
 } from "@kensa/core";
 
 export const PROTOCOL_VERSION = "kensa.engine.v1";
-export const ENGINE_VERSION = "0.1.0";
+export const ENGINE_VERSION = packageMetadata.version;
 
 const handshakeRequest = z.strictObject({
   type: z.literal("handshake"),

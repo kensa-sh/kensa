@@ -26,7 +26,7 @@ from kensa.llm import DEFAULT_LLM_MODEL
 from kensa.traces import ImportResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = PROJECT_ROOT
+REPO_ROOT = PROJECT_ROOT.parents[1]
 
 PACKAGED_SKILLS = (
     "kensa-evals",
