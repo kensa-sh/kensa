@@ -1287,14 +1287,14 @@ def test_import_langfuse_records_project_allowlisted_evidence(
     assert row["input"] == {"input": "Refund me"}
     assert row["output"] == {"output": "Refunded"}
     assert "attributes" not in row
-    assert row["spans"][0]["kind"] == "tool"
-    assert row["spans"][0]["status"] == "error"
-    assert row["spans"][0]["tool_name"] == "issue_refund"
-    assert row["spans"][0]["input"] == {"charge": "ch_1"}
-    assert row["spans"][0]["output"] == {"ok": True}
-    assert row["spans"][1]["name"] == "summarize"
-    assert row["spans"][1]["kind"] == "llm"
-    assert row["spans"][1]["usage"] == {
+    spans = {span["name"]: span for span in row["spans"]}
+    assert spans["issue_refund"]["kind"] == "tool"
+    assert spans["issue_refund"]["status"] == "error"
+    assert spans["issue_refund"]["tool_name"] == "issue_refund"
+    assert spans["issue_refund"]["input"] == {"charge": "ch_1"}
+    assert spans["issue_refund"]["output"] == {"ok": True}
+    assert spans["summarize"]["kind"] == "llm"
+    assert spans["summarize"]["usage"] == {
         "model_provider": None,
         "model": "gpt-5-mini",
         "input_tokens": 12,
@@ -1396,12 +1396,13 @@ def test_import_langfuse_records_accepts_official_data_envelope(
     assert row["input"] is None
     assert row["output"] is None
     assert "attributes" not in row
-    _assert_pseudonym(row["spans"][0]["id"], "span")
-    assert row["spans"][0]["input"] == {"message": "Refund me"}
-    assert row["spans"][0]["output"] == {"message": "Done"}
-    assert row["spans"][1]["parent_id"] == row["spans"][0]["id"]
-    assert row["spans"][1]["kind"] == "tool"
-    assert row["spans"][1]["status"] == "error"
+    spans = {span["name"]: span for span in row["spans"]}
+    _assert_pseudonym(spans["agent"]["id"], "span")
+    assert spans["agent"]["input"] == {"message": "Refund me"}
+    assert spans["agent"]["output"] == {"message": "Done"}
+    assert spans["lookup_customer"]["parent_id"] == spans["agent"]["id"]
+    assert spans["lookup_customer"]["kind"] == "tool"
+    assert spans["lookup_customer"]["status"] == "error"
 
     limited = import_trace_source(
         provider="langfuse",
