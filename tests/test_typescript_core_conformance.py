@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
-VECTORS = (
-    Path(__file__).parents[1] / "packages" / "core" / "conformance" / "evaluation.json"
-)
+VECTORS = Path(__file__).parents[1] / "packages" / "core" / "conformance" / "evaluation.json"
 
 
 def test_python_can_consume_core_evaluation_vectors() -> None:
