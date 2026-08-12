@@ -36,12 +36,12 @@ _TARGETS = {
         "kensa-engine",
     ),
     "linux-arm64": (
-        "bun-linux-arm64-musl",
+        "bun-linux-arm64",
         "py3-none-manylinux_2_17_aarch64",
         "kensa-engine",
     ),
     "linux-x64": (
-        "bun-linux-x64-musl",
+        "bun-linux-x64-baseline",
         "py3-none-manylinux_2_17_x86_64",
         "kensa-engine",
     ),

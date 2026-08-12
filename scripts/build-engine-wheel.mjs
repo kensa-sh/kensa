@@ -19,12 +19,12 @@ const targets = {
     wheel: "py3-none-macosx_10_15_x86_64",
   },
   "linux-arm64": {
-    bun: "bun-linux-arm64-musl",
+    bun: "bun-linux-arm64",
     executable: "kensa-engine",
     wheel: "py3-none-manylinux_2_17_aarch64",
   },
   "linux-x64": {
-    bun: "bun-linux-x64-musl",
+    bun: "bun-linux-x64-baseline",
     executable: "kensa-engine",
     wheel: "py3-none-manylinux_2_17_x86_64",
   },
