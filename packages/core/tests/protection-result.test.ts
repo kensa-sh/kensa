@@ -296,6 +296,40 @@ describe("GitHub protection results", () => {
     },
   );
 
+  it.each([
+    ["error", ["unsatisfied", "error", "skipped"]],
+    ["fail", ["skipped", "unsatisfied", "satisfied"]],
+  ] as const)(
+    "applies %s precedence across mixed criterion outcomes",
+    async (status, outcomes) => {
+      const criterionIds = ["a", "b", "c"];
+      const protectionSuite = await suite(["refund"], criterionIds);
+      const run = result([
+        trial("refund", {
+          status,
+          failure: {
+            category: "agent",
+            kind: status,
+            message: `${status} criterion precedence`,
+            evidence: {},
+          },
+        }),
+      ]);
+      await expect(
+        buildProtectionResult({
+          suite: protectionSuite,
+          result: run,
+          github,
+          criterion_outcomes: criterionIds.map((criterion_id, index) => ({
+            trial_nodeid: run.trials[0]!.nodeid,
+            criterion_id,
+            outcome: outcomes[index]!,
+          })),
+        }),
+      ).resolves.toMatchObject({ result: run });
+    },
+  );
+
   it("canonicalizes criterion outcomes by trial and criterion ID", async () => {
     const protectionSuite = await suite(["first", "second"], ["a", "z"]);
     const run = result([trial("first"), trial("second")]);
