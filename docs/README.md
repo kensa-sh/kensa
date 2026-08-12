@@ -44,9 +44,11 @@ docs/
   judge.mdx
   tracing.mdx
   python.mdx
+  typescript.mdx
   skills.mdx
   cli.mdx
   ci.mdx
+  migration.mdx
   changelog.mdx
   logo/                # wordmark (light/dark)
   favicon.png
