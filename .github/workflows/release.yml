@@ -270,6 +270,8 @@ jobs:
           merge-multiple: true
       - name: Publish to PyPI via Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   publish-npm-core:
     needs: [prepare, tag, package-npm]

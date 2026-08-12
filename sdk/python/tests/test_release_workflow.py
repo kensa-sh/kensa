@@ -98,12 +98,16 @@ def test_release_workflow_requires_live_redaction_before_tagging() -> None:
 
 def test_release_workflow_publishes_only_verified_platform_wheels() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
+    publish_job = workflow.split("\n  publish-pypi:\n", maxsplit=1)[1].split(
+        "\n  publish-npm-core:\n", maxsplit=1
+    )[0]
 
     assert "dist-wheel-${{ matrix.target }}" in workflow
     assert "scripts/verify-engine-wheel.py dist" in workflow
     assert "auditwheel" not in workflow
-    assert "pattern: dist-wheel-*" in workflow
-    assert "merge-multiple: true" in workflow
+    assert "pattern: dist-wheel-*" in publish_job
+    assert "merge-multiple: true" in publish_job
+    assert "skip-existing: true" in publish_job
     assert "--sdist" not in workflow
 
 
