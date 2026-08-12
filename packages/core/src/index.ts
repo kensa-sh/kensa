@@ -123,5 +123,6 @@ export {
   buildProtectionResult,
   verifyProtectionResult,
   type GitHubRunContext,
+  type ProtectionCriterionOutcome,
   type ProtectionResult,
 } from "./protection-result.js";

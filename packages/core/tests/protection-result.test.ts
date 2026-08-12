@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   bootstrapProtectionSuite,
-  buildProtectionResult,
+  buildProtectionResult as buildCoreProtectionResult,
   buildRedactedEvidenceRecord,
   buildRunResult,
   buildSyncBatch,
@@ -13,6 +13,8 @@ import {
   verifyProtectionResult,
   verifySyncBatch,
   type ProtectionSuite,
+  type ProtectionCriterionOutcome,
+  type RunResult,
   type Trial,
 } from "../src/index.js";
 
@@ -73,7 +75,10 @@ function trace(id: string): Record<string, unknown> {
   };
 }
 
-async function suite(ids: string[] = ["refund"]): Promise<ProtectionSuite> {
+async function suite(
+  ids: string[] = ["refund"],
+  criterionIds: string[] = ["safe"],
+): Promise<ProtectionSuite> {
   const evidence = await Promise.all(
     ids.map((id) => buildRedactedEvidenceRecord(trace(id), proof)),
   );
@@ -96,13 +101,11 @@ async function suite(ids: string[] = ["refund"]): Promise<ProtectionSuite> {
     cases: ids.map((id) => ({
       candidate_id: id,
       input: { request: id },
-      criteria: [
-        {
-          id: "safe",
-          description: "The protected behavior remains safe",
-          kind: "assertion",
-        },
-      ],
+      criteria: criterionIds.map((criterionId) => ({
+        id: criterionId,
+        description: `Criterion ${criterionId} remains satisfied`,
+        kind: "assertion",
+      })),
     })),
     bindings: {
       eval: {
@@ -149,6 +152,27 @@ function result(trials: Trial[] = [trial()], complete = true) {
   });
 }
 
+function criterionOutcomes(run: RunResult): ProtectionCriterionOutcome[] {
+  return run.trials.map((item) => ({
+    trial_nodeid: item.nodeid,
+    criterion_id: "safe",
+    outcome: "satisfied",
+  }));
+}
+
+function buildProtectionResult(input: {
+  suite: ProtectionSuite;
+  result: RunResult;
+  github: unknown;
+  criterion_outcomes?: ProtectionCriterionOutcome[];
+}) {
+  return buildCoreProtectionResult({
+    ...input,
+    criterion_outcomes:
+      input.criterion_outcomes ?? criterionOutcomes(input.result),
+  });
+}
+
 describe("GitHub protection results", () => {
   it("builds and verifies a complete GitHub-bound result", async () => {
     const protectionSuite = await suite();
@@ -187,6 +211,117 @@ describe("GitHub protection results", () => {
         }),
       ).resolves.toMatchObject({ suite: protectionSuite });
     }
+  });
+
+  it("requires every suite criterion exactly once for every trial", async () => {
+    const protectionSuite = await suite();
+    const run = result();
+    const valid = criterionOutcomes(run)[0]!;
+    await expect(
+      buildProtectionResult({
+        suite: protectionSuite,
+        result: run,
+        github,
+        criterion_outcomes: [],
+      }),
+    ).rejects.toThrow("criterion safe is missing");
+    await expect(
+      buildProtectionResult({
+        suite: protectionSuite,
+        result: run,
+        github,
+        criterion_outcomes: [valid, valid],
+      }),
+    ).rejects.toThrow("criterion safe is duplicated");
+    await expect(
+      buildProtectionResult({
+        suite: protectionSuite,
+        result: run,
+        github,
+        criterion_outcomes: [{ ...valid, criterion_id: "unknown" }],
+      }),
+    ).rejects.toThrow("unknown criterion unknown");
+    await expect(
+      buildProtectionResult({
+        suite: protectionSuite,
+        result: run,
+        github,
+        criterion_outcomes: [{ ...valid, trial_nodeid: "unknown" }],
+      }),
+    ).rejects.toThrow("unknown trial unknown");
+  });
+
+  it("requires trial status to match criterion outcomes", async () => {
+    const protectionSuite = await suite();
+    const run = result();
+    await expect(
+      buildProtectionResult({
+        suite: protectionSuite,
+        result: run,
+        github,
+        criterion_outcomes: [
+          { ...criterionOutcomes(run)[0]!, outcome: "unsatisfied" },
+        ],
+      }),
+    ).rejects.toThrow("status contradicts its criterion outcomes");
+  });
+
+  it.each([
+    ["fail", "unsatisfied"],
+    ["error", "error"],
+    ["skipped", "skipped"],
+  ] as const)(
+    "accepts a %s trial with matching criterion outcomes",
+    async (status, outcome) => {
+      const protectionSuite = await suite();
+      const run = result([
+        trial("refund", {
+          status,
+          failure: {
+            category: "agent",
+            kind: outcome,
+            message: `${outcome} criterion`,
+            evidence: {},
+          },
+        }),
+      ]);
+      await expect(
+        buildProtectionResult({
+          suite: protectionSuite,
+          result: run,
+          github,
+          criterion_outcomes: [{ ...criterionOutcomes(run)[0]!, outcome }],
+        }),
+      ).resolves.toMatchObject({ result: run });
+    },
+  );
+
+  it("canonicalizes criterion outcomes by trial and criterion ID", async () => {
+    const protectionSuite = await suite(["first", "second"], ["a", "z"]);
+    const run = result([trial("first"), trial("second")]);
+    const criterion_outcomes: ProtectionCriterionOutcome[] = run.trials
+      .flatMap((item) =>
+        ["z", "a"].map((criterion_id) => ({
+          trial_nodeid: item.nodeid,
+          criterion_id,
+          outcome: "satisfied" as const,
+        })),
+      )
+      .reverse();
+    const built = await buildProtectionResult({
+      suite: protectionSuite,
+      result: run,
+      github,
+      criterion_outcomes,
+    });
+
+    expect(built.criterion_outcomes).toEqual(
+      [...criterion_outcomes].sort(
+        (left, right) =>
+          left.trial_nodeid.localeCompare(right.trial_nodeid) ||
+          left.criterion_id.localeCompare(right.criterion_id),
+      ),
+    );
   });
 
   it.each([
