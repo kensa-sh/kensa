@@ -805,6 +805,8 @@ def test_pytest_plugin_watchdog_control_paths(
     state.mark_incomplete("pytest_stopped", "stopped")
     assert state.complete is False
     assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
+    state.mark_incomplete("engine_failure", "secondary failure")
+    assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
 
     plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
     plain_state.set_trial_snapshot(snapshot)

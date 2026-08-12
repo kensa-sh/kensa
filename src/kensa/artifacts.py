@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,7 @@ def write_run_artifacts(
     artifact_dir: Path,
     complete: bool = True,
     interruption: dict[str, Any] | None = None,
+    core_result: Mapping[str, Any] | None = None,
 ) -> list[KensaAggregate]:
     ordered_trials = sorted(trials, key=trial_sort_key)
     trial_payloads = [
@@ -126,20 +128,56 @@ def write_run_artifacts(
         )
         for trial in ordered_trials
     ]
-    aggregates = aggregate_trials(ordered_trials)
-    payload = {
-        "schema_version": "kensa.result.v1",
-        "run_id": run_id,
-        "complete": complete,
-        "interruption": interruption,
-        "trials": trial_payloads,
-        "aggregates": derive_v1_aggregates(trial_payloads),
-        "summary": derive_v1_summary(trial_payloads),
-    }
+    payload = (
+        dict(core_result)
+        if core_result is not None
+        else {
+            "schema_version": "kensa.result.v1",
+            "run_id": run_id,
+            "complete": complete,
+            "interruption": interruption,
+            "trials": trial_payloads,
+            "aggregates": derive_v1_aggregates(trial_payloads),
+            "summary": derive_v1_summary(trial_payloads),
+        }
+    )
     result = RunResult.model_validate_json(json.dumps(payload, allow_nan=False))
     _write_text_atomic(result_path, result.model_dump_json(indent=2))
-    _write_trace_artifact(run_id, ordered_trials, artifact_dir)
-    return aggregates
+    result_trials = [trial_result_to_metadata(trial) for trial in result.trials]
+    _write_trace_artifact(run_id, result_trials, artifact_dir)
+    return _metadata_aggregates(result, ordered_trials)
+
+
+def aggregates_from_core_result(
+    payload: Mapping[str, Any],
+    trials: list[TrialMetadata],
+) -> list[KensaAggregate]:
+    result = RunResult.model_validate_json(json.dumps(dict(payload), allow_nan=False))
+    return _metadata_aggregates(result, sorted(trials, key=trial_sort_key))
+
+
+def _metadata_aggregates(
+    result: RunResult,
+    trials: list[TrialMetadata],
+) -> list[KensaAggregate]:
+    by_nodeid = {trial.nodeid: trial for trial in trials}
+    return [
+        KensaAggregate(
+            group_id=aggregate.group_id,
+            case_id=aggregate.case_id,
+            configured_trials=aggregate.configured_trials,
+            total=aggregate.total,
+            passed=aggregate.passed,
+            failed=aggregate.failed,
+            errored=aggregate.errored,
+            skipped=aggregate.skipped,
+            partial=aggregate.partial,
+            verdict=aggregate.verdict,
+            trials=[by_nodeid[trial.nodeid] for trial in aggregate.trials],
+            smoke=aggregate.smoke,
+        )
+        for aggregate in result.aggregates
+    ]
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

@@ -8,6 +8,7 @@ export {
   observeCase,
   parseCase,
   parseCheck,
+  parseFailure,
   parseObservation,
   startCase,
   type AwaitingCheck,
@@ -37,3 +38,18 @@ export {
   type JsonObject,
   type JsonValue,
 } from "./json.js";
+export {
+  aggregateTrials,
+  buildRunResult,
+  parseTrials,
+  summarizeTrials,
+  type AggregateVerdict,
+  type CostLatencySummary,
+  type ReliabilityCohort,
+  type ReliabilityPoint,
+  type RunResult,
+  type RunSummary,
+  type Trial,
+  type TrialAggregate,
+  type TrialStatus,
+} from "./aggregation.js";

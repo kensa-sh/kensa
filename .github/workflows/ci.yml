@@ -35,7 +35,16 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter kensa-engine build
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --group dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} python -m coverage run -m pytest -q -m "not live"
@@ -66,7 +75,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter kensa-engine build
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
       - run: uv pip install ".[redaction]"
