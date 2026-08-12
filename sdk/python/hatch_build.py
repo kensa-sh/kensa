@@ -27,7 +27,13 @@ _CONTRACT_IDS = (
     "kensa.result.v1",
 )
 _SCHEMA_IDS = ("evaluation", "evidence", "mining", "protection", "sync")
-_CONFORMANCE_IDS = ("canonical-json", "evaluation", "redaction-proof", "trace-view")
+_CONFORMANCE_IDS = (
+    "canonical-json",
+    "evaluation",
+    "redaction-proof",
+    "trace-order",
+    "trace-view",
+)
 _TARGETS = {
     "darwin-arm64": ("bun-darwin-arm64", "py3-none-macosx_11_0_arm64", "kensa-engine"),
     "darwin-x64": (

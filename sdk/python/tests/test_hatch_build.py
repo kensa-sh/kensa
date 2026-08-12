@@ -135,6 +135,15 @@ def test_editable_build_does_not_require_bundled_engine(tmp_path: Path) -> None:
     _hook(tmp_path).initialize("editable", {})
 
 
+def test_build_manifest_conformance_ids_match_repository() -> None:
+    conformance = REPOSITORY / "packages" / "core" / "conformance"
+
+    assert (
+        tuple(path.stem for path in sorted(conformance.glob("*.json")))
+        == hatch_build._CONFORMANCE_IDS
+    )
+
+
 def test_distributions_preserve_root_project_files(tmp_path: Path) -> None:
     for filename in PROJECT_FILES:
         assert (PYTHON_PROJECT / filename).read_bytes() == (REPOSITORY / filename).read_bytes()
