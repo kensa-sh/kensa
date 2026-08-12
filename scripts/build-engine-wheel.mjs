@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { requiresCommandShell } from "./process-platform.mjs";
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pythonRoot = join(root, "sdk", "python");
 const targets = {
@@ -107,6 +109,7 @@ function run(command, args, environment = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     env: { ...process.env, ...environment },
+    shell: requiresCommandShell(command),
     stdio: "inherit",
   });
   if (result.error !== undefined) {
