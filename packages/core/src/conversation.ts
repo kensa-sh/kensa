@@ -5,7 +5,11 @@ import { canonicalJson, jsonValueSchema, type JsonValue } from "./json.js";
 
 const sourceSchema = z.enum(["agent", "simulator"]);
 const terminationSourceSchema = z.enum(["agent", "simulator", "engine"]);
-const nonblankStringSchema = z.string().trim().min(1);
+const nonblankStringSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0, {
+    message: "expected string to contain a non-whitespace character",
+  });
 
 const functionCallSchema = z
   .strictObject({

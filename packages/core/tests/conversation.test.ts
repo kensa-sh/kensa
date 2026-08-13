@@ -168,6 +168,21 @@ describe("conversation lifecycle", () => {
     },
   );
 
+  it("preserves response content and termination reasons exactly", () => {
+    const result = respond(direct(), {
+      content: "  exact response  ",
+      termination_reason: "  exact reason  ",
+    });
+
+    expect(result).toEqual({
+      phase: "complete",
+      messages: [{ role: "assistant", content: "  exact response  " }],
+      output: "  exact response  ",
+      output_recorded: true,
+      termination: { source: "agent", reason: "  exact reason  " },
+    });
+  });
+
   it("alternates simulated responders and counts only accepted agent responses", () => {
     let state: ConversationState = simulated([], {
       startsWith: "agent",
