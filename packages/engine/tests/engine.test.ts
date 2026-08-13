@@ -802,7 +802,7 @@ describe("KensaEngine", () => {
     expect(engine.reset()).toBe(0);
   });
 
-  it("resets evaluation and conversation state together", () => {
+  it("isolates interleaved conversations and resets remaining state", () => {
     const engine = new KensaEngine();
     ready(engine);
     engine.processLine(
@@ -812,25 +812,77 @@ describe("KensaEngine", () => {
         case: { id: "case", input: null, metadata: {} },
       }),
     );
-    for (const conversationId of ["first", "second"]) {
-      engine.processLine(
-        message(conversationId, {
-          type: "start_conversation",
-          conversation_id: conversationId,
-          conversation: {
-            messages: [],
-            mode: "direct",
-            max_agent_responses: null,
-            starts_with: "agent",
-          },
-        }),
-      );
-    }
+    engine.processLine(
+      message("first", {
+        type: "start_conversation",
+        conversation_id: "first",
+        conversation: {
+          messages: [],
+          mode: "direct",
+          max_agent_responses: null,
+          starts_with: "agent",
+        },
+      }),
+    );
+    engine.processLine(
+      message("second", {
+        type: "start_conversation",
+        conversation_id: "second",
+        conversation: {
+          messages: [],
+          mode: "simulated",
+          max_agent_responses: 2,
+          starts_with: "simulator",
+        },
+      }),
+    );
 
-    expect(engine.reset()).toBe(3);
     expect(
       engine.processLine(
-        message("missing", {
+        message("second-turn", {
+          type: "observe_conversation",
+          conversation_id: "second",
+          observation: {
+            source: "simulator",
+            content: "question",
+            output: null,
+            output_recorded: false,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_action",
+        conversation_id: "second",
+        action: { source: "agent", response_index: 2 },
+      },
+    });
+    expect(
+      engine.processLine(
+        message("finish-first", {
+          type: "observe_conversation",
+          conversation_id: "first",
+          observation: {
+            source: "agent",
+            content: "done",
+            output: null,
+            output_recorded: false,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_result",
+        conversation_id: "first",
+      },
+    });
+    expect(
+      engine.processLine(
+        message("released-first", {
           type: "observe_conversation",
           conversation_id: "first",
           observation: {
@@ -846,6 +898,8 @@ describe("KensaEngine", () => {
       ok: false,
       failure: { code: "unknown_conversation" },
     });
+
+    expect(engine.reset()).toBe(2);
   });
 
   it("does not commit state until the outbound response validates", () => {
@@ -943,6 +997,17 @@ describe("KensaEngine", () => {
       },
     };
 
+    expect(
+      engine.processLine(
+        message("invalid", {
+          ...observation,
+          observation: { ...observation.observation, content: " " },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "invalid_message" },
+    });
     rejectNext = true;
     expect(engine.processLine(message("3", observation))).toMatchObject({
       ok: false,
