@@ -32,8 +32,7 @@ result = engine.complete_case(
         },
         "failure": None,
     },
-    status="pass",
-    failure=None,
+    runtime_outcome={"kind": "passed"},
 )
 engine.close()
 print(result.verdict)
