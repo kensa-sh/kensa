@@ -1539,6 +1539,100 @@ def test_engine_failure_marks_run_incomplete_when_recovery_cannot_classify(
     ]
 
 
+def test_report_failure_classification_recovers_with_fresh_engine() -> None:
+    failure = {
+        "category": "agent",
+        "kind": "assertion",
+        "message": "expected true",
+        "evidence": {"exception_type": "AssertionError"},
+    }
+
+    class FailedEngine:
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            del outcome
+            raise KensaEngineError("primary stopped", code="crash")
+
+    class RecoveryEngine:
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            assert outcome == {"kind": "assertion_failed"}
+            return EngineCompletion(verdict="fail", failure=failure)
+
+    state = SimpleNamespace(
+        engine=FailedEngine(),
+        recovery_engine=RecoveryEngine(),
+        mark_incomplete=lambda *_args, **_kwargs: None,
+    )
+
+    classified = pytest_plugin._classified_report_failure(
+        cast(Any, state),
+        {"kind": "assertion_failed"},
+        nodeid="test_eval",
+    )
+
+    assert classified == ("fail", TrialFailure.model_validate(failure))
+
+
+def test_report_failure_classification_marks_incomplete_when_recovery_fails() -> None:
+    interruptions: list[tuple[Any, ...]] = []
+
+    class FailedEngine:
+        def __init__(self, message: str) -> None:
+            self.message = message
+
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            del outcome
+            raise KensaEngineError(self.message, code="crash")
+
+    state = SimpleNamespace(
+        engine=FailedEngine("primary stopped"),
+        recovery_engine=FailedEngine("recovery stopped"),
+        mark_incomplete=lambda *args, **kwargs: interruptions.append((*args, kwargs)),
+    )
+
+    classified = pytest_plugin._classified_report_failure(
+        cast(Any, state),
+        {"kind": "skipped"},
+        nodeid="test_eval",
+    )
+
+    assert classified is None
+    assert interruptions == [
+        (
+            "engine_failure",
+            "could not classify pytest outcome: primary stopped; recovery failed: recovery stopped",
+            {"nodeid": "test_eval"},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        SimpleNamespace(skipped=True, when="call", outcome="skipped", failed=False),
+        SimpleNamespace(skipped=False, when="setup", outcome="failed", failed=True),
+    ],
+    ids=["skipped", "setup-error"],
+)
+def test_report_classification_failure_stops_metadata_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    report: SimpleNamespace,
+) -> None:
+    item = SimpleNamespace(config=object(), nodeid="test_eval")
+    call = SimpleNamespace(excinfo=None)
+    outcome = SimpleNamespace(get_result=lambda: report)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pytest_plugin, "_runtime_for_item", lambda _: object())
+        patcher.setattr(pytest_plugin, "_trial_metadata", lambda *_: None)
+        patcher.setattr(pytest_plugin, "_state", lambda _: object())
+        patcher.setattr(pytest_plugin, "_classified_report_failure", lambda *_args, **_kwargs: None)
+
+        hook = pytest_plugin.pytest_runtest_makereport(cast(Any, item), cast(Any, call))
+        next(hook)
+
+        with pytest.raises(StopIteration):
+            hook.send(outcome)
+
+
 def test_engine_nonpass_verdict_fails_passing_pytest_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

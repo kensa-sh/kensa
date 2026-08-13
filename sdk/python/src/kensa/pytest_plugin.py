@@ -187,6 +187,27 @@ def _classified_failure(
     return completion.verdict, failure
 
 
+def _classified_report_failure(
+    state: KensaSessionState,
+    outcome: dict[str, Any],
+    *,
+    nodeid: str,
+) -> tuple[str, TrialFailure | None] | None:
+    try:
+        return _classified_failure(state.engine, outcome)
+    except Exception as primary_error:
+        try:
+            return _classified_failure(state.recovery_engine, outcome)
+        except Exception as recovery_error:
+            state.mark_incomplete(
+                "engine_failure",
+                "could not classify pytest outcome: "
+                f"{primary_error}; recovery failed: {recovery_error}",
+                nodeid=nodeid,
+            )
+            return None
+
+
 class KensaSessionState:
     def __init__(self, config: pytest.Config) -> None:
         self.config = config
@@ -767,14 +788,15 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
         if not preserve_call_failure and (existing is None or existing.status != "skipped"):
             wasxfail = getattr(report, "wasxfail", None)
             if wasxfail is not None:
-                _, failure = _classified_failure(
-                    _state(item.config).engine,
+                classified = _classified_report_failure(
+                    _state(item.config),
                     {
                         "kind": "xfailed",
                         "message": str(wasxfail).strip() or "pytest expected failure",
                         "phase": report.when,
                         "outcome": report.outcome,
                     },
+                    nodeid=item.nodeid,
                 )
             else:
                 error = (
@@ -782,10 +804,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                     if call.excinfo is not None
                     else pytest.skip.Exception(f"pytest {report.when} skipped")
                 )
-                _, failure = _classified_failure(
-                    _state(item.config).engine,
+                classified = _classified_report_failure(
+                    _state(item.config),
                     _runtime_outcome(error, phase=report.when),
+                    nodeid=item.nodeid,
                 )
+            if classified is None:
+                return
+            _, failure = classified
             _record_trial(
                 item.config,
                 runtime.metadata(
@@ -806,10 +832,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                 if call.excinfo is not None
                 else RuntimeError(f"pytest {report.when} failed")
             )
-            _, failure = _classified_failure(
-                _state(item.config).engine,
+            classified = _classified_report_failure(
+                _state(item.config),
                 _runtime_outcome(error, phase=report.when),
+                nodeid=item.nodeid,
             )
+            if classified is None:
+                return
+            _, failure = classified
             _record_trial(
                 item.config,
                 runtime.metadata(
