@@ -140,7 +140,9 @@ async def test_refund_dialogue(case, kensa_run):
 
 Any object with `respond(messages)` returning `ConversationResponse` can be a custom `Simulator`.
 Kensa assigns generated roles, keeps agent `output` separate from visible `content`, excludes private
-system and tool context from simulator history, and never retries a responder.
+system and tool context from simulator history, and never retries a responder. During pytest runs,
+the bundled engine owns accepted history, responder order, turn limits, output selection, and the
+terminal reason while Python invokes your agent and simulator callbacks.
 
 ## Trials and verdicts
 
