@@ -19,8 +19,11 @@ from kensa.engine import (
     PROTOCOL_VERSION,
     EngineClient,
     EngineCompletion,
+    EngineConversationAction,
+    EngineConversationResult,
     KensaEngineError,
     _check_outcome,
+    _conversation_step,
     _engine_command,
     _engine_executable,
     _wire_json_value,
@@ -191,6 +194,260 @@ def test_engine_client_runs_case_and_cancellation() -> None:
             {"id": "cancelled", "input": None, "metadata": {}},
         )
         client.cancel_case("cancelled", "test stopped")
+
+
+def test_engine_client_runs_conversation_lifecycle() -> None:
+    with EngineClient() as client:
+        action = client.start_conversation(
+            "conversation",
+            {
+                "messages": [{"role": "system", "content": "private"}],
+                "mode": "direct",
+                "max_agent_responses": None,
+                "starts_with": "agent",
+            },
+        )
+        assert action == EngineConversationAction(
+            source="agent",
+            messages=({"role": "system", "content": "private"},),
+            response_index=1,
+            agent_responses=0,
+            accepted_messages=({"role": "system", "content": "private"},),
+            accepted_output=None,
+            accepted_output_recorded=False,
+        )
+
+        result = client.observe_conversation(
+            "conversation",
+            {
+                "source": "agent",
+                "content": "done",
+                "output": {"ok": True},
+                "output_recorded": True,
+                "termination_reason": None,
+            },
+        )
+        assert result == EngineConversationResult(
+            messages=(
+                {"role": "system", "content": "private"},
+                {"role": "assistant", "content": "done"},
+            ),
+            output={"ok": True},
+            output_recorded=True,
+            termination_source="engine",
+            termination_reason="direct",
+        )
+
+
+def test_engine_client_rejects_terminal_conversation_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = object.__new__(EngineClient)
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda request: {
+            "type": "conversation_result",
+            "conversation_id": request["conversation_id"],
+            "result": {
+                "phase": "complete",
+                "messages": [],
+                "output": None,
+                "output_recorded": False,
+                "termination": {"source": "engine", "reason": "direct"},
+            },
+        },
+    )
+
+    with pytest.raises(KensaEngineError, match="before a response"):
+        client.start_conversation("conversation", {})
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        ({"type": "conversation_action", "conversation_id": "other"}, "mismatched"),
+        ({"type": "unknown", "conversation_id": "conversation"}, "invalid conversation response"),
+        (
+            {"type": "conversation_action", "conversation_id": "conversation", "action": None},
+            "invalid conversation action",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "other",
+                    "messages": [],
+                    "response_index": True,
+                    "agent_responses": -1,
+                    "accepted": {},
+                },
+            },
+            "invalid conversation action",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": [],
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": None,
+                        "output_recorded": "yes",
+                    },
+                },
+            },
+            "invalid accepted",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": [],
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": "impossible",
+                        "output_recorded": False,
+                    },
+                },
+            },
+            "contradictory accepted",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": "invalid",
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": None,
+                        "output_recorded": False,
+                    },
+                },
+            },
+            "invalid action messages",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": [{"role": "unknown", "content": "invalid"}],
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": None,
+                        "output_recorded": False,
+                    },
+                },
+            },
+            "invalid action messages",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": [],
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": object(),
+                        "output_recorded": True,
+                    },
+                },
+            },
+            "invalid accepted conversation output",
+        ),
+        (
+            {
+                "type": "conversation_action",
+                "conversation_id": "conversation",
+                "action": {
+                    "source": "agent",
+                    "messages": [],
+                    "response_index": 1,
+                    "agent_responses": 0,
+                    "accepted": {
+                        "messages": [],
+                        "output": (1,),
+                        "output_recorded": True,
+                    },
+                },
+            },
+            "contradictory accepted conversation output",
+        ),
+        (
+            {"type": "conversation_result", "conversation_id": "conversation", "result": None},
+            "invalid conversation result",
+        ),
+        (
+            {
+                "type": "conversation_result",
+                "conversation_id": "conversation",
+                "result": {
+                    "phase": "complete",
+                    "messages": [],
+                    "output": None,
+                    "output_recorded": "yes",
+                    "termination": None,
+                },
+            },
+            "invalid conversation result",
+        ),
+        (
+            {
+                "type": "conversation_result",
+                "conversation_id": "conversation",
+                "result": {
+                    "phase": "complete",
+                    "messages": [],
+                    "output": None,
+                    "output_recorded": False,
+                    "termination": {"source": "engine", "reason": " "},
+                },
+            },
+            "invalid conversation termination",
+        ),
+        (
+            {
+                "type": "conversation_result",
+                "conversation_id": "conversation",
+                "result": {
+                    "phase": "complete",
+                    "messages": [],
+                    "output": "impossible",
+                    "output_recorded": False,
+                    "termination": {"source": "engine", "reason": "direct"},
+                },
+            },
+            "contradictory conversation output",
+        ),
+    ],
+)
+def test_engine_client_rejects_invalid_conversation_responses(
+    response: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(KensaEngineError, match=message):
+        _conversation_step(response, "conversation")
 
 
 def test_engine_client_fails_closed_on_version_mismatch() -> None:
