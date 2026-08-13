@@ -379,7 +379,15 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
         "metadata": {},
         "error": True,
     }
-    assert snapshots[-1]["judges"] == [invalid.to_dict()]
+    assert snapshots[-1]["judges"] == [
+        {
+            "id": "judge-1",
+            "criteria": "criteria",
+            "required": False,
+            **invalid.to_dict(),
+            "error_kind": "contract",
+        }
+    ]
     with pytest.raises(KensaEvalError) as contract_error:
         invalid.require()
     assert contract_error.value.failure.model_dump(mode="json") == {
@@ -416,6 +424,73 @@ def test_judge_require_distinguishes_verdict_execution_and_contract_failures() -
     with pytest.raises(KensaEvalError) as non_object_error:
         NonObjectJudgeResult(passed=True, reasoning="invalid").require()
     assert isinstance(non_object_error.value.__cause__, TypeError)
+
+
+def test_judge_require_defers_only_results_recorded_by_the_active_trial() -> None:
+    class Engine:
+        def start_case(self, evaluation_id: str, case: dict[str, Any]) -> None:
+            assert evaluation_id.endswith("::trial1")
+            assert case["id"] == "case"
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_agent[trial1]",
+        group_id="test.py::test_agent",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, Engine()),
+    )
+
+    class Provider:
+        def judge(self, **kwargs: Any) -> JudgeResult:
+            return JudgeResult(False, f"failed {kwargs['criteria']}")
+
+    set_judge_provider(Provider())
+    token = set_current_runtime(runtime)
+    try:
+        runtime.run_case(kensa_case(id="case", input="hello"), lambda: "output")
+        recorded = judge("output", "grounded answer")
+        assert recorded.require() is recorded
+        recorded.metadata["changed_after_recording"] = True
+        with pytest.raises(AssertionError, match="not recorded"):
+            JudgeResult(False, "not recorded").require()
+        copied = JudgeResult(**recorded.to_dict())
+        with pytest.raises(AssertionError, match="failed grounded answer"):
+            copied.require()
+    finally:
+        reset_current_runtime(token)
+        set_judge_provider(None)
+
+    inactive = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_inactive[trial1]",
+        group_id="test.py::test_inactive",
+        case_id="case",
+        no_judge=False,
+    )
+    inactive.record_judge(recorded, criteria="grounded answer")
+    inactive_token = set_current_runtime(inactive)
+    try:
+        with pytest.raises(AssertionError, match="failed grounded answer"):
+            recorded.require()
+    finally:
+        reset_current_runtime(inactive_token)
+
+    assert runtime.metadata(status="provisional", duration_ms=0).judges == [
+        {
+            "id": "judge-1",
+            "criteria": "grounded answer",
+            "required": True,
+            "passed": False,
+            "reasoning": "failed grounded answer",
+            "evidence": [],
+            "provider": None,
+            "model": None,
+            "metadata": {},
+            "error": False,
+            "error_kind": None,
+        }
+    ]
 
 
 def test_judge_receives_case_result_as_json() -> None:
@@ -612,7 +687,7 @@ def test_attached_evidence_survives_snapshots_errors_and_flush_failure(
         with pytest.raises(RuntimeError, match="target failed"):
             runtime.run_case(kensa_case(id="failure", input="hello"), operation)
         runtime._record_conversation_snapshot({"accepted": True})
-        runtime.record_judge(JudgeResult(True, "preserved"))
+        runtime.record_judge(JudgeResult(True, "preserved"), criteria="Preserve this judge")
         metadata = runtime.metadata(
             status="error",
             duration_ms=1,

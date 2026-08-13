@@ -492,6 +492,25 @@ class TrialMetadata:
         }
 
 
+@dataclass(frozen=True)
+class _RecordedJudge:
+    id: str
+    criteria: str
+    required: bool
+    result: Any
+    payload: dict[str, Any]
+    error_kind: Literal["contract", "execution"] | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "criteria": self.criteria,
+            "required": self.required,
+            **deepcopy(self.payload),
+            "error_kind": self.error_kind,
+        }
+
+
 class KensaTrialRuntime:
     """Mutable runtime state for one pytest item/trial."""
 
@@ -519,6 +538,7 @@ class KensaTrialRuntime:
         self.output: Any = None
         self.case: dict[str, Any] = {}
         self.judges: list[Any] = []
+        self._judge_records: list[_RecordedJudge] = []
         self._run_started = False
         self._run_owner: _ExecutionOwner | None = None
         self._trace_id: str | None = None
@@ -728,9 +748,46 @@ class KensaTrialRuntime:
             incomplete_reason=self._local_trace_incomplete_reason,
         )
 
-    def record_judge(self, result: Any) -> None:
+    def record_judge(self, result: Any, *, criteria: str) -> None:
         self.judges.append(result)
+        self._judge_records.append(
+            _RecordedJudge(
+                id=f"judge-{len(self._judge_records) + 1}",
+                criteria=criteria,
+                required=False,
+                result=result,
+                payload=deepcopy(result.to_dict()),
+                error_kind=(
+                    "contract"
+                    if getattr(result, "_contract_error", None) is not None
+                    else "execution"
+                    if result.error
+                    else None
+                ),
+            )
+        )
         self._publish_snapshot()
+
+    def require_judge(self, result: Any) -> bool:
+        if (
+            self._engine is None
+            or self._engine_evaluation_id is None
+            or self._engine_completion is not None
+        ):
+            return False
+        for index, recorded in enumerate(self._judge_records):
+            if recorded.result is result:
+                self._judge_records[index] = _RecordedJudge(
+                    id=recorded.id,
+                    criteria=recorded.criteria,
+                    required=True,
+                    result=recorded.result,
+                    payload=recorded.payload,
+                    error_kind=recorded.error_kind,
+                )
+                self._publish_snapshot()
+                return True
+        return False
 
     def metadata(
         self,
@@ -751,7 +808,7 @@ class KensaTrialRuntime:
             failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=self.trace.to_dict(),
-            judges=[j.to_dict() if hasattr(j, "to_dict") else dict(j) for j in self.judges],
+            judges=[judge.to_dict() for judge in self._judge_records],
         )
 
     def finalize_engine(
@@ -790,6 +847,7 @@ class KensaTrialRuntime:
             observation=observation,
             status=status,
             failure=failure_payload,
+            judges=[judge.to_dict() for judge in self._judge_records],
         )
         terminal_failure: TrialFailure | None = None
         if completion.failure is not None:

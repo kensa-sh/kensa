@@ -40,7 +40,14 @@
         "llm_turns": 0
       },
       "failure": null,
-      "check_id": "pytest"
+      "checks": [
+        {
+          "id": "pytest",
+          "outcome": "satisfied",
+          "failure": null
+        }
+      ],
+      "judges": []
     }
   },
   "cancelled": {

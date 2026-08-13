@@ -71,11 +71,18 @@ Use `require()` when the judgment gates the eval:
 verdict.require()
 ```
 
-`require()` returns the same result for a completed positive judgment. A completed negative
-judgment raises `AssertionError(reasoning)` and remains an eligible agent assertion failure. A
-disabled judge, timeout, provider failure, or configuration failure raises
-`KensaEvalError(category="judge", kind="execution")`, which remains a strict eval error but is
-excluded from agent-performance metrics.
+Inside an active engine-backed Kensa evaluation, `require()` marks that specific judge result as
+verdict-bearing and returns the same result. Enforcement is deferred until the TypeScript core
+finalizes the trial, so several required judges can run against one agent invocation. A required
+negative judgment fails the trial; a disabled judge, timeout, provider failure, or configuration
+failure produces a strict judge error that is excluded from agent-performance metrics.
+
+A judge result that is not required is advisory. Kensa records its criterion, reasoning, evidence,
+provider, model, metadata, and outcome, but it cannot change the trial verdict.
+
+Outside an active Kensa trial, `require()` retains its immediate behavior: a completed negative
+judgment raises `AssertionError(reasoning)`, and a judge execution failure raises
+`KensaEvalError(category="judge", kind="execution")`.
 
 Judge snapshots are strictly validated and deep-copied as JSON before Kensa publishes them to a
 runtime artifact. `passed` and `error` must be booleans, `reasoning` must be non-blank, `evidence`
@@ -86,8 +93,8 @@ error result with safe provider and model identity but without the invalid field
 the validation or serialization error. `require()` repeats this validation for directly
 constructed results outside `judge()`.
 
-An arbitrary later `assert verdict.passed` cannot distinguish a completed negative judgment from
-a judge execution error. Use `require()` whenever judge provenance should affect scoring.
+An arbitrary later `assert verdict.passed` remains a plain pytest assertion and leaves the judge
+advisory. Use `require()` whenever judge provenance should affect the core verdict and scoring.
 
 ## Assertions gate the judge
 

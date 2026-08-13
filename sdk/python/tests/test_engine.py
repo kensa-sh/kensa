@@ -179,7 +179,12 @@ def test_engine_client_runs_case_and_cancellation() -> None:
             status="pass",
             failure=None,
         )
-        assert verdict == EngineCompletion(verdict="pass", failure=None)
+        assert verdict == EngineCompletion(
+            verdict="pass",
+            failure=None,
+            checks=({"id": "pytest", "outcome": "satisfied", "failure": None},),
+            judges=(),
+        )
 
         client.start_case(
             "cancelled",
@@ -1013,6 +1018,38 @@ def test_engine_client_reaps_failed_handshakes(
             ],
             "failure provenance",
         ),
+        (
+            "complete",
+            [
+                {"type": "action", "action": "evaluate_check"},
+                {
+                    "type": "result",
+                    "evaluation": {
+                        "phase": "complete",
+                        "verdict": "pass",
+                        "checks": None,
+                        "judges": [],
+                    },
+                },
+            ],
+            "invalid checks",
+        ),
+        (
+            "complete",
+            [
+                {"type": "action", "action": "evaluate_check"},
+                {
+                    "type": "result",
+                    "evaluation": {
+                        "phase": "complete",
+                        "verdict": "pass",
+                        "checks": [{}],
+                        "judges": [None],
+                    },
+                },
+            ],
+            "invalid judges",
+        ),
         ("cancel", [{"type": "result", "evaluation": {"phase": "complete"}}], "cancellation"),
     ],
 )
@@ -1046,7 +1083,15 @@ def test_engine_client_uses_authoritative_terminal_verdict(
     responses = iter(
         [
             {"type": "action", "action": "evaluate_check"},
-            {"type": "result", "evaluation": {"phase": "complete", "verdict": "pass"}},
+            {
+                "type": "result",
+                "evaluation": {
+                    "phase": "complete",
+                    "verdict": "pass",
+                    "checks": [{"id": "pytest", "outcome": "satisfied", "failure": None}],
+                    "judges": [],
+                },
+            },
         ]
     )
     monkeypatch.setattr(client, "_request_locked", lambda request, **kwargs: next(responses))
@@ -1057,7 +1102,12 @@ def test_engine_client_uses_authoritative_terminal_verdict(
         status="fail",
         failure={"category": "agent"},
     )
-    assert completion == EngineCompletion(verdict="pass", failure=None)
+    assert completion == EngineCompletion(
+        verdict="pass",
+        failure=None,
+        checks=({"id": "pytest", "outcome": "satisfied", "failure": None},),
+        judges=(),
+    )
     with pytest.raises(KensaEngineError, match="Unknown check status"):
         _check_outcome("unknown")
     client.close()
