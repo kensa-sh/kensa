@@ -510,9 +510,30 @@ def _record_timeout(
     trials = [trial_result_to_metadata(trial) for trial in result.trials]
     with EngineClient() as engine:
         classification = engine.classify_runtime_outcome(_timeout_outcome(active, message))
-    if classification.failure is None:
-        raise RuntimeError("Kensa engine classified a timeout without failure provenance")
-    failure = TrialFailure.model_validate(classification.failure)
+        if classification.failure is None:
+            raise RuntimeError("Kensa engine classified a timeout without failure provenance")
+        failure = TrialFailure.model_validate(classification.failure)
+        return _write_timeout_result(
+            engine,
+            control,
+            active,
+            duration_ms=duration_ms,
+            message=message,
+            trials=trials,
+            failure=failure,
+        )
+
+
+def _write_timeout_result(
+    engine: EngineClient,
+    control: WatchdogControl,
+    active: ActiveTrial,
+    *,
+    duration_ms: float,
+    message: str,
+    trials: list[TrialMetadata],
+    failure: TrialFailure,
+) -> TimeoutResult:
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
     if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
         existing = control.trial_snapshot
@@ -567,13 +588,12 @@ def _record_timeout(
         "trial_index": active.trial_index,
         "phase": active.phase,
     }
-    with EngineClient() as engine:
-        core_result = engine.build_run(
-            run_id=control.run_id,
-            complete=False,
-            interruption=interruption,
-            trials=[trial.to_dict() for trial in trials],
-        )
+    core_result = engine.build_run(
+        run_id=control.run_id,
+        complete=False,
+        interruption=interruption,
+        trials=[trial.to_dict() for trial in trials],
+    )
     write_run_artifacts(
         run_id=control.run_id,
         trials=trials,
