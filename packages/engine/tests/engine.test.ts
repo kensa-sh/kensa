@@ -378,6 +378,12 @@ describe("KensaEngine", () => {
       },
     });
     expect(
+      engine.processLine(message("replayed-simulator-turn", simulatorTurn)),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "invalid_transition" },
+    });
+    expect(
       engine.processLine(
         message("4", {
           type: "observe_conversation",
