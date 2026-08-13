@@ -79,6 +79,73 @@
       }
     }
   ],
+  "multi_check": {
+    "name": "multiple-checks-use-stable-verdict-precedence",
+    "case": { "id": "multi-check", "input": "hello", "metadata": {} },
+    "observation": {
+      "output": "world",
+      "output_recorded": true,
+      "trace": {
+        "spans": [],
+        "agent_runs": [],
+        "tools": [],
+        "tool_calls": [],
+        "incomplete": false,
+        "incomplete_reason": null,
+        "duration_ms": 0,
+        "cost_usd": null,
+        "known_cost_usd": null,
+        "cost_available": false,
+        "llm_turns": 0
+      },
+      "failure": null
+    },
+    "checks": [
+      {
+        "id": "z-pass",
+        "outcome": "satisfied",
+        "failure": null
+      },
+      {
+        "id": "a-fail",
+        "outcome": "unsatisfied",
+        "failure": {
+          "category": "agent",
+          "kind": "assertion",
+          "message": "expected behavior was absent",
+          "evidence": {}
+        }
+      }
+    ],
+    "actions": ["invoke_agent", "evaluate_check", null],
+    "terminal": {
+      "phase": "complete",
+      "verdict": "fail",
+      "failure": {
+        "category": "agent",
+        "kind": "assertion",
+        "message": "expected behavior was absent",
+        "evidence": {}
+      },
+      "checks": [
+        {
+          "id": "a-fail",
+          "outcome": "unsatisfied",
+          "failure": {
+            "category": "agent",
+            "kind": "assertion",
+            "message": "expected behavior was absent",
+            "evidence": {}
+          }
+        },
+        {
+          "id": "z-pass",
+          "outcome": "satisfied",
+          "failure": null
+        }
+      ]
+    }
+  },
   "cancelled": {
     "name": "observed-case-retains-evidence-on-cancel",
     "case": { "id": "cancelled", "input": "hello", "metadata": {} },

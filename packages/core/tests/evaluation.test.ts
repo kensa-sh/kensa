@@ -4,12 +4,14 @@ import type { ZodError } from "zod";
 import {
   cancelCase,
   checkCase,
+  completeCase,
   CoreValidationError,
   EvaluationTransitionError,
   nextAction,
   observeCase,
   parseCase,
   parseCheck,
+  parseChecks,
   parseObservation,
   startCase,
   type AwaitingCheck,
@@ -17,6 +19,7 @@ import {
   type Cancelled,
   type Complete,
   type EvaluationFailure,
+  type MultiCheckComplete,
 } from "../src/index.js";
 
 const testCase = { id: "hello", input: "world", metadata: {} };
@@ -86,6 +89,147 @@ describe("evaluation transitions", () => {
     expect(complete.failure).toEqual(failure(category));
   });
 
+  it.each([
+    [["satisfied", "skipped"], "pass"],
+    [["skipped", "skipped"], "skipped"],
+    [["satisfied", "unsatisfied"], "fail"],
+    [["unsatisfied", "error"], "error"],
+    [["satisfied", "skipped", "unsatisfied", "error"], "error"],
+  ] as const)(
+    "derives a %s multi-check collection as %s regardless of order",
+    (outcomes, verdict) => {
+      const checks = outcomes.map((outcome, index) => ({
+        id: `check-${outcomes.length - index}`,
+        outcome,
+        failure:
+          outcome === "satisfied"
+            ? null
+            : failure(
+                outcome === "unsatisfied"
+                  ? "agent"
+                  : outcome === "skipped"
+                    ? "harness"
+                    : "infrastructure",
+              ),
+      }));
+      const observed = observeCase(startCase(testCase), observation());
+      const forward = completeCase(observed, checks);
+      const reverse = completeCase(observed, [...checks].reverse());
+
+      expect(forward.verdict).toBe(verdict);
+      expect(reverse).toEqual(forward);
+      expect(forward.checks.map((check) => check.id)).toEqual(
+        checks.map((check) => check.id).sort(),
+      );
+    },
+  );
+
+  it("selects the first canonical failure for the decisive outcome", () => {
+    const result = completeCase(
+      observeCase(startCase(testCase), observation()),
+      [
+        {
+          id: "z-error",
+          outcome: "error",
+          failure: { ...failure("infrastructure"), kind: "z" },
+        },
+        {
+          id: "a-fail",
+          outcome: "unsatisfied",
+          failure: failure("agent"),
+        },
+        {
+          id: "a-error",
+          outcome: "error",
+          failure: { ...failure("infrastructure"), kind: "a" },
+        },
+      ],
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.failure?.kind).toBe("a");
+  });
+
+  it("does not promote skipped provenance in a passing collection", () => {
+    const result = completeCase(
+      observeCase(startCase(testCase), observation()),
+      [
+        { id: "pass", outcome: "satisfied", failure: null },
+        { id: "skip", outcome: "skipped", failure: failure("harness") },
+      ],
+    );
+
+    expect(result).toMatchObject({ verdict: "pass", failure: null });
+    expect(result.checks[1]?.failure).toEqual(failure("harness"));
+  });
+
+  it("validates and canonicalizes multi-check collections", () => {
+    expect(
+      parseChecks([
+        { id: " z ", outcome: "satisfied", failure: null },
+        { id: "a", outcome: "satisfied", failure: null },
+      ]).map((check) => check.id),
+    ).toEqual(["a", "z"]);
+    expect(() => parseChecks([])).toThrow(CoreValidationError);
+    expect(() =>
+      parseChecks([
+        { id: "same", outcome: "satisfied", failure: null },
+        { id: " same ", outcome: "satisfied", failure: null },
+      ]),
+    ).toThrow(CoreValidationError);
+    expect(() =>
+      parseChecks([{ id: "bad", outcome: "error", failure: null }]),
+    ).toThrow(CoreValidationError);
+  });
+
+  it("requires failed observations to complete with one identical error", () => {
+    const agentFailure = failure("agent");
+    const observed = observeCase(
+      startCase(testCase),
+      observation(agentFailure),
+    );
+    const matching = {
+      id: "agent",
+      outcome: "error" as const,
+      failure: agentFailure,
+    };
+
+    expect(completeCase(observed, [matching])).toMatchObject({
+      verdict: "error",
+      failure: agentFailure,
+    });
+    expect(() => completeCase(observed, [])).toThrow(CoreValidationError);
+    expect(() =>
+      completeCase(observed, [
+        matching,
+        { id: "second", outcome: "satisfied", failure: null },
+      ]),
+    ).toThrow(EvaluationTransitionError);
+    expect(() =>
+      completeCase(observed, [
+        { ...matching, outcome: "unsatisfied" as const },
+      ]),
+    ).toThrow(EvaluationTransitionError);
+    expect(() =>
+      completeCase(observed, [
+        {
+          ...matching,
+          failure: { ...agentFailure, kind: "different" },
+        },
+      ]),
+    ).toThrow(EvaluationTransitionError);
+  });
+
+  it("keeps the single-check transition as a projection of multi-check rules", () => {
+    const observed = observeCase(startCase(testCase), observation());
+    const check = { id: "only", outcome: "satisfied" as const, failure: null };
+    const single = checkCase(observed, check);
+    const multiple = completeCase(observed, [check]);
+    const { checks, ...shared } = multiple;
+
+    expect(single).toEqual({ ...shared, check: checks[0] });
+  });
+
   it("requires failed agent observations to produce errors", () => {
     const agentFailure = failure("agent");
     const observed = observeCase(
@@ -125,12 +269,15 @@ describe("evaluation transitions", () => {
   it("rejects invalid transitions", () => {
     const started = startCase(testCase);
     expect(() => checkCase(started as unknown as AwaitingCheck, {})).toThrow(
-      EvaluationTransitionError,
+      "cannot check case in awaiting_observation phase",
     );
     const observed = observeCase(started, observation());
     expect(() =>
       observeCase(observed as unknown as AwaitingObservation, {}),
     ).toThrow(EvaluationTransitionError);
+    expect(() => completeCase(started as unknown as AwaitingCheck, [])).toThrow(
+      EvaluationTransitionError,
+    );
   });
 
   it.each([
@@ -231,9 +378,13 @@ describe("evaluation transitions", () => {
       outcome: "satisfied",
       failure: null,
     });
+    const multiComplete: MultiCheckComplete = completeCase(observed, [
+      { id: "pytest", outcome: "satisfied", failure: null },
+    ]);
     const cancelled: Cancelled = cancelCase(started, "stopped");
 
-    expect([complete.phase, cancelled.phase]).toEqual([
+    expect([complete.phase, multiComplete.phase, cancelled.phase]).toEqual([
+      "complete",
       "complete",
       "cancelled",
     ]);

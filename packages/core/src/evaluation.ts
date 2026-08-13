@@ -125,6 +125,22 @@ const checkSchema = z
       );
     }
   });
+const checksSchema = z
+  .array(checkSchema)
+  .min(1)
+  .superRefine((checks, context) => {
+    const ids = new Set<string>();
+    for (const [index, check] of checks.entries()) {
+      if (ids.has(check.id)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "id"],
+          message: "evaluation checks contain duplicate IDs",
+        });
+      }
+      ids.add(check.id);
+    }
+  });
 
 const cancellationReasonSchema = z.string().trim().min(1);
 
@@ -155,6 +171,15 @@ export interface Complete {
   verdict: EvaluationVerdict;
 }
 
+export interface MultiCheckComplete {
+  phase: "complete";
+  case: EvaluationCase;
+  observation: EvaluationObservation;
+  checks: EvaluationCheck[];
+  failure: EvaluationFailure | null;
+  verdict: EvaluationVerdict;
+}
+
 export interface Cancelled {
   phase: "cancelled";
   case: EvaluationCase;
@@ -165,7 +190,11 @@ export interface Cancelled {
 }
 
 export type EvaluationState =
-  AwaitingObservation | AwaitingCheck | Complete | Cancelled;
+  | AwaitingObservation
+  | AwaitingCheck
+  | Complete
+  | MultiCheckComplete
+  | Cancelled;
 
 export class EvaluationTransitionError extends KensaCoreError {
   constructor(message: string) {
@@ -192,6 +221,14 @@ export function parseObservation(input: unknown): EvaluationObservation {
 
 export function parseCheck(input: unknown): EvaluationCheck {
   return parseInput(checkSchema, input, "check violates the core contract");
+}
+
+export function parseChecks(input: unknown): EvaluationCheck[] {
+  return parseInput(
+    checksSchema,
+    input,
+    "checks violate the core contract",
+  ).sort(compareChecks);
 }
 
 export function nextAction(state: EvaluationState): EvaluationAction | null {
@@ -237,27 +274,38 @@ export function checkCase(state: EvaluationState, input: unknown): Complete {
       `cannot check case in ${state.phase} phase`,
     );
   }
-  const check = parseCheck(input);
-  if (state.observation.failure !== null && check.outcome !== "error") {
+  const completed = completeCase(state, [input]);
+  const { checks, ...complete } = completed;
+  return { ...complete, check: checks[0]! };
+}
+
+export function completeCase(
+  state: AwaitingCheck,
+  input: unknown,
+): MultiCheckComplete;
+export function completeCase(
+  state: EvaluationState,
+  input: unknown,
+): MultiCheckComplete;
+export function completeCase(
+  state: EvaluationState,
+  input: unknown,
+): MultiCheckComplete {
+  if (state.phase !== "awaiting_check") {
     throw new EvaluationTransitionError(
-      "a failed observation requires an error check outcome",
+      `cannot complete case in ${state.phase} phase`,
     );
   }
-  if (
-    state.observation.failure !== null &&
-    canonicalJson(state.observation.failure) !== canonicalJson(check.failure)
-  ) {
-    throw new EvaluationTransitionError(
-      "observation and check failures must identify the same failure",
-    );
-  }
+  const checks = parseChecks(input);
+  validateFailedObservation(state.observation, checks);
+  const verdict = verdictForChecks(checks);
   return {
     phase: "complete",
     case: state.case,
     observation: state.observation,
-    check,
-    failure: state.observation.failure ?? check.failure,
-    verdict: verdictFor(check.outcome),
+    checks,
+    failure: failureForVerdict(checks, verdict),
+    verdict,
   };
 }
 
@@ -291,17 +339,62 @@ export function cancelCase(state: EvaluationState, input: unknown): Cancelled {
   };
 }
 
-function verdictFor(outcome: EvaluationCheck["outcome"]): EvaluationVerdict {
-  switch (outcome) {
-    case "satisfied":
-      return "pass";
-    case "unsatisfied":
-      return "fail";
-    case "error":
-      return "error";
-    case "skipped":
-      return "skipped";
+function validateFailedObservation(
+  observation: EvaluationObservation,
+  checks: EvaluationCheck[],
+): void {
+  if (observation.failure === null) {
+    return;
   }
+  if (checks.length !== 1 || checks[0]!.outcome !== "error") {
+    throw new EvaluationTransitionError(
+      "a failed observation requires exactly one error check",
+    );
+  }
+  if (
+    canonicalJson(observation.failure) !== canonicalJson(checks[0]!.failure)
+  ) {
+    throw new EvaluationTransitionError(
+      "observation and check failures must identify the same failure",
+    );
+  }
+}
+
+function verdictForChecks(checks: EvaluationCheck[]): EvaluationVerdict {
+  if (checks.some((check) => check.outcome === "error")) {
+    return "error";
+  }
+  if (checks.some((check) => check.outcome === "unsatisfied")) {
+    return "fail";
+  }
+  if (checks.some((check) => check.outcome === "satisfied")) {
+    return "pass";
+  }
+  return "skipped";
+}
+
+function failureForVerdict(
+  checks: EvaluationCheck[],
+  verdict: EvaluationVerdict,
+): EvaluationFailure | null {
+  const decisiveOutcome = {
+    error: "error",
+    fail: "unsatisfied",
+    pass: null,
+    skipped: "skipped",
+  } as const satisfies Record<
+    EvaluationVerdict,
+    EvaluationCheck["outcome"] | null
+  >;
+  const outcome = decisiveOutcome[verdict];
+  if (outcome === null) {
+    return null;
+  }
+  return checks.find((check) => check.outcome === outcome)!.failure;
+}
+
+function compareChecks(left: EvaluationCheck, right: EvaluationCheck): number {
+  return left.id < right.id ? -1 : 1;
 }
 
 function allowedOutcomes(
