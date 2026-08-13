@@ -961,6 +961,9 @@ def test_snapshot(case, kensa_run):
     assert trial["trace"]["incomplete"] is True
     assert trial["judges"] == [
         {
+            "id": "judge-1",
+            "criteria": "must preserve evidence",
+            "required": False,
             "passed": True,
             "reasoning": "Environment judge returned pass for: must preserve evidence",
             "evidence": [],
@@ -968,6 +971,7 @@ def test_snapshot(case, kensa_run):
             "model": "KENSA_JUDGE_RESULT",
             "metadata": {},
             "error": False,
+            "error_kind": None,
         }
     ]
 
@@ -1038,6 +1042,9 @@ def pytest_runtest_logreport(report):
     assert artifact["summary"]["eligible_agent_trials"] == 0
     assert trial["judges"] == [
         {
+            "id": "judge-1",
+            "criteria": "preserve teardown evidence",
+            "required": False,
             "passed": True,
             "reasoning": "Environment judge returned pass for: preserve teardown evidence",
             "evidence": [],
@@ -1045,6 +1052,7 @@ def pytest_runtest_logreport(report):
             "model": "KENSA_JUDGE_RESULT",
             "metadata": {},
             "error": False,
+            "error_kind": None,
         }
     ]
 

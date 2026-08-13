@@ -27,6 +27,12 @@ export {
   type MultiCheckComplete,
 } from "./evaluation.js";
 export {
+  completeCaseWithJudges,
+  parseJudgeObservations,
+  type JudgeEvaluationComplete,
+  type JudgeObservation,
+} from "./judges.js";
+export {
   CoreValidationError,
   KensaCoreError,
   type CoreErrorCode,

@@ -1171,6 +1171,86 @@ def test_fail(case, kensa_run, judge_in_teardown):
     assert len(failed["judges"]) == 1
 
 
+def test_required_judges_finish_before_core_finalizes_the_trial(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makeconftest(
+        """
+import pytest
+from kensa.judge import JudgeResult, set_judge_provider
+from kensa.pytest import ConversationResponse
+
+
+class Provider:
+    def judge(self, **kwargs):
+        passed = kwargs["criteria"] == "required pass"
+        return JudgeResult(
+            passed=passed,
+            reasoning="satisfied" if passed else f"failed {kwargs['criteria']}",
+            evidence=[kwargs["criteria"]],
+            provider="test",
+            model="judge-test",
+        )
+
+
+@pytest.fixture(autouse=True)
+def judge_provider():
+    set_judge_provider(Provider())
+    yield
+    set_judge_provider(None)
+
+
+@pytest.fixture
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"input": case.input})
+    return Agent()
+"""
+    )
+    pytester.makepyfile(
+        test_eval="""
+from pathlib import Path
+
+import pytest
+from kensa.pytest import judge, kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="judged", input="hello")])
+def test_judged(case, kensa_run):
+    result = case.run(kensa_run)
+    first = judge(result, "required pass")
+    second = judge(result, "required fail")
+    judge(result, "advisory fail")
+    first.require()
+    second.require()
+    Path("all-judges-ran").write_text("yes")
+"""
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(failed=1)
+    assert (Path(str(pytester.path)) / "all-judges-ran").read_text() == "yes"
+    artifact = next((Path(str(pytester.path)) / ".kensa" / "results").glob("*.json"))
+    trial = json.loads(artifact.read_text())["trials"][0]
+    assert trial["status"] == "fail"
+    assert trial["failure"] == {
+        "category": "judge",
+        "kind": "criteria",
+        "message": "failed required fail",
+        "evidence": {
+            "criteria": "required fail",
+            "evidence": ["required fail"],
+            "provider": "test",
+            "model": "judge-test",
+            "metadata": {},
+        },
+    }
+    assert [item["required"] for item in trial["judges"]] == [True, True, False]
+
+
 def test_xdist_transports_successful_teardown_judge_metadata(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,

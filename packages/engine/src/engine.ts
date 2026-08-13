@@ -1,7 +1,7 @@
 import {
   buildRunResult,
   cancelCase,
-  checkCase,
+  completeCaseWithJudges,
   CoreValidationError,
   EvaluationTransitionError,
   KensaCoreError,
@@ -188,7 +188,11 @@ export class KensaEngine {
       }
       case "check": {
         const state = this.#awaitingCheck(request.evaluation_id);
-        const complete = checkCase(state, request.check);
+        const complete = completeCaseWithJudges(
+          state,
+          request.checks,
+          request.judges,
+        );
         return {
           response: {
             type: "result",
@@ -200,7 +204,8 @@ export class KensaEngine {
               output_recorded: complete.observation.output_recorded,
               trace: complete.observation.trace,
               failure: complete.failure,
-              check_id: complete.check.id,
+              checks: complete.checks,
+              judges: complete.judges,
             },
           },
           commit: () => {

@@ -23,7 +23,7 @@ _DESCRIPTOR_KEYS = {
 }
 _CONTRACT_IDS = (
     "kensa.build_manifest.v1",
-    "kensa.engine.v1",
+    "kensa.engine.v2",
     "kensa.result.v1",
 )
 _SCHEMA_IDS = ("evaluation", "evidence", "mining", "protection", "sync")

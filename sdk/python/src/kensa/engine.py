@@ -17,7 +17,7 @@ from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
-PROTOCOL_VERSION = "kensa.engine.v1"
+PROTOCOL_VERSION = "kensa.engine.v2"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _RESPONSE_TIMEOUT_S = 5.0
@@ -38,6 +38,8 @@ _TRACE_INTEGER_KEYS = frozenset(
 class EngineCompletion:
     verdict: Literal["pass", "fail", "error", "skipped"]
     failure: dict[str, Any] | None
+    checks: tuple[dict[str, Any], ...] = ()
+    judges: tuple[dict[str, Any], ...] = ()
 
 
 class KensaEngineError(RuntimeError):
@@ -118,6 +120,7 @@ class EngineClient:
         observation: Mapping[str, Any],
         status: str,
         failure: Mapping[str, Any] | None,
+        judges: Sequence[Mapping[str, Any]] = (),
     ) -> EngineCompletion:
         with self._lock:
             action = self._request_locked(
@@ -136,11 +139,14 @@ class EngineClient:
                 {
                     "type": "check",
                     "evaluation_id": evaluation_id,
-                    "check": {
-                        "id": "pytest",
-                        "outcome": _check_outcome(status),
-                        "failure": failure,
-                    },
+                    "checks": [
+                        {
+                            "id": "pytest",
+                            "outcome": _check_outcome(status),
+                            "failure": failure,
+                        }
+                    ],
+                    "judges": [dict(judge) for judge in judges],
                 }
             )
             evaluation = response.get("evaluation")
@@ -163,10 +169,14 @@ class EngineClient:
                     "Kensa engine verdict contradicts failure provenance",
                     code="protocol",
                 )
+            checks = _record_collection(evaluation.get("checks"), boundary="checks")
+            judge_results = _record_collection(evaluation.get("judges"), boundary="judges")
             self._active_evaluations.discard(evaluation_id)
             return EngineCompletion(
                 verdict=cast(Literal["pass", "fail", "error", "skipped"], verdict),
                 failure=terminal_failure,
+                checks=checks,
+                judges=judge_results,
             )
 
     def cancel_case(self, evaluation_id: str, reason: str) -> None:
@@ -518,6 +528,15 @@ def _check_outcome(status: str) -> str:
         return outcomes[status]
     except KeyError as exc:
         raise KensaEngineError(f"Unknown check status: {status!r}", code="protocol") from exc
+
+
+def _record_collection(value: Any, *, boundary: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise KensaEngineError(
+            f"Kensa engine returned invalid {boundary}",
+            code="protocol",
+        )
+    return tuple(dict(item) for item in value)
 
 
 def _json_values_equal(left: object, right: object) -> bool:

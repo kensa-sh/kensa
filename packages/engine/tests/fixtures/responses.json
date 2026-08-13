@@ -1,7 +1,7 @@
 {
   "handshake": {
     "type": "handshake",
-    "protocol_version": "kensa.engine.v1",
+    "protocol_version": "kensa.engine.v2",
     "engine_version": "__ENGINE_VERSION__"
   },
   "invoke_agent": {
@@ -40,7 +40,14 @@
         "llm_turns": 0
       },
       "failure": null,
-      "check_id": "pytest"
+      "checks": [
+        {
+          "id": "pytest",
+          "outcome": "satisfied",
+          "failure": null
+        }
+      ],
+      "judges": []
     }
   },
   "cancelled": {

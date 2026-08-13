@@ -38,7 +38,7 @@ function draft() {
     },
     contracts: [
       { id: "kensa.result.v1", digest: digest("f") },
-      { id: "kensa.engine.v1", digest: digest("e") },
+      { id: "kensa.engine.v2", digest: digest("e") },
     ],
     schemas: [
       { id: "trace-view", digest: digest("8") },
@@ -56,7 +56,7 @@ describe("release build manifest", () => {
     const manifest = await buildReleaseManifest(draft());
 
     expect(manifest.contracts.map((identity) => identity.id)).toEqual([
-      "kensa.engine.v1",
+      "kensa.engine.v2",
       "kensa.result.v1",
     ]);
     expect(manifest.schemas.map((identity) => identity.id)).toEqual([
@@ -114,7 +114,7 @@ describe("release build manifest", () => {
     await expect(
       buildReleaseManifest({
         ...draft(),
-        contracts: [{ id: "kensa.engine.v1", digest: "short" }],
+        contracts: [{ id: "kensa.engine.v2", digest: "short" }],
         extra: true,
       }),
     ).rejects.toBeInstanceOf(KensaCoreError);

@@ -58,6 +58,9 @@ class JudgeResult:
 
     def require(self) -> JudgeResult:
         """Require a completed positive judgment."""
+        runtime = current_runtime()
+        if runtime is not None and runtime.require_judge(self):
+            return self
         contract_error = self._contract_error
         if contract_error is None:
             try:
@@ -158,7 +161,7 @@ def judge(
                 error=True,
             )
         )
-        runtime.record_judge(result)
+        runtime.record_judge(result, criteria=criteria)
         return result
 
     provider: JudgeProvider | None = None
@@ -212,7 +215,7 @@ def judge(
 
     result = _snapshot_judge_result(result)
     if runtime is not None:
-        runtime.record_judge(result)
+        runtime.record_judge(result, criteria=criteria)
     return result
 
 

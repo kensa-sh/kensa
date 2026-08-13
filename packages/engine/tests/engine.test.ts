@@ -33,6 +33,20 @@ const agentFailure = {
   evidence: { type: "RuntimeError" },
 } as const;
 
+const requiredJudge = {
+  id: "judge-1",
+  criteria: "The answer is grounded.",
+  required: true,
+  passed: false,
+  reasoning: "The answer is unsupported.",
+  evidence: ["No supporting tool call."],
+  provider: "openai",
+  model: "judge-model",
+  metadata: {},
+  error: false,
+  error_kind: null,
+} as const;
+
 function message(id: string, request: Record<string, unknown>): string {
   return JSON.stringify({ id, request });
 }
@@ -189,7 +203,8 @@ describe("KensaEngine", () => {
       message("4", {
         type: "check",
         evaluation_id: "eval-1",
-        check: { id: "pytest", outcome: "satisfied", failure: null },
+        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        judges: [],
       }),
     );
     expect(result).toEqual({ id: "4", ok: true, response: responses.complete });
@@ -198,7 +213,8 @@ describe("KensaEngine", () => {
         message("5", {
           type: "check",
           evaluation_id: "eval-1",
-          check: { id: "pytest", outcome: "satisfied", failure: null },
+          checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+          judges: [],
         }),
       ),
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
@@ -237,6 +253,78 @@ describe("KensaEngine", () => {
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
   });
 
+  it("derives required judge checks while retaining advisory provenance", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    engine.processLine(
+      message("2", {
+        type: "start_case",
+        evaluation_id: "judged",
+        case: { id: "case-1", input: null, metadata: {} },
+      }),
+    );
+    engine.processLine(
+      message("3", {
+        type: "observe",
+        evaluation_id: "judged",
+        observation: {
+          output: "world",
+          output_recorded: true,
+          trace,
+          failure: null,
+        },
+      }),
+    );
+
+    const invalid = engine.processLine(
+      message("4", {
+        type: "check",
+        evaluation_id: "judged",
+        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        judges: [{ ...requiredJudge, error: true }],
+      }),
+    );
+    expect(invalid).toMatchObject({
+      ok: false,
+      failure: { code: "invalid_message" },
+    });
+
+    const result = engine.processLine(
+      message("5", {
+        type: "check",
+        evaluation_id: "judged",
+        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        judges: [
+          requiredJudge,
+          {
+            ...requiredJudge,
+            id: "judge-2",
+            required: false,
+            criteria: "The tone is concise.",
+          },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      response: {
+        type: "result",
+        evaluation: {
+          verdict: "fail",
+          checks: [
+            { id: "judge-1", outcome: "unsatisfied" },
+            { id: "pytest", outcome: "satisfied" },
+          ],
+          judges: [
+            { id: "judge-1", required: true },
+            { id: "judge-2", required: false },
+          ],
+        },
+      },
+    });
+  });
+
   it("preserves failed observations through terminal error handling", () => {
     const engine = new KensaEngine();
     ready(engine);
@@ -273,7 +361,8 @@ describe("KensaEngine", () => {
         message("4", {
           type: "check",
           evaluation_id: "failed-agent",
-          check: { id: "pytest", outcome: "error", failure: agentFailure },
+          checks: [{ id: "pytest", outcome: "error", failure: agentFailure }],
+          judges: [],
         }),
       ),
     ).toMatchObject({
@@ -466,7 +555,8 @@ describe("KensaEngine", () => {
         message("5", {
           type: "check",
           evaluation_id: "duplicate",
-          check: { id: "pytest", outcome: "satisfied", failure: null },
+          checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+          judges: [],
         }),
       ),
     ).toMatchObject({ ok: false, failure: { code: "invalid_transition" } });

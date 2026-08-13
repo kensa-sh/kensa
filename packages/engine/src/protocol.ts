@@ -6,12 +6,13 @@ import {
   buildRunResult,
   canonicalJson,
   CoreValidationError,
-  parseCheck,
   normalizeTraceViews,
+  parseChecks,
+  parseJudgeObservations,
   parseObservation,
 } from "@kensa/core";
 
-export const PROTOCOL_VERSION = "kensa.engine.v1";
+export const PROTOCOL_VERSION = "kensa.engine.v2";
 export const ENGINE_VERSION = packageMetadata.version;
 
 const handshakeRequest = z.strictObject({
@@ -32,7 +33,8 @@ const observeRequest = z.strictObject({
 const checkRequest = z.strictObject({
   type: z.literal("check"),
   evaluation_id: z.string().min(1),
-  check: z.unknown(),
+  checks: z.unknown(),
+  judges: z.unknown(),
 });
 const cancelRequest = z.strictObject({
   type: z.literal("cancel"),
@@ -105,7 +107,8 @@ const completeEvaluationResponse = z
     output_recorded: z.boolean(),
     trace: z.unknown(),
     failure: z.unknown(),
-    check_id: z.string().min(1),
+    checks: z.array(z.unknown()),
+    judges: z.array(z.unknown()),
   })
   .superRefine((evaluation, context) => {
     validateCoreValue(
@@ -118,6 +121,8 @@ const completeEvaluationResponse = z
         }),
       context,
     );
+    validateCoreValue(() => parseChecks(evaluation.checks), context);
+    validateCoreValue(() => parseJudgeObservations(evaluation.judges), context);
   });
 const cancelledEvaluationResponse = z
   .strictObject({
@@ -131,11 +136,13 @@ const cancelledEvaluationResponse = z
   .superRefine((evaluation, context) => {
     validateCoreValue(
       () =>
-        parseCheck({
-          id: "cancellation",
-          outcome: "error",
-          failure: evaluation.failure,
-        }),
+        parseChecks([
+          {
+            id: "cancellation",
+            outcome: "error",
+            failure: evaluation.failure,
+          },
+        ]),
       context,
     );
     if (evaluation.observation !== null) {
