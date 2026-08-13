@@ -53,7 +53,7 @@ describe("release build manifest generator", () => {
       "kensa.engine.v1",
       "kensa.result.v1",
     ]);
-    expect(manifest.schemas).toHaveLength(5);
+    expect(manifest.schemas).toHaveLength(6);
     expect(manifest.conformance).toHaveLength(1);
   });
 
@@ -144,6 +144,7 @@ function fixtureRoot() {
   for (const path of [
     "packages/core/src/build-manifest.ts",
     "packages/core/src/aggregation.ts",
+    "packages/core/src/conversation.ts",
     "packages/core/src/evaluation.ts",
     "packages/core/src/evidence.ts",
     "packages/core/src/mining.ts",

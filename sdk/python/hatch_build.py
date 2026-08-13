@@ -26,9 +26,10 @@ _CONTRACT_IDS = (
     "kensa.engine.v1",
     "kensa.result.v1",
 )
-_SCHEMA_IDS = ("evaluation", "evidence", "mining", "protection", "sync")
+_SCHEMA_IDS = ("conversation", "evaluation", "evidence", "mining", "protection", "sync")
 _CONFORMANCE_IDS = (
     "canonical-json",
+    "conversation",
     "evaluation",
     "redaction-proof",
     "trace-order",

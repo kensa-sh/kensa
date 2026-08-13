@@ -1,0 +1,128 @@
+{
+  "start": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "private"
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      }
+    ],
+    "mode": "simulated",
+    "max_agent_responses": 1,
+    "starts_with": "simulator"
+  },
+  "actions": [
+    {
+      "source": "simulator",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "response_index": 1,
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "private"
+          },
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "output": null,
+        "output_recorded": false
+      }
+    },
+    {
+      "source": "agent",
+      "messages": [
+        {
+          "role": "system",
+          "content": "private"
+        },
+        {
+          "role": "user",
+          "content": "hello"
+        },
+        {
+          "role": "user",
+          "content": "Can you confirm?"
+        }
+      ],
+      "response_index": 2,
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "private"
+          },
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "user",
+            "content": "Can you confirm?"
+          }
+        ],
+        "output": null,
+        "output_recorded": false
+      }
+    }
+  ],
+  "observations": [
+    {
+      "source": "simulator",
+      "content": "Can you confirm?",
+      "output": null,
+      "output_recorded": false,
+      "termination_reason": null
+    },
+    {
+      "source": "agent",
+      "content": "Confirmed",
+      "output": {
+        "confirmed": true
+      },
+      "output_recorded": true,
+      "termination_reason": "resolved"
+    }
+  ],
+  "result": {
+    "phase": "complete",
+    "messages": [
+      {
+        "role": "system",
+        "content": "private"
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      },
+      {
+        "role": "user",
+        "content": "Can you confirm?"
+      },
+      {
+        "role": "assistant",
+        "content": "Confirmed"
+      }
+    ],
+    "output": {
+      "confirmed": true
+    },
+    "output_recorded": true,
+    "termination": {
+      "source": "agent",
+      "reason": "resolved"
+    }
+  }
+}

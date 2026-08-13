@@ -2,15 +2,21 @@ import {
   buildRunResult,
   cancelCase,
   completeCaseWithJudges,
+  conversationAction,
+  ConversationTransitionError,
   CoreValidationError,
   EvaluationTransitionError,
   KensaCoreError,
   nextAction,
   normalizeTraceViews,
   observeCase,
+  observeConversation,
   startCase,
+  startConversation,
   type AwaitingCheck,
   type AwaitingObservation,
+  type ConversationAction,
+  type ConversationAwaitingResponse,
   type EvaluationAction,
 } from "@kensa/core";
 import { ZodError } from "zod";
@@ -31,6 +37,9 @@ export interface EngineDependencies {
   nextAction(
     state: AwaitingObservation | AwaitingCheck,
   ): EvaluationAction | null;
+  conversationAction(
+    state: ConversationAwaitingResponse,
+  ): ConversationAction | null;
   validateResponse(value: unknown): EngineResponse;
 }
 
@@ -41,6 +50,7 @@ interface Transaction {
 
 const defaultDependencies: EngineDependencies = {
   nextAction,
+  conversationAction,
   validateResponse: (value) => responseSchema.parse(value),
 };
 
@@ -49,11 +59,12 @@ export class KensaEngine {
     string,
     AwaitingObservation | AwaitingCheck
   >();
+  readonly #conversations = new Map<string, ConversationAwaitingResponse>();
   readonly #dependencies: EngineDependencies;
   #handshakeComplete = false;
 
-  constructor(dependencies: EngineDependencies = defaultDependencies) {
-    this.#dependencies = dependencies;
+  constructor(dependencies: Partial<EngineDependencies> = {}) {
+    this.#dependencies = { ...defaultDependencies, ...dependencies };
   }
 
   processLine(line: string): ResponseEnvelope {
@@ -118,12 +129,18 @@ export class KensaEngine {
           issues: error.issues,
         });
       }
+      if (error instanceof ConversationTransitionError) {
+        return failure(requestId, "invalid_transition", error.message, {
+          issues: error.issues,
+        });
+      }
       if (error instanceof KensaCoreError) {
         return failure(requestId, "internal", error.message, {
           issues: error.issues,
         });
       }
       if (
+        error instanceof UnknownConversationError ||
         error instanceof UnknownEvaluationError ||
         error instanceof VersionMismatchError
       ) {
@@ -213,6 +230,56 @@ export class KensaEngine {
           },
         };
       }
+      case "start_conversation": {
+        if (this.#conversations.has(request.conversation_id)) {
+          throw new ConversationTransitionError(
+            `conversation ${request.conversation_id} has already started`,
+          );
+        }
+        const state = startConversation(request.conversation);
+        return {
+          response: {
+            type: "conversation_action",
+            conversation_id: request.conversation_id,
+            action: requiredConversationAction(
+              state,
+              this.#dependencies.conversationAction,
+            ),
+          },
+          commit: () => {
+            this.#conversations.set(request.conversation_id, state);
+          },
+        };
+      }
+      case "observe_conversation": {
+        const state = this.#conversation(request.conversation_id);
+        const observed = observeConversation(state, request.observation);
+        if (observed.phase === "complete") {
+          return {
+            response: {
+              type: "conversation_result",
+              conversation_id: request.conversation_id,
+              result: observed,
+            },
+            commit: () => {
+              this.#conversations.delete(request.conversation_id);
+            },
+          };
+        }
+        return {
+          response: {
+            type: "conversation_action",
+            conversation_id: request.conversation_id,
+            action: requiredConversationAction(
+              observed,
+              this.#dependencies.conversationAction,
+            ),
+          },
+          commit: () => {
+            this.#conversations.set(request.conversation_id, observed);
+          },
+        };
+      }
       case "cancel": {
         const state = this.#activeEvaluation(request.evaluation_id);
         const cancelled = cancelCase(state, request.reason);
@@ -234,11 +301,12 @@ export class KensaEngine {
         };
       }
       case "reset": {
-        const released = this.#evaluations.size;
+        const released = this.#evaluations.size + this.#conversations.size;
         return {
           response: { type: "reset", released },
           commit: () => {
             this.#evaluations.clear();
+            this.#conversations.clear();
           },
         };
       }
@@ -267,8 +335,9 @@ export class KensaEngine {
   }
 
   reset(): number {
-    const released = this.#evaluations.size;
+    const released = this.#evaluations.size + this.#conversations.size;
     this.#evaluations.clear();
+    this.#conversations.clear();
     return released;
   }
 
@@ -302,6 +371,22 @@ export class KensaEngine {
 
   #activeEvaluation(id: string): AwaitingObservation | AwaitingCheck {
     return this.#evaluation(id);
+  }
+
+  #conversation(id: string): ConversationAwaitingResponse {
+    const state = this.#conversations.get(id);
+    if (state === undefined) {
+      throw new UnknownConversationError(id);
+    }
+    return state;
+  }
+}
+
+class UnknownConversationError extends Error {
+  readonly code = "unknown_conversation" as const;
+
+  constructor(id: string) {
+    super(`conversation ${id} has not started`);
   }
 }
 
@@ -345,6 +430,17 @@ function requiredAction(
   const action = resolve(state);
   if (action === null) {
     throw new Error(`active evaluation ${state.case.id} has no next action`);
+  }
+  return action;
+}
+
+function requiredConversationAction(
+  state: ConversationAwaitingResponse,
+  resolve: (state: ConversationAwaitingResponse) => ConversationAction | null,
+): ConversationAction {
+  const action = resolve(state);
+  if (action === null) {
+    throw new Error("active conversation has no next action");
   }
   return action;
 }

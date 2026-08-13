@@ -6,7 +6,7 @@ import math
 from collections.abc import Awaitable
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -21,6 +21,12 @@ from kensa.conversation import (
     LLMSimulator,
     Simulator,
     Termination,
+)
+from kensa.engine import (
+    EngineClient,
+    EngineConversationAction,
+    EngineConversationResult,
+    KensaEngineError,
 )
 from kensa.llm import LLMConfigurationError, LLMProviderError, LLMResult
 from kensa.runtime import KensaTrial, KensaTrialRuntime, reset_current_runtime, set_current_runtime
@@ -43,6 +49,72 @@ class ScriptedResponder:
         if isinstance(response, BaseException):
             raise response
         return cast(ConversationResponse, response)
+
+
+class ScriptedConversationEngine:
+    def __init__(
+        self,
+        first: EngineConversationAction,
+        *steps: EngineConversationAction | EngineConversationResult | KensaEngineError,
+    ) -> None:
+        self.first = first
+        self.steps = list(steps)
+        self.starts: list[tuple[str, dict[str, Any]]] = []
+        self.observations: list[tuple[str, dict[str, Any]]] = []
+
+    def start_case(self, evaluation_id: str, case: dict[str, Any]) -> None:
+        del evaluation_id, case
+
+    def start_conversation(
+        self,
+        conversation_id: str,
+        conversation: dict[str, Any],
+    ) -> EngineConversationAction:
+        self.starts.append((conversation_id, deepcopy(conversation)))
+        return self.first
+
+    def observe_conversation(
+        self,
+        conversation_id: str,
+        observation: dict[str, Any],
+    ) -> EngineConversationAction | EngineConversationResult:
+        self.observations.append((conversation_id, deepcopy(observation)))
+        step = self.steps.pop(0)
+        if isinstance(step, KensaEngineError):
+            raise step
+        return step
+
+
+def engine_action(
+    source: Literal["agent", "simulator"],
+    *,
+    messages: tuple[dict[str, Any], ...] = (),
+    accepted_messages: tuple[dict[str, Any], ...] = (),
+    accepted_output: Any = None,
+    accepted_output_recorded: bool = False,
+    response_index: int = 1,
+    agent_responses: int = 0,
+) -> EngineConversationAction:
+    return EngineConversationAction(
+        source=source,
+        messages=messages,
+        response_index=response_index,
+        agent_responses=agent_responses,
+        accepted_messages=accepted_messages,
+        accepted_output=accepted_output,
+        accepted_output_recorded=accepted_output_recorded,
+    )
+
+
+def engine_runtime(engine: ScriptedConversationEngine, nodeid: str) -> KensaTrialRuntime:
+    return KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid=nodeid,
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
 
 
 if TYPE_CHECKING:
@@ -806,6 +878,622 @@ def test_sync_async_and_dynamic_awaitables_share_semantics() -> None:
     for result in (sync, async_value, dynamic_value, simulated_value):
         assert result.trace.spans == []
         assert not result.trace.incomplete
+
+
+def test_engine_backed_direct_conversation_preserves_public_result_and_snapshots() -> None:
+    snapshots: list[Any] = []
+    with EngineClient() as engine:
+        runtime = KensaTrialRuntime(
+            trial=KensaTrial(1, 1),
+            nodeid="test_engine_backed_direct_conversation",
+            group_id="group",
+            case_id="case",
+            no_judge=False,
+            snapshot_callback=lambda state: snapshots.append(deepcopy(state.output)),
+            engine=engine,
+        )
+        token = set_current_runtime(runtime)
+        try:
+            output = Value(items=[1])
+            result = kensa_case(
+                id="engine-direct",
+                messages=[{"role": "user", "content": "hello"}],
+            ).run(ScriptedResponder(ConversationResponse(content="done", output=output)))
+            assert runtime.finalize_engine("pass", None) == ("pass", None)
+        finally:
+            reset_current_runtime(token)
+
+    assert isinstance(result, CaseResult)
+    assert isinstance(result.output, Value)
+    assert result == CaseResult(
+        messages=(
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "done"},
+        ),
+        output=Value(items=[1]),
+        termination=Termination(source="engine", reason="direct"),
+    )
+    assert snapshots[0] == {
+        "messages": [{"role": "user", "content": "hello"}],
+        "output": None,
+        "termination": None,
+    }
+    assert snapshots[1] == {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "output": {"items": [1]},
+        "termination": None,
+    }
+    assert snapshots[-1]["termination"] == {"source": "engine", "reason": "direct"}
+
+
+@pytest.mark.asyncio
+async def test_engine_actions_authoritatively_drive_python_responders() -> None:
+    initial_messages = (
+        {"role": "system", "content": "private"},
+        {"role": "user", "content": "initial"},
+    )
+    first = EngineConversationAction(
+        source="agent",
+        messages=initial_messages,
+        response_index=7,
+        agent_responses=3,
+        accepted_messages=initial_messages,
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    accepted_after_agent = (
+        *initial_messages,
+        {"role": "assistant", "content": "agent answer"},
+    )
+    second = EngineConversationAction(
+        source="simulator",
+        messages=({"role": "assistant", "content": "engine projection"},),
+        response_index=11,
+        agent_responses=4,
+        accepted_messages=accepted_after_agent,
+        accepted_output={"items": [1]},
+        accepted_output_recorded=True,
+    )
+    terminal_messages = (
+        *accepted_after_agent,
+        {"role": "user", "content": "follow-up"},
+    )
+    terminal = EngineConversationResult(
+        messages=terminal_messages,
+        output={"items": [1]},
+        output_recorded=True,
+        termination_source="simulator",
+        termination_reason="finished",
+    )
+    engine = ScriptedConversationEngine(first, second, terminal)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="scripted-actions",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    agent = ScriptedResponder(ConversationResponse(content="agent answer", output=Value(items=[1])))
+    simulator = ScriptedResponder(
+        ConversationResponse(content="follow-up", termination_reason="finished")
+    )
+    token = set_current_runtime(runtime)
+    try:
+        result = await kensa_case(id="scripted", input="x").run(
+            agent,
+            simulator=simulator,
+            max_turns=1,
+            starts_with="simulator",
+        )
+    finally:
+        reset_current_runtime(token)
+
+    assert agent.histories == [initial_messages]
+    assert simulator.histories == [({"role": "assistant", "content": "engine projection"},)]
+    assert engine.starts[0][1]["starts_with"] == "simulator"
+    assert [item[1]["source"] for item in engine.observations] == ["agent", "simulator"]
+    assert isinstance(result.output, Value)
+    assert result.messages == terminal_messages
+    response_spans = [
+        span for span in runtime.trace.spans if span.name == "kensa.conversation.respond"
+    ]
+    assert [span.attributes["kensa.conversation.response_index"] for span in response_spans] == [
+        7,
+        11,
+    ]
+    assert [span.attributes["kensa.conversation.agent_responses"] for span in response_spans] == [
+        3,
+        4,
+    ]
+
+
+def test_engine_contract_failure_preserves_core_accepted_state() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=({"role": "user", "content": "accepted"},),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=({"role": "user", "content": "accepted"},),
+        accepted_output={"kept": True},
+        accepted_output_recorded=True,
+    )
+    engine = ScriptedConversationEngine(
+        first,
+        KensaEngineError("rejected", code="invalid_message"),
+    )
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="contract-failure",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            kensa_case(id="contract", input="x").run(
+                ScriptedResponder(ConversationResponse(content="rejected"))
+            )
+    finally:
+        reset_current_runtime(token)
+
+    assert raised.value.kind == "contract"
+    assert raised.value.messages == ({"role": "user", "content": "accepted"},)
+    assert raised.value.output == {"kept": True}
+    assert runtime.output == {
+        "messages": [{"role": "user", "content": "accepted"}],
+        "output": {"kept": True},
+        "termination": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_turns": 1}, "require a simulator"),
+        (
+            {
+                "simulator": ScriptedResponder(ConversationResponse(content="x")),
+                "max_turns": 0,
+            },
+            "positive",
+        ),
+        (
+            {
+                "simulator": ScriptedResponder(ConversationResponse(content="x")),
+                "starts_with": cast(Any, "other"),
+            },
+            "starts_with",
+        ),
+    ],
+)
+def test_engine_backed_conversation_validates_native_configuration(
+    kwargs: dict[str, Any],
+    message: str,
+) -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    engine = ScriptedConversationEngine(first)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid=f"invalid-config-{message}",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(KensaCaseError, match=message):
+            kensa_case(id="invalid-config", input="x").run(
+                ScriptedResponder(ConversationResponse(content="unused")),
+                **kwargs,
+            )
+    finally:
+        reset_current_runtime(token)
+    assert engine.starts == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        object(),
+        ConversationResponse.model_construct(
+            content=" ", output=None, termination_reason=None, _fields_set={"content"}
+        ),
+        ConversationResponse.model_construct(
+            content=None,
+            output=None,
+            termination_reason=" ",
+            _fields_set={"termination_reason"},
+        ),
+        ConversationResponse(output=object()),
+    ],
+)
+def test_engine_backed_invalid_native_responses_are_contract_failures(
+    response: object,
+) -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    engine = ScriptedConversationEngine(first)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="invalid-native-response",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            kensa_case(id="invalid-native", input="x").run(ScriptedResponder(response))
+    finally:
+        reset_current_runtime(token)
+    assert raised.value.kind == "contract"
+    assert engine.observations == []
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_async_responder_failure_preserves_state() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=({"role": "user", "content": "accepted"},),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=({"role": "user", "content": "accepted"},),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    engine = ScriptedConversationEngine(first)
+
+    class FailedAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            del messages
+            raise RuntimeError("async failure")
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="async-engine-failure",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            await kensa_case(id="async-engine", input="x").run(FailedAgent())
+    finally:
+        reset_current_runtime(token)
+    assert raised.value.kind == "execution"
+    assert raised.value.messages == ({"role": "user", "content": "accepted"},)
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_async_direct_responder_completes() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    terminal = EngineConversationResult(
+        messages=({"role": "assistant", "content": "done"},),
+        output="done",
+        output_recorded=True,
+        termination_source="engine",
+        termination_reason="direct",
+    )
+    engine = ScriptedConversationEngine(first, terminal)
+
+    class AsyncAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            assert messages == ()
+            return ConversationResponse(content="done")
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="async-engine-success",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        result = await kensa_case(id="async-engine-success", input="x").run(AsyncAgent())
+    finally:
+        reset_current_runtime(token)
+    assert result.output == "done"
+
+
+def test_engine_backed_sync_responder_failure_preserves_state() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    engine = ScriptedConversationEngine(first)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="sync-engine-failure",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            kensa_case(id="sync-engine-failure", input="x").run(
+                ScriptedResponder(RuntimeError("sync failure"))
+            )
+    finally:
+        reset_current_runtime(token)
+    assert raised.value.kind == "execution"
+
+
+def test_engine_transport_failure_and_invalid_direct_progression_propagate() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    for step, expected in [
+        (KensaEngineError("offline", code="transport"), "offline"),
+        (first, "kept a direct conversation active"),
+    ]:
+        engine = ScriptedConversationEngine(first, step)
+        runtime = KensaTrialRuntime(
+            trial=KensaTrial(1, 1),
+            nodeid=f"engine-propagation-{expected}",
+            group_id="group",
+            case_id="case",
+            no_judge=False,
+            engine=cast(Any, engine),
+        )
+        token = set_current_runtime(runtime)
+        try:
+            with pytest.raises(KensaEngineError, match=expected):
+                kensa_case(id="engine-propagation", input="x").run(
+                    ScriptedResponder(ConversationResponse(content="done"))
+                )
+        finally:
+            reset_current_runtime(token)
+
+
+def test_engine_cannot_request_an_unavailable_responder() -> None:
+    first = EngineConversationAction(
+        source="simulator",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    engine = ScriptedConversationEngine(first)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="unavailable-responder",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(KensaEngineError, match="unavailable simulator"):
+            kensa_case(id="unavailable-responder", input="x").run(
+                ScriptedResponder(ConversationResponse(content="unused"))
+            )
+    finally:
+        reset_current_runtime(token)
+
+
+def test_engine_result_uses_authoritative_output_when_typed_candidate_differs() -> None:
+    first = EngineConversationAction(
+        source="agent",
+        messages=(),
+        response_index=1,
+        agent_responses=0,
+        accepted_messages=(),
+        accepted_output=None,
+        accepted_output_recorded=False,
+    )
+    terminal = EngineConversationResult(
+        messages=(),
+        output={"authoritative": True},
+        output_recorded=True,
+        termination_source="engine",
+        termination_reason="direct",
+    )
+    engine = ScriptedConversationEngine(first, terminal)
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="authoritative-output",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
+    token = set_current_runtime(runtime)
+    try:
+        result = kensa_case(id="authoritative-output", input="x").run(
+            ScriptedResponder(ConversationResponse(output=[1]))
+        )
+    finally:
+        reset_current_runtime(token)
+    assert result.output == {"authoritative": True}
+
+
+class _EngineProcessInterruption(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    "interruption_type",
+    [KeyboardInterrupt, SystemExit, GeneratorExit, _EngineProcessInterruption],
+)
+def test_engine_backed_process_interruptions_propagate_unchanged(
+    interruption_type: type[BaseException],
+) -> None:
+    interruption = interruption_type()
+    engine = ScriptedConversationEngine(engine_action("agent"))
+    runtime = engine_runtime(engine, f"engine-interruption-{interruption_type.__name__}")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(interruption_type) as propagated:
+            kensa_case(id="engine-interruption", input="x").run(ScriptedResponder(interruption))
+    finally:
+        reset_current_runtime(token)
+
+    assert propagated.value is interruption
+    assert engine.observations == []
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_cancellation_propagates_unchanged() -> None:
+    class CancelledAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            del messages
+            raise asyncio.CancelledError
+
+    engine = ScriptedConversationEngine(engine_action("agent"))
+    runtime = engine_runtime(engine, "engine-cancelled")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await kensa_case(id="engine-cancelled", input="x").run(CancelledAgent())
+    finally:
+        reset_current_runtime(token)
+
+    assert engine.observations == []
+
+
+@pytest.mark.parametrize("failed_source", ["agent", "simulator"])
+@pytest.mark.asyncio
+async def test_engine_backed_later_turn_failures_keep_last_accepted_state(
+    failed_source: Literal["agent", "simulator"],
+) -> None:
+    first_source: Literal["agent", "simulator"] = (
+        "simulator" if failed_source == "agent" else "agent"
+    )
+    accepted_message: dict[str, Any] = {
+        "role": "user" if first_source == "simulator" else "assistant",
+        "content": "accepted",
+    }
+    first = engine_action(first_source)
+    second = engine_action(
+        failed_source,
+        messages=(accepted_message,),
+        accepted_messages=(accepted_message,),
+        accepted_output="accepted" if first_source == "agent" else None,
+        accepted_output_recorded=first_source == "agent",
+        response_index=2,
+        agent_responses=1 if first_source == "agent" else 0,
+    )
+    engine = ScriptedConversationEngine(first, second)
+    failure = RuntimeError(f"{failed_source} failed")
+    agent = ScriptedResponder(
+        failure if failed_source == "agent" else ConversationResponse(content="accepted")
+    )
+    simulator = ScriptedResponder(
+        failure if failed_source == "simulator" else ConversationResponse(content="accepted")
+    )
+    runtime = engine_runtime(engine, f"later-{failed_source}-failure")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            await kensa_case(id="later-failure", input="x").run(
+                agent,
+                simulator=simulator,
+                max_turns=2,
+                starts_with=first_source,
+            )
+    finally:
+        reset_current_runtime(token)
+
+    assert raised.value.source == failed_source
+    assert raised.value.kind == "execution"
+    assert raised.value.__cause__ is failure
+    assert raised.value.messages == (accepted_message,)
+    assert raised.value.output == ("accepted" if first_source == "agent" else None)
+    assert len(engine.observations) == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_dynamic_awaitable_can_move_to_new_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    terminal = EngineConversationResult(
+        messages=({"role": "assistant", "content": "done"},),
+        output="done",
+        output_recorded=True,
+        termination_source="engine",
+        termination_reason="direct",
+    )
+    engine = ScriptedConversationEngine(engine_action("agent"), terminal)
+
+    class DynamicAgent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> Any:
+            assert messages == ()
+
+            async def result() -> ConversationResponse:
+                await asyncio.sleep(0)
+                return ConversationResponse(content="done")
+
+            return result()
+
+    runtime = engine_runtime(engine, "engine-dynamic-new-task")
+    token = set_current_runtime(runtime)
+    try:
+        pending = kensa_case(id="engine-dynamic", input="x").run(DynamicAgent())
+        assert inspect.isawaitable(pending)
+        await asyncio.sleep(0)
+        result = await asyncio.create_task(cast(Any, pending))
+    finally:
+        reset_current_runtime(token)
+
+    assert result.output == "done"
+    assert result.trace is runtime.trace
+    assert not any("Failed to detach context" in record.getMessage() for record in caplog.records)
+    trial_span = next(span for span in runtime.trace.spans if span.name == "kensa.pytest.trial")
+    response_span = next(
+        span for span in runtime.trace.spans if span.name == "kensa.conversation.respond"
+    )
+    assert response_span.parent_span_id == trial_span.span_id
 
 
 @pytest.mark.asyncio

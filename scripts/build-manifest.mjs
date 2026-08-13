@@ -68,6 +68,7 @@ export async function generateBuildManifest(root, args, core) {
       identity(root, "kensa.result.v1", ["packages/core/src/aggregation.ts"]),
     ],
     schemas: [
+      identity(root, "conversation", ["packages/core/src/conversation.ts"]),
       identity(root, "evaluation", ["packages/core/src/evaluation.ts"]),
       identity(root, "evidence", ["packages/core/src/evidence.ts"]),
       identity(root, "mining", ["packages/core/src/mining.ts"]),

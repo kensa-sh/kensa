@@ -10,12 +10,16 @@ import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Timer
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError
+
+from kensa.case import KensaMessage, _validate_messages
+from kensa.errors import KensaCaseError
 
 PROTOCOL_VERSION = "kensa.engine.v1"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
@@ -40,6 +44,29 @@ class EngineCompletion:
     failure: dict[str, Any] | None
     checks: tuple[dict[str, Any], ...] = ()
     judges: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class EngineConversationAction:
+    source: Literal["agent", "simulator"]
+    messages: tuple[dict[str, Any], ...]
+    response_index: int
+    agent_responses: int
+    accepted_messages: tuple[dict[str, Any], ...]
+    accepted_output: Any
+    accepted_output_recorded: bool
+
+
+@dataclass(frozen=True)
+class EngineConversationResult:
+    messages: tuple[dict[str, Any], ...]
+    output: Any
+    output_recorded: bool
+    termination_source: Literal["agent", "simulator", "engine"]
+    termination_reason: str
+
+
+EngineConversationStep = EngineConversationAction | EngineConversationResult
 
 
 class KensaEngineError(RuntimeError):
@@ -178,6 +205,40 @@ class EngineClient:
                 checks=checks,
                 judges=judge_results,
             )
+
+    def start_conversation(
+        self,
+        conversation_id: str,
+        conversation: Mapping[str, Any],
+    ) -> EngineConversationAction:
+        response = self._request(
+            {
+                "type": "start_conversation",
+                "conversation_id": conversation_id,
+                "conversation": dict(conversation),
+            }
+        )
+        step = _conversation_step(response, conversation_id)
+        if not isinstance(step, EngineConversationAction):
+            raise KensaEngineError(
+                "Kensa engine completed a conversation before a response",
+                code="protocol",
+            )
+        return step
+
+    def observe_conversation(
+        self,
+        conversation_id: str,
+        observation: Mapping[str, Any],
+    ) -> EngineConversationStep:
+        response = self._request(
+            {
+                "type": "observe_conversation",
+                "conversation_id": conversation_id,
+                "observation": dict(observation),
+            }
+        )
+        return _conversation_step(response, conversation_id)
 
     def cancel_case(self, evaluation_id: str, reason: str) -> None:
         with self._lock:
@@ -537,6 +598,152 @@ def _record_collection(value: Any, *, boundary: str) -> tuple[dict[str, Any], ..
             code="protocol",
         )
     return tuple(dict(item) for item in value)
+
+
+def _conversation_step(
+    response: Mapping[str, Any],
+    conversation_id: str,
+) -> EngineConversationStep:
+    if response.get("conversation_id") != conversation_id:
+        raise KensaEngineError(
+            "Kensa engine returned a mismatched conversation",
+            code="protocol",
+        )
+    response_type = response.get("type")
+    if response_type == "conversation_action":
+        return _conversation_action(response.get("action"))
+    if response_type == "conversation_result":
+        return _conversation_result(response.get("result"))
+    raise KensaEngineError(
+        "Kensa engine returned an invalid conversation response",
+        code="protocol",
+    )
+
+
+def _conversation_action(value: Any) -> EngineConversationAction:
+    if not isinstance(value, dict):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid conversation action",
+            code="protocol",
+        )
+    source = value.get("source")
+    response_index = value.get("response_index")
+    agent_responses = value.get("agent_responses")
+    accepted = value.get("accepted")
+    if (
+        source not in {"agent", "simulator"}
+        or not _is_integer(response_index, minimum=1)
+        or not _is_integer(agent_responses, minimum=0)
+        or not isinstance(accepted, dict)
+    ):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid conversation action",
+            code="protocol",
+        )
+    output_recorded = accepted.get("output_recorded")
+    if not isinstance(output_recorded, bool):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid accepted conversation state",
+            code="protocol",
+        )
+    output = _conversation_json(
+        accepted.get("output"),
+        boundary="accepted conversation output",
+    )
+    if not output_recorded and output is not None:
+        raise KensaEngineError(
+            "Kensa engine returned contradictory accepted conversation output",
+            code="protocol",
+        )
+    return EngineConversationAction(
+        source=cast(Literal["agent", "simulator"], source),
+        messages=_conversation_messages(value.get("messages"), boundary="action messages"),
+        response_index=cast(int, response_index),
+        agent_responses=cast(int, agent_responses),
+        accepted_messages=_conversation_messages(
+            accepted.get("messages"),
+            boundary="accepted messages",
+        ),
+        accepted_output=output,
+        accepted_output_recorded=output_recorded,
+    )
+
+
+def _conversation_result(value: Any) -> EngineConversationResult:
+    if not isinstance(value, dict) or value.get("phase") != "complete":
+        raise KensaEngineError(
+            "Kensa engine returned an invalid conversation result",
+            code="protocol",
+        )
+    output_recorded = value.get("output_recorded")
+    termination = value.get("termination")
+    if not isinstance(output_recorded, bool) or not isinstance(termination, dict):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid conversation result",
+            code="protocol",
+        )
+    source = termination.get("source")
+    reason = termination.get("reason")
+    if source not in {"agent", "simulator", "engine"} or not _is_nonblank(reason):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid conversation termination",
+            code="protocol",
+        )
+    output = _conversation_json(value.get("output"), boundary="conversation output")
+    if not output_recorded and output is not None:
+        raise KensaEngineError(
+            "Kensa engine returned contradictory conversation output",
+            code="protocol",
+        )
+    return EngineConversationResult(
+        messages=_conversation_messages(value.get("messages"), boundary="result messages"),
+        output=output,
+        output_recorded=output_recorded,
+        termination_source=cast(Literal["agent", "simulator", "engine"], source),
+        termination_reason=cast(str, reason),
+    )
+
+
+def _conversation_messages(value: Any, *, boundary: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise KensaEngineError(
+            f"Kensa engine returned invalid {boundary}",
+            code="protocol",
+        )
+    copied = _conversation_json(value, boundary=boundary)
+    if copied:
+        try:
+            _validate_messages(cast(list[KensaMessage], copied))
+        except KensaCaseError as exc:
+            raise KensaEngineError(
+                f"Kensa engine returned invalid {boundary}: {exc}",
+                code="protocol",
+            ) from exc
+    return tuple(cast(list[dict[str, Any]], copied))
+
+
+def _conversation_json(value: Any, *, boundary: str) -> Any:
+    try:
+        wire = _wire_json_value(value)
+    except (TypeError, ValueError) as exc:
+        raise KensaEngineError(
+            f"Kensa engine returned invalid {boundary}",
+            code="protocol",
+        ) from exc
+    if not _json_values_equal(value, wire):
+        raise KensaEngineError(
+            f"Kensa engine returned contradictory {boundary}",
+            code="protocol",
+        )
+    return deepcopy(wire)
+
+
+def _is_integer(value: Any, *, minimum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def _is_nonblank(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _json_values_equal(left: object, right: object) -> bool:

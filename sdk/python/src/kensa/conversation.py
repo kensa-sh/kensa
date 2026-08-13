@@ -15,6 +15,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from kensa._serialization import json_value
 from kensa.case import KensaCase, KensaMessage
+from kensa.engine import (
+    EngineClient,
+    EngineConversationAction,
+    EngineConversationResult,
+    EngineConversationStep,
+    KensaEngineError,
+)
 from kensa.errors import KensaCaseError
 from kensa.llm import (
     LLMConfigurationError,
@@ -212,6 +219,13 @@ class _PreparedResponse:
     output_json: Any = None
 
 
+@dataclass(frozen=True)
+class _EnginePreparedResponse:
+    observation: dict[str, Any]
+    typed_output: Any = field(default=_MISSING)
+    output_json: Any = None
+
+
 class _ConversationSpan:
     def __init__(self, name: str, attributes: dict[str, Any]) -> None:
         self.name = name
@@ -245,6 +259,19 @@ def _run_conversation(
     starts_with: Literal["simulator", "agent"] | None,
 ) -> CaseResult | Awaitable[CaseResult]:
     """Execute direct or simulated conversation semantics for one case."""
+
+    runtime = current_runtime()
+    session = runtime._conversation_engine_session() if runtime is not None else None
+    if session is not None:
+        return _run_engine_conversation(
+            case,
+            agent,
+            simulator=simulator,
+            max_turns=max_turns,
+            starts_with=starts_with,
+            engine=session[0],
+            conversation_id=session[1],
+        )
 
     state = _State(messages=_initial_messages(case))
     _publish_snapshot(state)
@@ -286,6 +313,344 @@ def _run_conversation(
         max_turns=bound,
         starts_with=first,
     )
+
+
+def _run_engine_conversation(
+    case: KensaCase,
+    agent: ConversationAgent,
+    *,
+    simulator: Simulator | None,
+    max_turns: int | None,
+    starts_with: Literal["simulator", "agent"] | None,
+    engine: EngineClient,
+    conversation_id: str,
+) -> CaseResult | Awaitable[CaseResult]:
+    agent_respond = _responder(agent, "agent")
+    if simulator is None:
+        if max_turns is not None or starts_with is not None:
+            raise KensaCaseError("max_turns and starts_with require a simulator")
+        simulator_respond = None
+        mode = "direct"
+        bound = None
+        first: Literal["simulator", "agent"] = "agent"
+    else:
+        simulator_respond = _responder(simulator, "simulator")
+        configured_bound = 20 if max_turns is None else max_turns
+        if type(configured_bound) is not int or configured_bound <= 0:
+            raise KensaCaseError("max_turns must be a positive integer")
+        configured_first = "simulator" if starts_with is None else starts_with
+        if configured_first not in {"simulator", "agent"}:
+            raise KensaCaseError("starts_with must be 'simulator' or 'agent'")
+        mode = "simulated"
+        bound = configured_bound
+        first = configured_first
+
+    action = engine.start_conversation(
+        conversation_id,
+        {
+            "messages": json_value(_initial_messages(case)),
+            "mode": mode,
+            "max_agent_responses": bound,
+            "starts_with": first,
+        },
+    )
+    typed_outputs: list[tuple[Any, Any]] = []
+    state = _state_from_action(action, typed_outputs)
+    _publish_snapshot(state)
+
+    if simulator_respond is not None:
+        return _run_engine_simulated(
+            case.id,
+            engine,
+            conversation_id,
+            action,
+            agent_respond,
+            simulator_respond,
+            state,
+            typed_outputs,
+        )
+
+    attempt = _attempt_engine(
+        case.id,
+        action,
+        _engine_responder(action.source, agent_respond, simulator_respond),
+        state,
+    )
+    if inspect.isawaitable(attempt):
+
+        async def _finish() -> CaseResult:
+            prepared = cast(_EnginePreparedResponse, await attempt)
+            step, _ = _observe_engine(
+                engine,
+                conversation_id,
+                action.source,
+                prepared,
+                state,
+                typed_outputs,
+            )
+            return _require_engine_result(step, typed_outputs)
+
+        return _finish()
+    step, _ = _observe_engine(
+        engine,
+        conversation_id,
+        action.source,
+        cast(_EnginePreparedResponse, attempt),
+        state,
+        typed_outputs,
+    )
+    return _require_engine_result(step, typed_outputs)
+
+
+async def _run_engine_simulated(
+    case_id: str,
+    engine: EngineClient,
+    conversation_id: str,
+    action: EngineConversationAction,
+    agent_respond: Callable[[tuple[KensaMessage, ...]], Any],
+    simulator_respond: Callable[[tuple[KensaMessage, ...]], Any],
+    state: _State,
+    typed_outputs: list[tuple[Any, Any]],
+) -> CaseResult:
+    current_action = action
+    current_state = state
+    while True:
+        respond = _engine_responder(
+            current_action.source,
+            agent_respond,
+            simulator_respond,
+        )
+        prepared_or_awaitable = _attempt_engine(
+            case_id,
+            current_action,
+            respond,
+            current_state,
+        )
+        prepared = cast(
+            _EnginePreparedResponse,
+            await prepared_or_awaitable
+            if inspect.isawaitable(prepared_or_awaitable)
+            else prepared_or_awaitable,
+        )
+        step, next_state = _observe_engine(
+            engine,
+            conversation_id,
+            current_action.source,
+            prepared,
+            current_state,
+            typed_outputs,
+        )
+        if isinstance(step, EngineConversationResult):
+            return _result_from_engine(step, typed_outputs)
+        current_action = step
+        current_state = next_state
+
+
+def _engine_responder(
+    source: Literal["agent", "simulator"],
+    agent_respond: Callable[[tuple[KensaMessage, ...]], Any],
+    simulator_respond: Callable[[tuple[KensaMessage, ...]], Any] | None,
+) -> Callable[[tuple[KensaMessage, ...]], Any]:
+    if source == "agent":
+        return agent_respond
+    if simulator_respond is None:
+        raise KensaEngineError(
+            "Kensa engine requested an unavailable simulator",
+            code="protocol",
+        )
+    return simulator_respond
+
+
+def _attempt_engine(
+    case_id: str,
+    action: EngineConversationAction,
+    respond: Callable[[tuple[KensaMessage, ...]], Any],
+    state: _State,
+) -> _EnginePreparedResponse | Awaitable[_EnginePreparedResponse]:
+    span = _ConversationSpan(
+        "kensa.conversation.respond",
+        {
+            "kensa.case_id": case_id,
+            "kensa.conversation.source": action.source,
+            "kensa.conversation.response_index": action.response_index,
+            "kensa.conversation.agent_responses": action.agent_responses,
+        },
+    )
+    messages = cast(tuple[KensaMessage, ...], deepcopy(action.messages))
+    try:
+        with span.activate():
+            response = respond(messages)
+    except BaseException as exc:
+        _raise_attempt_error(span, exc, action.source, state)
+
+    if inspect.isawaitable(response):
+
+        async def _await_response() -> _EnginePreparedResponse:
+            try:
+                with span.activate():
+                    value = await response
+                    prepared = _prepare_engine_response(value)
+            except BaseException as exc:
+                _raise_attempt_error(span, exc, action.source, state)
+            span.end()
+            return prepared
+
+        return _await_response()
+
+    try:
+        with span.activate():
+            prepared = _prepare_engine_response(response)
+    except BaseException as exc:
+        _raise_attempt_error(span, exc, action.source, state)
+    span.end()
+    return prepared
+
+
+def _prepare_engine_response(value: Any) -> _EnginePreparedResponse:
+    if not isinstance(value, ConversationResponse):
+        raise _ContractViolation("respond() must return ConversationResponse")
+    if value.content is not None and not value.content.strip():
+        raise _ContractViolation("content must contain non-whitespace text")
+    if value.termination_reason is not None and not value.termination_reason.strip():
+        raise _ContractViolation("termination_reason must contain non-whitespace text")
+    output_recorded = "output" in value.model_fields_set
+    output = None
+    typed_output = _MISSING
+    if output_recorded:
+        try:
+            typed_output = _copy_typed(value.output)
+            output = json_value(typed_output)
+        except Exception as exc:
+            raise _ContractViolation(f"agent output must be JSON-serializable: {exc}") from exc
+    return _EnginePreparedResponse(
+        observation={
+            "content": value.content,
+            "output": deepcopy(output),
+            "output_recorded": output_recorded,
+            "termination_reason": value.termination_reason,
+        },
+        typed_output=typed_output,
+        output_json=deepcopy(output),
+    )
+
+
+def _observe_engine(
+    engine: EngineClient,
+    conversation_id: str,
+    source: Literal["agent", "simulator"],
+    prepared: _EnginePreparedResponse,
+    state: _State,
+    typed_outputs: list[tuple[Any, Any]],
+) -> tuple[EngineConversationStep, _State]:
+    try:
+        step = engine.observe_conversation(
+            conversation_id,
+            {"source": source, **prepared.observation},
+        )
+    except KensaEngineError as exc:
+        if exc.code not in {"invalid_message", "invalid_transition"}:
+            raise
+        raise ConversationError(
+            f"{source} contract failure: {exc}",
+            kind="contract",
+            source=source,
+            messages=tuple(state.messages),
+            output=None if state.output is _MISSING else state.output,
+        ) from None
+    if prepared.typed_output is not _MISSING:
+        typed_outputs.append((deepcopy(prepared.output_json), _copy_typed(prepared.typed_output)))
+    if isinstance(step, EngineConversationAction):
+        next_state = _state_from_action(step, typed_outputs)
+        _publish_snapshot(next_state)
+        return step, next_state
+    terminal_state = _state_from_result(step, typed_outputs)
+    _publish_snapshot(terminal_state)
+    return step, terminal_state
+
+
+def _state_from_action(
+    action: EngineConversationAction,
+    typed_outputs: list[tuple[Any, Any]],
+) -> _State:
+    return _State(
+        messages=cast(list[KensaMessage], deepcopy(list(action.accepted_messages))),
+        output=_typed_engine_output(
+            action.accepted_output,
+            action.accepted_output_recorded,
+            typed_outputs,
+        ),
+        output_json=deepcopy(action.accepted_output),
+    )
+
+
+def _state_from_result(
+    result: EngineConversationResult,
+    typed_outputs: list[tuple[Any, Any]],
+) -> _State:
+    return _State(
+        messages=cast(list[KensaMessage], deepcopy(list(result.messages))),
+        output=_typed_engine_output(result.output, result.output_recorded, typed_outputs),
+        output_json=deepcopy(result.output),
+    )
+
+
+def _typed_engine_output(
+    output: Any,
+    output_recorded: bool,
+    typed_outputs: list[tuple[Any, Any]],
+) -> Any:
+    if not output_recorded:
+        return _MISSING
+    for candidate_json, candidate in reversed(typed_outputs):
+        if _same_json_value(candidate_json, output):
+            return _copy_typed(candidate)
+    return deepcopy(output)
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_value(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
+
+
+def _require_engine_result(
+    step: EngineConversationStep,
+    typed_outputs: list[tuple[Any, Any]],
+) -> CaseResult:
+    if not isinstance(step, EngineConversationResult):
+        raise KensaEngineError(
+            "Kensa engine kept a direct conversation active",
+            code="protocol",
+        )
+    return _result_from_engine(step, typed_outputs)
+
+
+def _result_from_engine(
+    result: EngineConversationResult,
+    typed_outputs: list[tuple[Any, Any]],
+) -> CaseResult:
+    output = _typed_engine_output(result.output, result.output_recorded, typed_outputs)
+    value = CaseResult(
+        messages=cast(tuple[KensaMessage, ...], deepcopy(result.messages)),
+        output=None if output is _MISSING else output,
+        termination=Termination(
+            source=result.termination_source,
+            reason=result.termination_reason,
+        ),
+    )
+    runtime = current_runtime()
+    if runtime is not None:
+        object.__setattr__(value, "_kensa_trace", runtime.trace)
+    return value
 
 
 async def _run_simulated(

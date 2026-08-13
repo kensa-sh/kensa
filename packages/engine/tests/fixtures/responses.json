@@ -14,6 +14,40 @@
     "action": "evaluate_check",
     "case_id": "case-1"
   },
+  "conversation_action": {
+    "type": "conversation_action",
+    "conversation_id": "conversation-1",
+    "action": {
+      "source": "agent",
+      "messages": [],
+      "response_index": 1,
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [],
+        "output": null,
+        "output_recorded": false
+      }
+    }
+  },
+  "conversation_result": {
+    "type": "conversation_result",
+    "conversation_id": "conversation-1",
+    "result": {
+      "phase": "complete",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "hello"
+        }
+      ],
+      "output": "hello",
+      "output_recorded": true,
+      "termination": {
+        "source": "engine",
+        "reason": "direct"
+      }
+    }
+  },
   "reset": {
     "type": "reset",
     "released": 1

@@ -635,6 +635,11 @@ class KensaTrialRuntime:
         span.end()
         return self._record_output_and_trace(result)
 
+    def _conversation_engine_session(self) -> tuple[EngineClient, str] | None:
+        if self._engine is None or self._engine_evaluation_id is None:
+            return None
+        return self._engine, self._engine_evaluation_id
+
     async def _await_result(self, result: Awaitable[Any], span: Any) -> Any:
         self._activate_run()
         try:
