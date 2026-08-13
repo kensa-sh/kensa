@@ -6,7 +6,7 @@ import math
 from collections.abc import Awaitable
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -83,6 +83,38 @@ class ScriptedConversationEngine:
         if isinstance(step, KensaEngineError):
             raise step
         return step
+
+
+def engine_action(
+    source: Literal["agent", "simulator"],
+    *,
+    messages: tuple[dict[str, Any], ...] = (),
+    accepted_messages: tuple[dict[str, Any], ...] = (),
+    accepted_output: Any = None,
+    accepted_output_recorded: bool = False,
+    response_index: int = 1,
+    agent_responses: int = 0,
+) -> EngineConversationAction:
+    return EngineConversationAction(
+        source=source,
+        messages=messages,
+        response_index=response_index,
+        agent_responses=agent_responses,
+        accepted_messages=accepted_messages,
+        accepted_output=accepted_output,
+        accepted_output_recorded=accepted_output_recorded,
+    )
+
+
+def engine_runtime(engine: ScriptedConversationEngine, nodeid: str) -> KensaTrialRuntime:
+    return KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid=nodeid,
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+        engine=cast(Any, engine),
+    )
 
 
 if TYPE_CHECKING:
@@ -1324,6 +1356,144 @@ def test_engine_result_uses_authoritative_output_when_typed_candidate_differs() 
     finally:
         reset_current_runtime(token)
     assert result.output == {"authoritative": True}
+
+
+class _EngineProcessInterruption(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    "interruption_type",
+    [KeyboardInterrupt, SystemExit, GeneratorExit, _EngineProcessInterruption],
+)
+def test_engine_backed_process_interruptions_propagate_unchanged(
+    interruption_type: type[BaseException],
+) -> None:
+    interruption = interruption_type()
+    engine = ScriptedConversationEngine(engine_action("agent"))
+    runtime = engine_runtime(engine, f"engine-interruption-{interruption_type.__name__}")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(interruption_type) as propagated:
+            kensa_case(id="engine-interruption", input="x").run(ScriptedResponder(interruption))
+    finally:
+        reset_current_runtime(token)
+
+    assert propagated.value is interruption
+    assert engine.observations == []
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_cancellation_propagates_unchanged() -> None:
+    class CancelledAgent:
+        async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            del messages
+            raise asyncio.CancelledError
+
+    engine = ScriptedConversationEngine(engine_action("agent"))
+    runtime = engine_runtime(engine, "engine-cancelled")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await kensa_case(id="engine-cancelled", input="x").run(CancelledAgent())
+    finally:
+        reset_current_runtime(token)
+
+    assert engine.observations == []
+
+
+@pytest.mark.parametrize("failed_source", ["agent", "simulator"])
+@pytest.mark.asyncio
+async def test_engine_backed_later_turn_failures_keep_last_accepted_state(
+    failed_source: Literal["agent", "simulator"],
+) -> None:
+    first_source: Literal["agent", "simulator"] = (
+        "simulator" if failed_source == "agent" else "agent"
+    )
+    accepted_message: dict[str, Any] = {
+        "role": "user" if first_source == "simulator" else "assistant",
+        "content": "accepted",
+    }
+    first = engine_action(first_source)
+    second = engine_action(
+        failed_source,
+        messages=(accepted_message,),
+        accepted_messages=(accepted_message,),
+        accepted_output="accepted" if first_source == "agent" else None,
+        accepted_output_recorded=first_source == "agent",
+        response_index=2,
+        agent_responses=1 if first_source == "agent" else 0,
+    )
+    engine = ScriptedConversationEngine(first, second)
+    failure = RuntimeError(f"{failed_source} failed")
+    agent = ScriptedResponder(
+        failure if failed_source == "agent" else ConversationResponse(content="accepted")
+    )
+    simulator = ScriptedResponder(
+        failure if failed_source == "simulator" else ConversationResponse(content="accepted")
+    )
+    runtime = engine_runtime(engine, f"later-{failed_source}-failure")
+    token = set_current_runtime(runtime)
+    try:
+        with pytest.raises(ConversationError) as raised:
+            await kensa_case(id="later-failure", input="x").run(
+                agent,
+                simulator=simulator,
+                max_turns=2,
+                starts_with=first_source,
+            )
+    finally:
+        reset_current_runtime(token)
+
+    assert raised.value.source == failed_source
+    assert raised.value.kind == "execution"
+    assert raised.value.__cause__ is failure
+    assert raised.value.messages == (accepted_message,)
+    assert raised.value.output == ("accepted" if first_source == "agent" else None)
+    assert len(engine.observations) == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_backed_dynamic_awaitable_can_move_to_new_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    terminal = EngineConversationResult(
+        messages=({"role": "assistant", "content": "done"},),
+        output="done",
+        output_recorded=True,
+        termination_source="engine",
+        termination_reason="direct",
+    )
+    engine = ScriptedConversationEngine(engine_action("agent"), terminal)
+
+    class DynamicAgent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> Any:
+            assert messages == ()
+
+            async def result() -> ConversationResponse:
+                await asyncio.sleep(0)
+                return ConversationResponse(content="done")
+
+            return result()
+
+    runtime = engine_runtime(engine, "engine-dynamic-new-task")
+    token = set_current_runtime(runtime)
+    try:
+        pending = kensa_case(id="engine-dynamic", input="x").run(DynamicAgent())
+        assert inspect.isawaitable(pending)
+        await asyncio.sleep(0)
+        result = await asyncio.create_task(cast(Any, pending))
+    finally:
+        reset_current_runtime(token)
+
+    assert result.output == "done"
+    assert result.trace is runtime.trace
+    assert not any("Failed to detach context" in record.getMessage() for record in caplog.records)
+    trial_span = next(span for span in runtime.trace.spans if span.name == "kensa.pytest.trial")
+    response_span = next(
+        span for span in runtime.trace.spans if span.name == "kensa.conversation.respond"
+    )
+    assert response_span.parent_span_id == trial_span.span_id
 
 
 @pytest.mark.asyncio
