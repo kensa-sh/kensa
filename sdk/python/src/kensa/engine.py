@@ -145,8 +145,7 @@ class EngineClient:
         evaluation_id: str,
         *,
         observation: Mapping[str, Any],
-        status: str,
-        failure: Mapping[str, Any] | None,
+        runtime_outcome: Mapping[str, Any],
         judges: Sequence[Mapping[str, Any]] = (),
     ) -> EngineCompletion:
         with self._lock:
@@ -166,13 +165,10 @@ class EngineClient:
                 {
                     "type": "check",
                     "evaluation_id": evaluation_id,
-                    "checks": [
-                        {
-                            "id": "pytest",
-                            "outcome": _check_outcome(status),
-                            "failure": failure,
-                        }
-                    ],
+                    "runtime_outcome": cast(
+                        dict[str, Any],
+                        _wire_json_value(dict(runtime_outcome)),
+                    ),
                     "judges": [dict(judge) for judge in judges],
                 }
             )
@@ -205,6 +201,32 @@ class EngineClient:
                 checks=checks,
                 judges=judge_results,
             )
+
+    def classify_runtime_outcome(
+        self,
+        outcome: Mapping[str, Any],
+    ) -> EngineCompletion:
+        response = self._request(
+            {
+                "type": "classify_runtime_outcome",
+                "outcome": cast(
+                    dict[str, Any],
+                    _wire_json_value(dict(outcome)),
+                ),
+            }
+        )
+        if response.get("type") != "runtime_outcome":
+            raise KensaEngineError(
+                "Kensa engine returned an invalid runtime outcome",
+                code="protocol",
+            )
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise KensaEngineError(
+                "Kensa engine returned an invalid runtime outcome",
+                code="protocol",
+            )
+        return _runtime_completion(result)
 
     def start_conversation(
         self,
@@ -578,19 +600,6 @@ def _engine_executable(platform_name: str) -> str:
     return "kensa-engine.exe" if platform_name == "nt" else "kensa-engine"
 
 
-def _check_outcome(status: str) -> str:
-    outcomes = {
-        "pass": "satisfied",
-        "fail": "unsatisfied",
-        "error": "error",
-        "skipped": "skipped",
-    }
-    try:
-        return outcomes[status]
-    except KeyError as exc:
-        raise KensaEngineError(f"Unknown check status: {status!r}", code="protocol") from exc
-
-
 def _record_collection(value: Any, *, boundary: str) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise KensaEngineError(
@@ -598,6 +607,42 @@ def _record_collection(value: Any, *, boundary: str) -> tuple[dict[str, Any], ..
             code="protocol",
         )
     return tuple(dict(item) for item in value)
+
+
+def _runtime_completion(result: Mapping[str, Any]) -> EngineCompletion:
+    verdict = result.get("verdict")
+    failure = result.get("failure")
+    check = result.get("check")
+    if verdict not in {"pass", "fail", "error", "skipped"} or not isinstance(check, dict):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid runtime outcome",
+            code="protocol",
+        )
+    if failure is not None and not isinstance(failure, dict):
+        raise KensaEngineError(
+            "Kensa engine returned an invalid runtime outcome",
+            code="protocol",
+        )
+    expected_outcome = {
+        "pass": "satisfied",
+        "fail": "unsatisfied",
+        "error": "error",
+        "skipped": "skipped",
+    }[verdict]
+    if (
+        check.get("id") != "pytest"
+        or check.get("outcome") != expected_outcome
+        or not _json_values_equal(check.get("failure"), failure)
+    ):
+        raise KensaEngineError(
+            "Kensa engine returned a contradictory runtime outcome",
+            code="protocol",
+        )
+    return EngineCompletion(
+        verdict=cast(Literal["pass", "fail", "error", "skipped"], verdict),
+        failure=failure,
+        checks=(dict(check),),
+    )
 
 
 def _conversation_step(

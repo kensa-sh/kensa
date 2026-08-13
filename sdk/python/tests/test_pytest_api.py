@@ -10,9 +10,9 @@ import pytest
 from kensa import pytest_plugin
 from kensa.case import KensaCaseError, KensaMessage, kensa_case
 from kensa.conversation import ConversationError
-from kensa.errors import KensaEvalError, TrialFailure
+from kensa.errors import KensaEvalError
 from kensa.llm import LLMConfigurationError
-from kensa.pytest_plugin import _classify_exception
+from kensa.pytest_plugin import _runtime_outcome
 from kensa.runtime import KensaTrial
 from kensa.watchdog import (
     WatchdogControl,
@@ -31,7 +31,7 @@ def _raise_from(wrapper: BaseException, cause: BaseException) -> BaseException:
             return raised
 
 
-def test_trial_failure_classification_preserves_typed_precedence() -> None:
+def test_runtime_outcomes_preserve_typed_precedence() -> None:
     explicit = KensaEvalError(
         "simulator unavailable",
         category="infrastructure",
@@ -39,23 +39,20 @@ def test_trial_failure_classification_preserves_typed_precedence() -> None:
         evidence={"provider": "test"},
     )
     wrapped_explicit = _raise_from(RuntimeError("outer"), explicit)
-    status, failure = _classify_exception(wrapped_explicit, phase="call")
-    assert status == "error"
-    assert failure is explicit.failure
+    assert _runtime_outcome(wrapped_explicit, phase="call") == {
+        "kind": "attributed_failure",
+        "failure": explicit.failure.model_dump(mode="json"),
+    }
 
     wrapped_configuration = _raise_from(
         RuntimeError("outer"),
         LLMConfigurationError("missing model"),
     )
-    assert _classify_exception(wrapped_configuration, phase="call") == (
-        "error",
-        TrialFailure(
-            category="configuration",
-            kind="llm",
-            message="missing model",
-            evidence={"exception_type": "LLMConfigurationError"},
-        ),
-    )
+    assert _runtime_outcome(wrapped_configuration, phase="call") == {
+        "kind": "configuration_error",
+        "message": "missing model",
+        "exception_type": "LLMConfigurationError",
+    }
 
     case_error = KensaCaseError("conflicting attached run")
     conversation = ConversationError(
@@ -66,21 +63,17 @@ def test_trial_failure_classification_preserves_typed_precedence() -> None:
         output=None,
     )
     wrapped_case = _raise_from(conversation, case_error)
-    assert _classify_exception(wrapped_case, phase="call") == (
-        "error",
-        TrialFailure(
-            category="harness",
-            kind="case_contract",
-            message="conflicting attached run",
-            evidence={"exception_type": "KensaCaseError"},
-        ),
-    )
+    assert _runtime_outcome(wrapped_case, phase="call") == {
+        "kind": "case_contract_error",
+        "message": "conflicting attached run",
+        "exception_type": "KensaCaseError",
+    }
 
     grouped = ExceptionGroup(
         "group",
         [RuntimeError("first"), KensaEvalError("explicit", category="judge", kind="execution")],
     )
-    assert _classify_exception(grouped, phase="call")[1].category == "judge"
+    assert _runtime_outcome(grouped, phase="call")["kind"] == "attributed_failure"
 
     try:
         raise LLMConfigurationError("suppressed")
@@ -88,39 +81,37 @@ def test_trial_failure_classification_preserves_typed_precedence() -> None:
         try:
             raise RuntimeError("visible") from None
         except RuntimeError as suppressed:
-            status, failure = _classify_exception(suppressed, phase="call")
-    assert status == "error"
-    assert failure == TrialFailure(
-        category="unknown",
-        kind="RuntimeError",
-        message="visible",
-        evidence={"exception_type": "RuntimeError"},
-    )
+            outcome = _runtime_outcome(suppressed, phase="call")
+    assert outcome == {
+        "kind": "exception",
+        "message": "visible",
+        "exception_type": "RuntimeError",
+        "timed_out": False,
+    }
 
     first = RuntimeError("cycle")
     second = RuntimeError("nested")
     first.__cause__ = second
     second.__cause__ = first
-    assert _classify_exception(first, phase="call")[1].kind == "RuntimeError"
+    assert _runtime_outcome(first, phase="call")["exception_type"] == "RuntimeError"
 
 
 @pytest.mark.parametrize(
-    ("source", "kind", "cause", "expected_category", "expected_kind"),
+    ("source", "kind", "cause", "timed_out"),
     [
-        ("simulator", "contract", None, "simulator", "contract"),
-        ("simulator", "execution", RuntimeError("failed"), "simulator", "execution"),
-        ("simulator", "execution", TimeoutError("late"), "simulator", "timeout"),
-        ("agent", "contract", None, "harness", "agent_contract"),
-        ("agent", "execution", RuntimeError("failed"), "agent", "execution"),
-        ("agent", "execution", TimeoutError("late"), "agent", "timeout"),
+        ("simulator", "contract", None, False),
+        ("simulator", "execution", RuntimeError("failed"), False),
+        ("simulator", "execution", TimeoutError("late"), True),
+        ("agent", "contract", None, False),
+        ("agent", "execution", RuntimeError("failed"), False),
+        ("agent", "execution", TimeoutError("late"), True),
     ],
 )
 def test_trial_failure_classification_maps_conversation_ownership(
     source: str,
     kind: str,
     cause: BaseException | None,
-    expected_category: str,
-    expected_kind: str,
+    timed_out: bool,
 ) -> None:
     conversation = ConversationError(
         f"{source} {kind}",
@@ -131,42 +122,38 @@ def test_trial_failure_classification_maps_conversation_ownership(
     )
     error = _raise_from(conversation, cause) if cause is not None else conversation
 
-    status, failure = _classify_exception(error, phase="call")
+    outcome = _runtime_outcome(error, phase="call")
 
-    assert status == "error"
-    assert failure.category == expected_category
-    assert failure.kind == expected_kind
-    assert failure.evidence["source"] == source
-    assert failure.evidence["accepted_messages"] == 1
-    assert "output" not in failure.evidence
-    assert failure.evidence.get("cause_type") == (
-        type(cause).__name__ if cause is not None else None
-    )
+    assert outcome == {
+        "kind": "conversation_error",
+        "message": f"{source} {kind}",
+        "source": source,
+        "error_kind": kind,
+        "timed_out": timed_out,
+        "accepted_messages": 1,
+        "cause_type": type(cause).__name__ if cause is not None else None,
+    }
 
 
 @pytest.mark.parametrize(
-    ("exc", "phase", "expected_status", "expected_category", "expected_kind"),
+    ("exc", "phase", "expected_kind"),
     [
-        (AssertionError("failed"), "call", "fail", "agent", "assertion"),
-        (TimeoutError("late"), "call", "error", "unknown", "timeout"),
-        (RuntimeError("failed"), "call", "error", "unknown", "RuntimeError"),
-        (RuntimeError("failed"), "setup", "error", "harness", "setup"),
-        (RuntimeError("failed"), "teardown", "error", "harness", "teardown"),
-        (pytest.skip.Exception("skip"), "call", "skipped", "harness", "skip"),
+        (AssertionError("failed"), "call", "assertion_failed"),
+        (TimeoutError("late"), "call", "exception"),
+        (RuntimeError("failed"), "call", "exception"),
+        (RuntimeError("failed"), "setup", "lifecycle_error"),
+        (RuntimeError("failed"), "teardown", "lifecycle_error"),
+        (pytest.skip.Exception("skip"), "call", "skipped"),
     ],
 )
 def test_trial_failure_classification_maps_pytest_lifecycle(
     exc: BaseException,
     phase: str,
-    expected_status: str,
-    expected_category: str,
     expected_kind: str,
 ) -> None:
-    status, failure = _classify_exception(exc, phase=cast(Any, phase))
+    outcome = _runtime_outcome(exc, phase=cast(Any, phase))
 
-    assert status == expected_status
-    assert failure.category == expected_category
-    assert failure.kind == expected_kind
+    assert outcome["kind"] == expected_kind
 
 
 def _run_kensa_xdist(

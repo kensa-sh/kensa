@@ -899,7 +899,7 @@ def test_engine_backed_direct_conversation_preserves_public_result_and_snapshots
                 id="engine-direct",
                 messages=[{"role": "user", "content": "hello"}],
             ).run(ScriptedResponder(ConversationResponse(content="done", output=output)))
-            assert runtime.finalize_engine("pass", None) == ("pass", None)
+            assert runtime.finalize_engine({"kind": "passed"}) == ("pass", None)
         finally:
             reset_current_runtime(token)
 

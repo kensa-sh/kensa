@@ -25,7 +25,7 @@ from kensa.artifacts import (
     write_run_artifacts,
 )
 from kensa.engine import EngineClient
-from kensa.errors import FailureCategory, TrialFailure
+from kensa.errors import TrialFailure
 from kensa.results import load_run_result
 from kensa.runtime import ActiveOperation, OperationKind, TrialMetadata
 
@@ -508,7 +508,11 @@ def _record_timeout(
     )
     result = load_run_result(control.result_path)
     trials = [trial_result_to_metadata(trial) for trial in result.trials]
-    failure = _timeout_failure(active, message)
+    with EngineClient() as engine:
+        classification = engine.classify_runtime_outcome(_timeout_outcome(active, message))
+    if classification.failure is None:
+        raise RuntimeError("Kensa engine classified a timeout without failure provenance")
+    failure = TrialFailure.model_validate(classification.failure)
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
     if control.trial_snapshot is not None and control.trial_snapshot.nodeid == active.nodeid:
         existing = control.trial_snapshot
@@ -588,38 +592,16 @@ def _record_timeout(
     )
 
 
-def _timeout_failure(active: ActiveTrial, message: str) -> TrialFailure:
-    category: FailureCategory
-    kind: str
-    if active.phase in {"setup", "teardown"}:
-        category = "harness"
-        kind = active.phase
-    else:
-        operation = active.active_operation
-        source = (
-            operation.attributes.get("kensa.conversation.source")
-            if operation is not None and operation.name == "kensa.conversation.respond"
-            else None
-        )
-        if source == "simulator":
-            category = "simulator"
-        elif operation is not None and operation.name == "judge":
-            category = "judge"
-        else:
-            category = "agent"
-        kind = "timeout"
-    evidence: dict[str, Any] = {
+def _timeout_outcome(active: ActiveTrial, message: str) -> dict[str, Any]:
+    return {
+        "kind": "timeout",
+        "message": message,
         "timeout_s": timeout_value(active.timeout_s),
         "phase": active.phase,
+        "active_operation": (
+            active.active_operation.to_dict() if active.active_operation is not None else None
+        ),
     }
-    if active.active_operation is not None:
-        evidence["active_operation"] = active.active_operation.to_dict()
-    return TrialFailure(
-        category=category,
-        kind=kind,
-        message=message,
-        evidence=evidence,
-    )
 
 
 __all__ = [

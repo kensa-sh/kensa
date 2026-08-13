@@ -98,101 +98,93 @@ def _exception_message(error: BaseException, fallback: str) -> str:
     return str(error).strip() or fallback
 
 
-def _classify_exception(
+def _runtime_outcome(
     error: BaseException,
     *,
     phase: TrialPhase,
-) -> tuple[str, TrialFailure]:
+) -> dict[str, Any]:
     path = _exception_path(error)
     explicit = _first_exception(path, KensaEvalError)
     if isinstance(explicit, KensaEvalError):
-        return "error", explicit.failure
+        return {
+            "kind": "attributed_failure",
+            "failure": explicit.failure.model_dump(mode="json"),
+        }
 
     configuration = _first_exception(path, LLMConfigurationError)
     if isinstance(configuration, LLMConfigurationError):
-        return "error", TrialFailure(
-            category="configuration",
-            kind="llm",
-            message=_exception_message(configuration, "Invalid LLM configuration"),
-            evidence={"exception_type": type(configuration).__name__},
-        )
+        return {
+            "kind": "configuration_error",
+            "message": _exception_message(configuration, "Invalid LLM configuration"),
+            "exception_type": type(configuration).__name__,
+        }
 
     engine = _first_exception(path, KensaEngineError)
     if isinstance(engine, KensaEngineError):
-        return "error", TrialFailure(
-            category="infrastructure",
-            kind=engine.code,
-            message=_exception_message(engine, "Kensa engine failure"),
-            evidence={"exception_type": "KensaEngineError"},
-        )
+        return {
+            "kind": "engine_error",
+            "message": _exception_message(engine, "Kensa engine failure"),
+            "code": engine.code,
+        }
 
     case_error = _first_exception(path, KensaCaseError)
     if isinstance(case_error, KensaCaseError):
-        return "error", TrialFailure(
-            category="harness",
-            kind="case_contract",
-            message=_exception_message(case_error, "Kensa case contract failed"),
-            evidence={"exception_type": type(case_error).__name__},
-        )
+        return {
+            "kind": "case_contract_error",
+            "message": _exception_message(case_error, "Kensa case contract failed"),
+            "exception_type": type(case_error).__name__,
+        }
 
     if isinstance(error, ConversationError):
         cause = _active_chained_exception(error)
-        evidence: dict[str, Any] = {
+        return {
+            "kind": "conversation_error",
+            "message": _exception_message(error, f"{error.source} {error.kind} failure"),
             "source": error.source,
+            "error_kind": error.kind,
+            "timed_out": any(isinstance(item, TimeoutError) for item in path[1:]),
             "accepted_messages": len(error.messages),
+            "cause_type": type(cause).__name__ if cause is not None else None,
         }
-        if cause is not None:
-            evidence["cause_type"] = type(cause).__name__
-        timed_out = any(isinstance(item, TimeoutError) for item in path[1:])
-        if error.source == "simulator":
-            category = "simulator"
-            kind = (
-                "contract" if error.kind == "contract" else "timeout" if timed_out else "execution"
-            )
-        elif error.kind == "contract":
-            category = "harness"
-            kind = "agent_contract"
-        else:
-            category = "agent"
-            kind = "timeout" if timed_out else "execution"
-        return "error", TrialFailure(
-            category=category,
-            kind=kind,
-            message=_exception_message(error, f"{error.source} {error.kind} failure"),
-            evidence=evidence,
-        )
 
     if isinstance(error, pytest.skip.Exception):
-        return "skipped", TrialFailure(
-            category="harness",
-            kind="skip",
-            message=_exception_message(error, f"pytest {phase} skipped"),
-            evidence={"phase": phase},
-        )
+        return {
+            "kind": "skipped",
+            "message": _exception_message(error, f"pytest {phase} skipped"),
+            "phase": phase,
+        }
 
     if phase in {"setup", "teardown"}:
-        return "error", TrialFailure(
-            category="harness",
-            kind=phase,
-            message=_exception_message(error, f"pytest {phase} failed"),
-            evidence={"phase": phase},
-        )
+        return {
+            "kind": "lifecycle_error",
+            "message": _exception_message(error, f"pytest {phase} failed"),
+            "phase": phase,
+        }
 
     if isinstance(error, AssertionError):
-        return "fail", TrialFailure(
-            category="agent",
-            kind="assertion",
-            message=_exception_message(error, "Assertion failed"),
-            evidence={"exception_type": type(error).__name__},
-        )
+        return {
+            "kind": "assertion_failed",
+            "message": _exception_message(error, "Assertion failed"),
+            "exception_type": type(error).__name__,
+        }
 
-    kind = "timeout" if isinstance(error, TimeoutError) else type(error).__name__
-    return "error", TrialFailure(
-        category="unknown",
-        kind=kind,
-        message=_exception_message(error, f"{kind} raised"),
-        evidence={"exception_type": type(error).__name__},
+    exception_type = type(error).__name__
+    return {
+        "kind": "exception",
+        "message": _exception_message(error, f"{exception_type} raised"),
+        "exception_type": exception_type,
+        "timed_out": isinstance(error, TimeoutError),
+    }
+
+
+def _classified_failure(
+    engine: EngineClient, outcome: dict[str, Any]
+) -> tuple[str, TrialFailure | None]:
+    completion = engine.classify_runtime_outcome(outcome)
+    failure = (
+        TrialFailure.model_validate(completion.failure) if completion.failure is not None else None
     )
+    return completion.verdict, failure
 
 
 class KensaSessionState:
@@ -680,7 +672,7 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
     excinfo = outcome.excinfo
     if excinfo is None:
         try:
-            status, failure = runtime.finalize_engine("pass", None)
+            status, failure = runtime.finalize_engine({"kind": "passed"})
         except Exception as exc:
             _record_engine_failure(item, runtime, duration_ms, exc)
             outcome.force_exception(
@@ -697,9 +689,8 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
         return
 
     exc = excinfo[1]
-    local_status, local_failure = _classify_exception(exc, phase="call")
     try:
-        status, failure = runtime.finalize_engine(local_status, local_failure)
+        status, failure = runtime.finalize_engine(_runtime_outcome(exc, phase="call"))
     except Exception as engine_error:
         _record_engine_failure(item, runtime, duration_ms, engine_error)
         outcome.force_exception(
@@ -731,7 +722,19 @@ def _record_engine_failure(
     duration_ms: float,
     error: Exception,
 ) -> None:
-    _, failure = _classify_exception(error, phase="call")
+    state = _state(item.config)
+    try:
+        _, failure = _classified_failure(
+            state.recovery_engine,
+            _runtime_outcome(error, phase="call"),
+        )
+    except Exception as recovery_error:
+        state.mark_incomplete(
+            "engine_failure",
+            f"could not classify engine failure: {recovery_error}",
+            nodeid=runtime.nodeid,
+        )
+        return
     _record_trial(
         item.config,
         runtime.metadata(status="error", duration_ms=duration_ms, failure=failure),
@@ -764,11 +767,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
         if not preserve_call_failure and (existing is None or existing.status != "skipped"):
             wasxfail = getattr(report, "wasxfail", None)
             if wasxfail is not None:
-                failure = TrialFailure(
-                    category="harness",
-                    kind="xfail",
-                    message=str(wasxfail).strip() or "pytest expected failure",
-                    evidence={"phase": report.when, "outcome": report.outcome},
+                _, failure = _classified_failure(
+                    _state(item.config).engine,
+                    {
+                        "kind": "xfailed",
+                        "message": str(wasxfail).strip() or "pytest expected failure",
+                        "phase": report.when,
+                        "outcome": report.outcome,
+                    },
                 )
             else:
                 error = (
@@ -776,7 +782,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                     if call.excinfo is not None
                     else pytest.skip.Exception(f"pytest {report.when} skipped")
                 )
-                _, failure = _classify_exception(error, phase=report.when)
+                _, failure = _classified_failure(
+                    _state(item.config).engine,
+                    _runtime_outcome(error, phase=report.when),
+                )
             _record_trial(
                 item.config,
                 runtime.metadata(
@@ -797,7 +806,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                 if call.excinfo is not None
                 else RuntimeError(f"pytest {report.when} failed")
             )
-            _, failure = _classify_exception(error, phase=report.when)
+            _, failure = _classified_failure(
+                _state(item.config).engine,
+                _runtime_outcome(error, phase=report.when),
+            )
             _record_trial(
                 item.config,
                 runtime.metadata(
