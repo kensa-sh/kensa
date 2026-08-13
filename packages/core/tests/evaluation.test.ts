@@ -4,6 +4,7 @@ import type { ZodError } from "zod";
 import {
   cancelCase,
   checkCase,
+  classifyRuntimeOutcome,
   completeCase,
   CoreValidationError,
   EvaluationTransitionError,
@@ -13,6 +14,7 @@ import {
   parseCheck,
   parseChecks,
   parseObservation,
+  parseRuntimeClassification,
   startCase,
   type AwaitingCheck,
   type AwaitingObservation,
@@ -585,6 +587,253 @@ describe("evaluation transitions", () => {
         code: "invalid_input",
         message: "validation produced an unsupported issue code",
       }),
+    );
+  });
+});
+
+describe("runtime outcome classification", () => {
+  it.each([
+    [{ kind: "passed" }, "pass", null, null],
+    [
+      {
+        kind: "attributed_failure",
+        failure: {
+          category: "judge",
+          kind: "execution",
+          message: "judge failed",
+          evidence: { provider: "test" },
+        },
+      },
+      "error",
+      "judge",
+      "execution",
+    ],
+    [
+      {
+        kind: "configuration_error",
+        message: "missing model",
+        exception_type: "LLMConfigurationError",
+      },
+      "error",
+      "configuration",
+      "llm",
+    ],
+    [
+      {
+        kind: "engine_error",
+        message: "engine stopped",
+        code: "closed",
+      },
+      "error",
+      "infrastructure",
+      "closed",
+    ],
+    [
+      {
+        kind: "case_contract_error",
+        message: "invalid case",
+        exception_type: "KensaCaseError",
+      },
+      "error",
+      "harness",
+      "case_contract",
+    ],
+    [
+      {
+        kind: "skipped",
+        message: "not supported",
+        phase: "call",
+      },
+      "skipped",
+      "harness",
+      "skip",
+    ],
+    [
+      {
+        kind: "xfailed",
+        message: "known failure",
+        phase: "call",
+        outcome: "skipped",
+      },
+      "skipped",
+      "harness",
+      "xfail",
+    ],
+    [
+      {
+        kind: "lifecycle_error",
+        message: "setup failed",
+        phase: "setup",
+      },
+      "error",
+      "harness",
+      "setup",
+    ],
+    [
+      {
+        kind: "assertion_failed",
+        message: "expected true",
+        exception_type: "AssertionError",
+      },
+      "fail",
+      "agent",
+      "assertion",
+    ],
+    [
+      {
+        kind: "exception",
+        message: "late",
+        exception_type: "TimeoutError",
+        timed_out: true,
+      },
+      "error",
+      "unknown",
+      "timeout",
+    ],
+    [
+      {
+        kind: "exception",
+        message: "broken",
+        exception_type: "RuntimeError",
+        timed_out: false,
+      },
+      "error",
+      "unknown",
+      "RuntimeError",
+    ],
+  ] as const)(
+    "classifies $kind as a core-owned $verdict outcome",
+    (input, verdict, category, failureKind) => {
+      const result = classifyRuntimeOutcome(input);
+
+      expect(result.verdict).toBe(verdict);
+      expect(result.failure?.category ?? null).toBe(category);
+      expect(result.failure?.kind ?? null).toBe(failureKind);
+      expect(result.check.failure).toEqual(result.failure);
+    },
+  );
+
+  it.each([
+    ["simulator", "contract", false, "simulator", "contract"],
+    ["simulator", "execution", false, "simulator", "execution"],
+    ["simulator", "execution", true, "simulator", "timeout"],
+    ["agent", "contract", false, "harness", "agent_contract"],
+    ["agent", "execution", false, "agent", "execution"],
+    ["agent", "execution", true, "agent", "timeout"],
+  ] as const)(
+    "classifies %s %s conversation failures",
+    (source, errorKind, timedOut, category, failureKind) => {
+      const result = classifyRuntimeOutcome({
+        kind: "conversation_error",
+        message: `${source} failed`,
+        source,
+        error_kind: errorKind,
+        timed_out: timedOut,
+        accepted_messages: 2,
+        cause_type: timedOut ? "TimeoutError" : null,
+      });
+
+      expect(result).toMatchObject({
+        verdict: "error",
+        failure: {
+          category,
+          kind: failureKind,
+          evidence: {
+            source,
+            accepted_messages: 2,
+            ...(timedOut ? { cause_type: "TimeoutError" } : {}),
+          },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ["setup", null, "harness", "setup"],
+    ["teardown", null, "harness", "teardown"],
+    ["call", null, "agent", "timeout"],
+    [
+      "call",
+      {
+        name: "kensa.conversation.respond",
+        kind: "span",
+        attributes: { "kensa.conversation.source": "simulator" },
+      },
+      "simulator",
+      "timeout",
+    ],
+    [
+      "call",
+      { name: "judge", kind: "span", attributes: {} },
+      "judge",
+      "timeout",
+    ],
+  ] as const)(
+    "classifies %s timeout provenance",
+    (phase, activeOperation, category, failureKind) => {
+      const result = classifyRuntimeOutcome({
+        kind: "timeout",
+        message: "trial timed out",
+        phase,
+        timeout_s: 1.5,
+        active_operation: activeOperation,
+      });
+
+      expect(result).toMatchObject({
+        verdict: "error",
+        failure: {
+          category,
+          kind: failureKind,
+          evidence: {
+            timeout_s: 1.5,
+            phase,
+            ...(activeOperation === null
+              ? {}
+              : { active_operation: activeOperation }),
+          },
+        },
+      });
+    },
+  );
+
+  it.each([
+    {},
+    { kind: "passed", extra: true },
+    { kind: "skipped", message: " ", phase: "call" },
+    {
+      kind: "timeout",
+      message: "late",
+      phase: "call",
+      timeout_s: 0,
+      active_operation: null,
+    },
+  ])("rejects invalid runtime outcomes", (input) => {
+    expect(() => classifyRuntimeOutcome(input)).toThrow(CoreValidationError);
+  });
+
+  it.each([
+    {
+      verdict: "pass",
+      failure: null,
+      check: { id: "other", outcome: "satisfied", failure: null },
+    },
+    {
+      verdict: "pass",
+      failure: null,
+      check: {
+        id: "pytest",
+        outcome: "unsatisfied",
+        failure: failure("agent"),
+      },
+    },
+    {
+      verdict: "error",
+      failure: failure("infrastructure"),
+      check: { id: "pytest", outcome: "error", failure: failure("unknown") },
+    },
+  ])("rejects contradictory runtime classifications", (input) => {
+    expect(() => parseRuntimeClassification(input)).toThrow(
+      CoreValidationError,
     );
   });
 });

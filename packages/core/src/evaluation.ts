@@ -143,6 +143,114 @@ const checksSchema = z
   });
 
 const cancellationReasonSchema = z.string().trim().min(1);
+const runtimePhaseSchema = z.enum(["setup", "call", "teardown"]);
+const runtimeMessageSchema = z.string().trim().min(1);
+const activeOperationSchema = z.strictObject({
+  name: z.string().trim().min(1),
+  kind: z.enum(["span", "tool", "llm"]),
+  attributes: jsonObjectSchema,
+});
+const runtimeOutcomeSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("passed") }),
+  z.strictObject({
+    kind: z.literal("attributed_failure"),
+    failure: failureSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("configuration_error"),
+    message: runtimeMessageSchema,
+    exception_type: z.string().trim().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("engine_error"),
+    message: runtimeMessageSchema,
+    code: z.string().trim().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("case_contract_error"),
+    message: runtimeMessageSchema,
+    exception_type: z.string().trim().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("conversation_error"),
+    message: runtimeMessageSchema,
+    source: z.enum(["agent", "simulator"]),
+    error_kind: z.enum(["contract", "execution"]),
+    timed_out: z.boolean(),
+    accepted_messages: z.number().int().nonnegative(),
+    cause_type: z.string().trim().min(1).nullable(),
+  }),
+  z.strictObject({
+    kind: z.literal("skipped"),
+    message: runtimeMessageSchema,
+    phase: runtimePhaseSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("xfailed"),
+    message: runtimeMessageSchema,
+    phase: runtimePhaseSchema,
+    outcome: z.string().trim().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("lifecycle_error"),
+    message: runtimeMessageSchema,
+    phase: z.enum(["setup", "teardown"]),
+  }),
+  z.strictObject({
+    kind: z.literal("assertion_failed"),
+    message: runtimeMessageSchema,
+    exception_type: z.string().trim().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("exception"),
+    message: runtimeMessageSchema,
+    exception_type: z.string().trim().min(1),
+    timed_out: z.boolean(),
+  }),
+  z.strictObject({
+    kind: z.literal("timeout"),
+    message: runtimeMessageSchema,
+    phase: runtimePhaseSchema,
+    timeout_s: z.number().finite().positive(),
+    active_operation: activeOperationSchema.nullable(),
+  }),
+]);
+const runtimeClassificationSchema = z
+  .strictObject({
+    verdict: z.enum(["pass", "fail", "error", "skipped"]),
+    failure: failureSchema.nullable(),
+    check: checkSchema,
+  })
+  .superRefine((classification, context) => {
+    const expectedOutcome = {
+      pass: "satisfied",
+      fail: "unsatisfied",
+      error: "error",
+      skipped: "skipped",
+    } as const;
+    if (classification.check.id !== "pytest") {
+      addIssue(context, "check.id", "runtime check must use the pytest ID");
+    }
+    if (
+      classification.check.outcome !== expectedOutcome[classification.verdict]
+    ) {
+      addIssue(
+        context,
+        "check.outcome",
+        "runtime check contradicts its verdict",
+      );
+    }
+    if (
+      canonicalJson(classification.check.failure) !==
+      canonicalJson(classification.failure)
+    ) {
+      addIssue(
+        context,
+        "check.failure",
+        "runtime check contradicts its failure",
+      );
+    }
+  });
 
 export type EvaluationCase = z.infer<typeof caseSchema>;
 export type EvaluationFailure = z.infer<typeof failureSchema>;
@@ -150,6 +258,13 @@ export type EvaluationObservation = z.infer<typeof observationSchema>;
 export type EvaluationCheck = z.infer<typeof checkSchema>;
 export type EvaluationVerdict = "pass" | "fail" | "error" | "skipped";
 export type EvaluationAction = "invoke_agent" | "evaluate_check";
+export type RuntimeOutcome = z.infer<typeof runtimeOutcomeSchema>;
+
+export interface RuntimeClassification {
+  verdict: EvaluationVerdict;
+  failure: EvaluationFailure | null;
+  check: EvaluationCheck;
+}
 
 export interface AwaitingObservation {
   phase: "awaiting_observation";
@@ -229,6 +344,90 @@ export function parseChecks(input: unknown): EvaluationCheck[] {
     input,
     "checks violate the core contract",
   ).sort(compareChecks);
+}
+
+export function classifyRuntimeOutcome(input: unknown): RuntimeClassification {
+  const outcome = parseInput(
+    runtimeOutcomeSchema,
+    input,
+    "runtime outcome violates the core contract",
+  );
+  switch (outcome.kind) {
+    case "passed":
+      return runtimeClassification("pass", null);
+    case "attributed_failure":
+      return runtimeClassification("error", outcome.failure);
+    case "configuration_error":
+      return runtimeClassification("error", {
+        category: "configuration",
+        kind: "llm",
+        message: outcome.message,
+        evidence: { exception_type: outcome.exception_type },
+      });
+    case "engine_error":
+      return runtimeClassification("error", {
+        category: "infrastructure",
+        kind: outcome.code,
+        message: outcome.message,
+        evidence: { exception_type: "KensaEngineError" },
+      });
+    case "case_contract_error":
+      return runtimeClassification("error", {
+        category: "harness",
+        kind: "case_contract",
+        message: outcome.message,
+        evidence: { exception_type: outcome.exception_type },
+      });
+    case "conversation_error":
+      return runtimeClassification("error", conversationFailure(outcome));
+    case "skipped":
+      return runtimeClassification("skipped", {
+        category: "harness",
+        kind: "skip",
+        message: outcome.message,
+        evidence: { phase: outcome.phase },
+      });
+    case "xfailed":
+      return runtimeClassification("skipped", {
+        category: "harness",
+        kind: "xfail",
+        message: outcome.message,
+        evidence: { phase: outcome.phase, outcome: outcome.outcome },
+      });
+    case "lifecycle_error":
+      return runtimeClassification("error", {
+        category: "harness",
+        kind: outcome.phase,
+        message: outcome.message,
+        evidence: { phase: outcome.phase },
+      });
+    case "assertion_failed":
+      return runtimeClassification("fail", {
+        category: "agent",
+        kind: "assertion",
+        message: outcome.message,
+        evidence: { exception_type: outcome.exception_type },
+      });
+    case "exception":
+      return runtimeClassification("error", {
+        category: "unknown",
+        kind: outcome.timed_out ? "timeout" : outcome.exception_type,
+        message: outcome.message,
+        evidence: { exception_type: outcome.exception_type },
+      });
+    case "timeout":
+      return runtimeClassification("error", timeoutFailure(outcome));
+  }
+}
+
+export function parseRuntimeClassification(
+  input: unknown,
+): RuntimeClassification {
+  return parseInput(
+    runtimeClassificationSchema,
+    input,
+    "runtime classification violates the core contract",
+  );
 }
 
 export function nextAction(state: EvaluationState): EvaluationAction | null {
@@ -391,6 +590,82 @@ function failureForVerdict(
     return null;
   }
   return checks.find((check) => check.outcome === outcome)!.failure;
+}
+
+function runtimeClassification(
+  verdict: EvaluationVerdict,
+  failure: EvaluationFailure | null,
+): RuntimeClassification {
+  const outcome = {
+    pass: "satisfied",
+    fail: "unsatisfied",
+    error: "error",
+    skipped: "skipped",
+  } as const satisfies Record<EvaluationVerdict, EvaluationCheck["outcome"]>;
+  return parseRuntimeClassification({
+    verdict,
+    failure,
+    check: { id: "pytest", outcome: outcome[verdict], failure },
+  });
+}
+
+function conversationFailure(
+  outcome: Extract<RuntimeOutcome, { kind: "conversation_error" }>,
+): EvaluationFailure {
+  const category =
+    outcome.source === "simulator"
+      ? "simulator"
+      : outcome.error_kind === "contract"
+        ? "harness"
+        : "agent";
+  const kind =
+    outcome.error_kind === "contract"
+      ? outcome.source === "agent"
+        ? "agent_contract"
+        : "contract"
+      : outcome.timed_out
+        ? "timeout"
+        : "execution";
+  return {
+    category,
+    kind,
+    message: outcome.message,
+    evidence: {
+      source: outcome.source,
+      accepted_messages: outcome.accepted_messages,
+      ...(outcome.cause_type === null
+        ? {}
+        : { cause_type: outcome.cause_type }),
+    },
+  };
+}
+
+function timeoutFailure(
+  outcome: Extract<RuntimeOutcome, { kind: "timeout" }>,
+): EvaluationFailure {
+  const operation = outcome.active_operation;
+  const source =
+    operation?.name === "kensa.conversation.respond"
+      ? operation.attributes["kensa.conversation.source"]
+      : null;
+  const category =
+    outcome.phase !== "call"
+      ? "harness"
+      : source === "simulator"
+        ? "simulator"
+        : operation?.name === "judge"
+          ? "judge"
+          : "agent";
+  return {
+    category,
+    kind: outcome.phase === "call" ? "timeout" : outcome.phase,
+    message: outcome.message,
+    evidence: {
+      timeout_s: outcome.timeout_s,
+      phase: outcome.phase,
+      ...(operation === null ? {} : { active_operation: operation }),
+    },
+  };
 }
 
 function compareChecks(left: EvaluationCheck, right: EvaluationCheck): number {
