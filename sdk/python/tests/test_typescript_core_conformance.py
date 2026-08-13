@@ -10,6 +10,7 @@ def test_python_can_consume_core_evaluation_vectors() -> None:
     vectors = json.loads(VECTORS.read_text())
 
     names = [vector["name"] for vector in vectors["valid"]]
+    names.append(vectors["multi_check"]["name"])
     names.append(vectors["cancelled"]["name"])
     names.extend(vector["name"] for vector in vectors["invalid"])
 

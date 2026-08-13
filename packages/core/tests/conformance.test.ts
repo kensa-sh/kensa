@@ -6,6 +6,7 @@ import {
   cancelCase,
   canonicalJson,
   checkCase,
+  completeCase,
   CoreValidationError,
   digestJson,
   nextAction,
@@ -50,6 +51,7 @@ interface InvalidVector {
 interface EvaluationVectors {
   version: number;
   valid: EvaluationVector[];
+  multi_check: Omit<EvaluationVector, "check"> & { checks: unknown[] };
   cancelled: {
     name: string;
     case: unknown;
@@ -94,6 +96,20 @@ describe("evaluation conformance", () => {
       expect(complete).toMatchObject(terminal);
     },
   );
+
+  it(`matches ${evaluationVectors.multi_check.name}`, () => {
+    const vector = evaluationVectors.multi_check;
+    const started = startCase(vector.case);
+    const observed = observeCase(started, vector.observation);
+    const complete = completeCase(observed, vector.checks);
+
+    expect([
+      nextAction(started),
+      nextAction(observed),
+      nextAction(complete),
+    ]).toEqual(vector.actions);
+    expect(complete).toMatchObject(vector.terminal);
+  });
 
   it(`matches ${evaluationVectors.cancelled.name}`, () => {
     const vector = evaluationVectors.cancelled;

@@ -1,6 +1,7 @@
 export {
   cancelCase,
   checkCase,
+  completeCase,
   checkOutcomes,
   EvaluationTransitionError,
   failureCategories,
@@ -8,6 +9,7 @@ export {
   observeCase,
   parseCase,
   parseCheck,
+  parseChecks,
   parseFailure,
   parseObservation,
   startCase,
@@ -22,6 +24,7 @@ export {
   type EvaluationObservation,
   type EvaluationState,
   type EvaluationVerdict,
+  type MultiCheckComplete,
 } from "./evaluation.js";
 export {
   CoreValidationError,
