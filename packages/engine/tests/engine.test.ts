@@ -116,6 +116,26 @@ describe("KensaEngine", () => {
       }),
     ).toThrow();
     expect(() =>
+      responseSchema.parse({
+        type: "conversation_action",
+        conversation_id: "conversation",
+        action: { source: "agent" },
+      }),
+    ).toThrow();
+    expect(() =>
+      responseSchema.parse({
+        type: "conversation_result",
+        conversation_id: "conversation",
+        result: {
+          phase: "complete",
+          messages: [],
+          output: null,
+          output_recorded: false,
+          termination: { source: "engine", reason: "" },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
       responseSchema.parse({ type: "run_result", result: null }),
     ).toThrow(ZodError);
     expect(() =>
@@ -218,6 +238,170 @@ describe("KensaEngine", () => {
         }),
       ),
     ).toMatchObject({ ok: false, failure: { code: "unknown_evaluation" } });
+  });
+
+  it("drives a direct conversation to a core-owned terminal result", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("2", {
+          type: "start_conversation",
+          conversation_id: "conversation-1",
+          conversation: {
+            messages: [],
+            mode: "direct",
+            max_agent_responses: null,
+            starts_with: "agent",
+          },
+        }),
+      ),
+    ).toEqual({
+      id: "2",
+      ok: true,
+      response: responses.conversation_action,
+    });
+
+    expect(
+      engine.processLine(
+        message("3", {
+          type: "observe_conversation",
+          conversation_id: "conversation-1",
+          observation: {
+            source: "agent",
+            content: "hello",
+            output: null,
+            output_recorded: false,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toEqual({
+      id: "3",
+      ok: true,
+      response: responses.conversation_result,
+    });
+    expect(
+      engine.processLine(
+        message("4", {
+          type: "observe_conversation",
+          conversation_id: "conversation-1",
+          observation: {
+            source: "agent",
+            content: "again",
+            output: null,
+            output_recorded: false,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "unknown_conversation" },
+    });
+  });
+
+  it("drives simulated conversations without committing invalid turns", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    const start = {
+      type: "start_conversation",
+      conversation_id: "simulated",
+      conversation: {
+        messages: [{ role: "system", content: "private" }],
+        mode: "simulated",
+        max_agent_responses: 1,
+        starts_with: "simulator",
+      },
+    };
+
+    expect(engine.processLine(message("2", start))).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_action",
+        action: {
+          source: "simulator",
+          messages: [],
+          response_index: 1,
+          agent_responses: 0,
+        },
+      },
+    });
+    expect(engine.processLine(message("duplicate", start))).toMatchObject({
+      ok: false,
+      failure: { code: "invalid_transition" },
+    });
+
+    const wrongSource = {
+      type: "observe_conversation",
+      conversation_id: "simulated",
+      observation: {
+        source: "agent",
+        content: "wrong",
+        output: null,
+        output_recorded: false,
+        termination_reason: null,
+      },
+    };
+    expect(
+      engine.processLine(message("wrong-source", wrongSource)),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "invalid_transition" },
+    });
+
+    const simulatorTurn = {
+      type: "observe_conversation",
+      conversation_id: "simulated",
+      observation: {
+        source: "simulator",
+        content: "question",
+        output: null,
+        output_recorded: false,
+        termination_reason: null,
+      },
+    };
+    expect(engine.processLine(message("3", simulatorTurn))).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_action",
+        action: {
+          source: "agent",
+          messages: [
+            { role: "system", content: "private" },
+            { role: "user", content: "question" },
+          ],
+          response_index: 2,
+          agent_responses: 0,
+        },
+      },
+    });
+    expect(
+      engine.processLine(
+        message("4", {
+          type: "observe_conversation",
+          conversation_id: "simulated",
+          observation: {
+            source: "agent",
+            content: "answer",
+            output: { resolved: true },
+            output_recorded: true,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_result",
+        result: {
+          output: { resolved: true },
+          output_recorded: true,
+          termination: { source: "engine", reason: "max_turns" },
+        },
+      },
+    });
   });
 
   it("supports cancellation", () => {
@@ -618,6 +802,52 @@ describe("KensaEngine", () => {
     expect(engine.reset()).toBe(0);
   });
 
+  it("resets evaluation and conversation state together", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    engine.processLine(
+      message("evaluation", {
+        type: "start_case",
+        evaluation_id: "evaluation",
+        case: { id: "case", input: null, metadata: {} },
+      }),
+    );
+    for (const conversationId of ["first", "second"]) {
+      engine.processLine(
+        message(conversationId, {
+          type: "start_conversation",
+          conversation_id: conversationId,
+          conversation: {
+            messages: [],
+            mode: "direct",
+            max_agent_responses: null,
+            starts_with: "agent",
+          },
+        }),
+      );
+    }
+
+    expect(engine.reset()).toBe(3);
+    expect(
+      engine.processLine(
+        message("missing", {
+          type: "observe_conversation",
+          conversation_id: "first",
+          observation: {
+            source: "agent",
+            content: "late",
+            output: null,
+            output_recorded: false,
+            termination_reason: null,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: { code: "unknown_conversation" },
+    });
+  });
+
   it("does not commit state until the outbound response validates", () => {
     let validation = 0;
     const engine = new KensaEngine({
@@ -671,6 +901,62 @@ describe("KensaEngine", () => {
     });
   });
 
+  it("does not commit conversation state until its action validates", () => {
+    let rejectNext = false;
+    const engine = new KensaEngine({
+      validateResponse: (value) => {
+        if (rejectNext) {
+          rejectNext = false;
+          throw new ZodError([
+            {
+              code: "custom",
+              message: "forced failure",
+              path: ["conversation_action"],
+            },
+          ]);
+        }
+        return responseSchema.parse(value);
+      },
+    });
+    ready(engine);
+    engine.processLine(
+      message("2", {
+        type: "start_conversation",
+        conversation_id: "atomic-conversation",
+        conversation: {
+          messages: [],
+          mode: "simulated",
+          max_agent_responses: 1,
+          starts_with: "simulator",
+        },
+      }),
+    );
+    const observation = {
+      type: "observe_conversation",
+      conversation_id: "atomic-conversation",
+      observation: {
+        source: "simulator",
+        content: "hello",
+        output: null,
+        output_recorded: false,
+        termination_reason: null,
+      },
+    };
+
+    rejectNext = true;
+    expect(engine.processLine(message("3", observation))).toMatchObject({
+      ok: false,
+      failure: { code: "internal" },
+    });
+    expect(engine.processLine(message("4", observation))).toMatchObject({
+      ok: true,
+      response: {
+        type: "conversation_action",
+        action: { source: "agent", response_index: 2 },
+      },
+    });
+  });
+
   it("fails safely when core returns no action for active state", () => {
     const engine = new KensaEngine({
       nextAction: () => null,
@@ -691,6 +977,32 @@ describe("KensaEngine", () => {
       failure: {
         code: "internal",
         message: "active evaluation case-1 has no next action",
+      },
+    });
+  });
+
+  it("fails safely when core returns no conversation action", () => {
+    const engine = new KensaEngine({ conversationAction: () => null });
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("2", {
+          type: "start_conversation",
+          conversation_id: "no-action",
+          conversation: {
+            messages: [],
+            mode: "direct",
+            max_agent_responses: null,
+            starts_with: "agent",
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        code: "internal",
+        message: "active conversation has no next action",
       },
     });
   });

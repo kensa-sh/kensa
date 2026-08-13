@@ -7,6 +7,8 @@ import {
   canonicalJson,
   CoreValidationError,
   normalizeTraceViews,
+  parseConversationAction,
+  parseConversationResult,
   parseChecks,
   parseJudgeObservations,
   parseObservation,
@@ -36,6 +38,16 @@ const checkRequest = z.strictObject({
   checks: z.unknown(),
   judges: z.unknown(),
 });
+const startConversationRequest = z.strictObject({
+  type: z.literal("start_conversation"),
+  conversation_id: z.string().min(1),
+  conversation: z.unknown(),
+});
+const observeConversationRequest = z.strictObject({
+  type: z.literal("observe_conversation"),
+  conversation_id: z.string().min(1),
+  observation: z.unknown(),
+});
 const cancelRequest = z.strictObject({
   type: z.literal("cancel"),
   evaluation_id: z.string().min(1),
@@ -63,6 +75,8 @@ export const requestEnvelopeSchema = z.strictObject({
     startCaseRequest,
     observeRequest,
     checkRequest,
+    startConversationRequest,
+    observeConversationRequest,
     cancelRequest,
     resetRequest,
     buildRunRequest,
@@ -78,6 +92,7 @@ export interface EngineFailure {
     | "internal"
     | "invalid_message"
     | "invalid_transition"
+    | "unknown_conversation"
     | "unknown_evaluation"
     | "version_mismatch";
   message: string;
@@ -94,6 +109,24 @@ const actionResponse = z.strictObject({
   action: z.enum(["invoke_agent", "evaluate_check"]),
   case_id: z.string().min(1),
 });
+const conversationActionResponse = z
+  .strictObject({
+    type: z.literal("conversation_action"),
+    conversation_id: z.string().min(1),
+    action: z.unknown(),
+  })
+  .superRefine((response, context) => {
+    validateCoreValue(() => parseConversationAction(response.action), context);
+  });
+const conversationResultResponse = z
+  .strictObject({
+    type: z.literal("conversation_result"),
+    conversation_id: z.string().min(1),
+    result: z.unknown(),
+  })
+  .superRefine((response, context) => {
+    validateCoreValue(() => parseConversationResult(response.result), context);
+  });
 const resetResponse = z.strictObject({
   type: z.literal("reset"),
   released: z.number().int().nonnegative(),
@@ -210,6 +243,8 @@ const traceViewsResponse = z
 export const responseSchema = z.discriminatedUnion("type", [
   handshakeResponse,
   actionResponse,
+  conversationActionResponse,
+  conversationResultResponse,
   resetResponse,
   resultResponse,
   runResultResponse,
@@ -222,6 +257,7 @@ const failureResponse = z.strictObject({
     "internal",
     "invalid_message",
     "invalid_transition",
+    "unknown_conversation",
     "unknown_evaluation",
     "version_mismatch",
   ]),
