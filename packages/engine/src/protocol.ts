@@ -12,6 +12,7 @@ import {
   parseChecks,
   parseJudgeObservations,
   parseObservation,
+  parseRuntimeClassification,
 } from "@kensa/core";
 
 export const PROTOCOL_VERSION = "kensa.engine.v1";
@@ -35,8 +36,12 @@ const observeRequest = z.strictObject({
 const checkRequest = z.strictObject({
   type: z.literal("check"),
   evaluation_id: z.string().min(1),
-  checks: z.unknown(),
+  runtime_outcome: z.unknown(),
   judges: z.unknown(),
+});
+const classifyRuntimeOutcomeRequest = z.strictObject({
+  type: z.literal("classify_runtime_outcome"),
+  outcome: z.unknown(),
 });
 const startConversationRequest = z.strictObject({
   type: z.literal("start_conversation"),
@@ -75,6 +80,7 @@ export const requestEnvelopeSchema = z.strictObject({
     startCaseRequest,
     observeRequest,
     checkRequest,
+    classifyRuntimeOutcomeRequest,
     startConversationRequest,
     observeConversationRequest,
     cancelRequest,
@@ -192,6 +198,17 @@ const resultResponse = z.strictObject({
     cancelledEvaluationResponse,
   ]),
 });
+const runtimeOutcomeResponse = z
+  .strictObject({
+    type: z.literal("runtime_outcome"),
+    result: z.unknown(),
+  })
+  .superRefine((response, context) => {
+    validateCoreValue(
+      () => parseRuntimeClassification(response.result),
+      context,
+    );
+  });
 const runResultValueResponse = z.strictObject({
   schema_version: z.literal("kensa.result.v1"),
   run_id: z.string().min(1),
@@ -247,6 +264,7 @@ export const responseSchema = z.discriminatedUnion("type", [
   conversationResultResponse,
   resetResponse,
   resultResponse,
+  runtimeOutcomeResponse,
   runResultResponse,
   traceViewsResponse,
 ]);

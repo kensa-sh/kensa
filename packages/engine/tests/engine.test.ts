@@ -104,6 +104,28 @@ describe("KensaEngine", () => {
     });
   });
 
+  it("classifies runtime outcomes without evaluation state", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+
+    expect(
+      engine.processLine(
+        message("2", {
+          type: "classify_runtime_outcome",
+          outcome: {
+            kind: "assertion_failed",
+            message: "expected true",
+            exception_type: "AssertionError",
+          },
+        }),
+      ),
+    ).toEqual({ id: "2", ok: true, response: responses.runtime_outcome });
+    expect(engine.processLine(message("3", { type: "reset" }))).toMatchObject({
+      ok: true,
+      response: { released: 0 },
+    });
+  });
+
   it("rejects responses that violate core evidence contracts", () => {
     expect(() =>
       responseSchema.parse({
@@ -223,7 +245,7 @@ describe("KensaEngine", () => {
       message("4", {
         type: "check",
         evaluation_id: "eval-1",
-        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        runtime_outcome: { kind: "passed" },
         judges: [],
       }),
     );
@@ -233,7 +255,7 @@ describe("KensaEngine", () => {
         message("5", {
           type: "check",
           evaluation_id: "eval-1",
-          checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+          runtime_outcome: { kind: "passed" },
           judges: [],
         }),
       ),
@@ -470,7 +492,7 @@ describe("KensaEngine", () => {
       message("4", {
         type: "check",
         evaluation_id: "judged",
-        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        runtime_outcome: { kind: "passed" },
         judges: [{ ...requiredJudge, error: true }],
       }),
     );
@@ -483,7 +505,7 @@ describe("KensaEngine", () => {
       message("5", {
         type: "check",
         evaluation_id: "judged",
-        checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+        runtime_outcome: { kind: "passed" },
         judges: [
           requiredJudge,
           {
@@ -551,7 +573,10 @@ describe("KensaEngine", () => {
         message("4", {
           type: "check",
           evaluation_id: "failed-agent",
-          checks: [{ id: "pytest", outcome: "error", failure: agentFailure }],
+          runtime_outcome: {
+            kind: "attributed_failure",
+            failure: agentFailure,
+          },
           judges: [],
         }),
       ),
@@ -745,7 +770,7 @@ describe("KensaEngine", () => {
         message("5", {
           type: "check",
           evaluation_id: "duplicate",
-          checks: [{ id: "pytest", outcome: "satisfied", failure: null }],
+          runtime_outcome: { kind: "passed" },
           judges: [],
         }),
       ),
