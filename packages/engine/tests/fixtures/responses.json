@@ -21,7 +21,12 @@
       "source": "agent",
       "messages": [],
       "response_index": 1,
-      "agent_responses": 0
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [],
+        "output": null,
+        "output_recorded": false
+      }
     }
   },
   "conversation_result": {
