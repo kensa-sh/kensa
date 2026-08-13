@@ -556,5 +556,16 @@ describe("conversation lifecycle", () => {
         termination: { source: "engine", reason: "direct" },
       }),
     ).toThrow("conversation result");
+    expectCoreIssue(
+      () =>
+        parseConversationResult({
+          phase: "complete",
+          messages: [],
+          output: "impossible",
+          output_recorded: false,
+          termination: { source: "engine", reason: "direct" },
+        }),
+      "unrecorded output",
+    );
   });
 });

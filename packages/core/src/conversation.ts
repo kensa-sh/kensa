@@ -195,13 +195,23 @@ const terminationSchema = z.strictObject({
   reason: nonblankStringSchema,
 });
 
-const resultSchema = z.strictObject({
-  phase: z.literal("complete"),
-  messages: messagesSchema,
-  output: jsonValueSchema.nullable(),
-  output_recorded: z.boolean(),
-  termination: terminationSchema,
-});
+const resultSchema = z
+  .strictObject({
+    phase: z.literal("complete"),
+    messages: messagesSchema,
+    output: jsonValueSchema.nullable(),
+    output_recorded: z.boolean(),
+    termination: terminationSchema,
+  })
+  .superRefine((result, context) => {
+    if (!result.output_recorded && result.output !== null) {
+      addIssue(
+        context,
+        ["output"],
+        "unrecorded output must use the null wire representation",
+      );
+    }
+  });
 
 export type ConversationSource = z.infer<typeof sourceSchema>;
 export type ConversationMessage = z.infer<typeof messageSchema>;
