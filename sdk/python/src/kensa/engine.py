@@ -17,7 +17,7 @@ from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
-PROTOCOL_VERSION = "kensa.engine.v2"
+PROTOCOL_VERSION = "kensa.engine.v1"
 _ENGINE_COMMAND = "KENSA_ENGINE_COMMAND"
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _RESPONSE_TIMEOUT_S = 5.0

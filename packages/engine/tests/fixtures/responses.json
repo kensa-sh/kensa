@@ -1,7 +1,7 @@
 {
   "handshake": {
     "type": "handshake",
-    "protocol_version": "kensa.engine.v2",
+    "protocol_version": "kensa.engine.v1",
     "engine_version": "__ENGINE_VERSION__"
   },
   "invoke_agent": {

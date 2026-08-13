@@ -369,7 +369,7 @@ for line in sys.stdin:
     if request["type"] == "handshake":
         response = {
             "type": "handshake",
-            "protocol_version": "kensa.engine.v2",
+            "protocol_version": "kensa.engine.v1",
             "engine_version": "test",
         }
     elif request["type"] == "start_case":
@@ -456,7 +456,7 @@ for line in sys.stdin:
     if request["type"] == "handshake":
         response = {{
             "type": "handshake",
-            "protocol_version": "kensa.engine.v2",
+            "protocol_version": "kensa.engine.v1",
             "engine_version": "test",
         }}
     elif request["type"] == "start_case":
@@ -1391,7 +1391,7 @@ for line in sys.stdin:
     if request["type"] == "handshake":
         response = {
             "type": "handshake",
-            "protocol_version": "kensa.engine.v2",
+            "protocol_version": "kensa.engine.v1",
             "engine_version": "test",
         }
     elif request["type"] == "start_case":

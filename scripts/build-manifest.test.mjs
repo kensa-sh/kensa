@@ -50,7 +50,7 @@ describe("release build manifest generator", () => {
     expect(manifest.components.sdks.typescript.name).toBe("@kensa/sdk");
     expect(manifest.contracts.map(({ id }) => id)).toEqual([
       "kensa.build_manifest.v1",
-      "kensa.engine.v2",
+      "kensa.engine.v1",
       "kensa.result.v1",
     ]);
     expect(manifest.schemas).toHaveLength(5);
