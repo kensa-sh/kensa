@@ -193,6 +193,7 @@ describe("conversation lifecycle", () => {
       messages: [],
       response_index: 1,
       agent_responses: 0,
+      accepted: { messages: [], output: null, output_recorded: false },
     });
 
     state = respond(awaiting(state), { content: "a1" });
@@ -209,6 +210,11 @@ describe("conversation lifecycle", () => {
       messages: [{ role: "assistant", content: "a1" }],
       response_index: 2,
       agent_responses: 1,
+      accepted: {
+        messages: [{ role: "assistant", content: "a1" }],
+        output: "a1",
+        output_recorded: true,
+      },
     });
 
     state = respond(awaiting(state), { content: "s1" });
@@ -313,6 +319,7 @@ describe("conversation lifecycle", () => {
       { role: "assistant", content: "found it" },
     ]);
     simulatorAction.messages[0]!.content = "mutated";
+    simulatorAction.accepted.messages[0]!.content = "also mutated";
 
     const afterSimulator = respond(state, { content: "follow-up" });
     expect(conversationAction(afterSimulator)!.messages).toEqual([
@@ -561,6 +568,21 @@ describe("conversation lifecycle", () => {
   it("validates actions and terminal results at public boundaries", () => {
     expect(() => parseConversationAction({ source: "agent" })).toThrow(
       "conversation action",
+    );
+    expectCoreIssue(
+      () =>
+        parseConversationAction({
+          source: "agent",
+          messages: [],
+          response_index: 1,
+          agent_responses: 0,
+          accepted: {
+            messages: [],
+            output: "impossible",
+            output_recorded: false,
+          },
+        }),
+      "unrecorded output",
     );
     expect(() =>
       parseConversationResult({

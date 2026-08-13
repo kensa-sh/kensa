@@ -24,7 +24,21 @@
         }
       ],
       "response_index": 1,
-      "agent_responses": 0
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "private"
+          },
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "output": null,
+        "output_recorded": false
+      }
     },
     {
       "source": "agent",
@@ -43,7 +57,25 @@
         }
       ],
       "response_index": 2,
-      "agent_responses": 0
+      "agent_responses": 0,
+      "accepted": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "private"
+          },
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "user",
+            "content": "Can you confirm?"
+          }
+        ],
+        "output": null,
+        "output_recorded": false
+      }
     }
   ],
   "observations": [

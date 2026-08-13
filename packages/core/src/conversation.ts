@@ -187,11 +187,28 @@ const responseSchema = z
     }
   });
 
+const acceptedConversationSchema = z
+  .strictObject({
+    messages: messagesSchema,
+    output: jsonValueSchema.nullable(),
+    output_recorded: z.boolean(),
+  })
+  .superRefine((accepted, context) => {
+    if (!accepted.output_recorded && accepted.output !== null) {
+      addIssue(
+        context,
+        ["output"],
+        "unrecorded output must use the null wire representation",
+      );
+    }
+  });
+
 const actionSchema = z.strictObject({
   source: sourceSchema,
   messages: messagesSchema,
   response_index: z.number().int().positive(),
   agent_responses: z.number().int().nonnegative(),
+  accepted: acceptedConversationSchema,
 });
 
 const terminationSchema = z.strictObject({
@@ -309,6 +326,11 @@ export function conversationAction(
     messages,
     response_index: state.response_index,
     agent_responses: state.agent_responses,
+    accepted: {
+      messages: cloneMessages(state.messages),
+      output: cloneJson(state.output),
+      output_recorded: state.output_recorded,
+    },
   });
 }
 
