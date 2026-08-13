@@ -33,6 +33,24 @@ export {
   type JudgeObservation,
 } from "./judges.js";
 export {
+  conversationAction,
+  ConversationTransitionError,
+  observeConversation,
+  parseConversationAction,
+  parseConversationMessages,
+  parseConversationResult,
+  startConversation,
+  type ConversationAction,
+  type ConversationAwaitingResponse,
+  type ConversationComplete,
+  type ConversationMessage,
+  type ConversationResponseObservation,
+  type ConversationSource,
+  type ConversationStart,
+  type ConversationState,
+  type ConversationTermination,
+} from "./conversation.js";
+export {
   CoreValidationError,
   KensaCoreError,
   type CoreErrorCode,
