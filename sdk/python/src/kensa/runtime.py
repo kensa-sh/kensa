@@ -818,42 +818,34 @@ class KensaTrialRuntime:
 
     def finalize_engine(
         self,
-        status: str,
-        failure: TrialFailure | None,
+        runtime_outcome: Mapping[str, Any],
     ) -> tuple[str, TrialFailure | None]:
         if self._engine_completion is not None:
             return self._engine_completion
-        if self._engine is None or self._engine_evaluation_id is None:
-            return status, failure
-        failure_payload = failure.model_dump(mode="json") if failure is not None else None
-        observation_failure = (
-            failure_payload
-            if status == "error"
-            and failure is not None
-            and failure.category in {"agent", "simulator"}
-            else None
-        )
+        if self._engine is None:
+            raise KensaCaseError("Kensa engine is required to classify runtime outcomes")
         from kensa.engine import KensaEngineError, _wire_json_value
 
-        try:
-            observation = {
-                "output": self.output if self.output_recorded else None,
-                "output_recorded": self.output_recorded,
-                "trace": _engine_trace(self.trace.to_dict()),
-                "failure": observation_failure,
-            }
-            observation = cast(dict[str, Any], _wire_json_value(observation))
-            if failure_payload is not None:
-                failure_payload = cast(dict[str, Any], _wire_json_value(failure_payload))
-        except (TypeError, ValueError) as exc:
-            raise KensaCaseError(f"trial evidence must be JSON-serializable: {exc}") from exc
-        completion = self._engine.complete_case(
-            self._engine_evaluation_id,
-            observation=observation,
-            status=status,
-            failure=failure_payload,
-            judges=[judge.to_dict() for judge in self._judge_records],
-        )
+        if self._engine_evaluation_id is None:
+            completion = self._engine.classify_runtime_outcome(runtime_outcome)
+        else:
+            try:
+                observation = {
+                    "output": self.output if self.output_recorded else None,
+                    "output_recorded": self.output_recorded,
+                    "trace": _engine_trace(self.trace.to_dict()),
+                    "failure": None,
+                }
+                observation = cast(dict[str, Any], _wire_json_value(observation))
+            except (TypeError, ValueError) as exc:
+                raise KensaCaseError(f"trial evidence must be JSON-serializable: {exc}") from exc
+            completion = self._engine.complete_case(
+                self._engine_evaluation_id,
+                observation=observation,
+                runtime_outcome=runtime_outcome,
+                judges=[judge.to_dict() for judge in self._judge_records],
+            )
+
         terminal_failure: TrialFailure | None = None
         if completion.failure is not None:
             try:

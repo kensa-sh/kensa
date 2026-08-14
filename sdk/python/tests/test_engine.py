@@ -22,14 +22,13 @@ from kensa.engine import (
     EngineConversationAction,
     EngineConversationResult,
     KensaEngineError,
-    _check_outcome,
     _conversation_step,
     _engine_command,
     _engine_executable,
     _wire_json_value,
 )
 from kensa.errors import KensaCaseError, TrialFailure
-from kensa.pytest_plugin import _classify_exception
+from kensa.pytest_plugin import _runtime_outcome
 from kensa.runtime import KensaTrial, KensaTrialRuntime, _engine_trace
 
 
@@ -155,6 +154,34 @@ def _response(response: Any, *, request_id: str = "1", ok: bool = True) -> str:
 
 def test_engine_client_runs_case_and_cancellation() -> None:
     with EngineClient() as client:
+        classified = client.classify_runtime_outcome(
+            {
+                "kind": "assertion_failed",
+                "message": "expected true",
+                "exception_type": "AssertionError",
+            }
+        )
+        assert classified == EngineCompletion(
+            verdict="fail",
+            failure={
+                "category": "agent",
+                "kind": "assertion",
+                "message": "expected true",
+                "evidence": {"exception_type": "AssertionError"},
+            },
+            checks=(
+                {
+                    "id": "pytest",
+                    "outcome": "unsatisfied",
+                    "failure": {
+                        "category": "agent",
+                        "kind": "assertion",
+                        "message": "expected true",
+                        "evidence": {"exception_type": "AssertionError"},
+                    },
+                },
+            ),
+        )
         client.start_case(
             "passing",
             {"id": "hello", "input": "world", "metadata": {"id": "hello"}},
@@ -179,8 +206,7 @@ def test_engine_client_runs_case_and_cancellation() -> None:
                 },
                 "failure": None,
             },
-            status="pass",
-            failure=None,
+            runtime_outcome={"kind": "passed"},
         )
         assert verdict == EngineCompletion(
             verdict="pass",
@@ -496,15 +522,12 @@ def test_engine_error_exposes_stable_code() -> None:
     assert KensaEngineError("plain").details == {}
 
 
-def test_engine_failure_classification_is_infrastructure() -> None:
-    status, failure = _classify_exception(KensaEngineError("", code="crash"), phase="call")
-    assert status == "error"
-    assert failure == TrialFailure(
-        category="infrastructure",
-        kind="crash",
-        message="Kensa engine failure",
-        evidence={"exception_type": "KensaEngineError"},
-    )
+def test_engine_failure_reports_transport_facts() -> None:
+    assert _runtime_outcome(KensaEngineError("", code="crash"), phase="call") == {
+        "kind": "engine_error",
+        "message": "Kensa engine failure",
+        "code": "crash",
+    }
 
 
 def test_python_eval_uses_one_engine_process(
@@ -631,6 +654,17 @@ for line in sys.stdin:
         }
     elif request["type"] == "start_case":
         response = {"type": "action", "action": "invoke_agent", "case_id": "one"}
+    elif request["type"] == "classify_runtime_outcome":
+        with EngineClient(real_engine) as engine:
+            classified = engine.classify_runtime_outcome(request["outcome"])
+        response = {
+            "type": "runtime_outcome",
+            "result": {
+                "verdict": classified.verdict,
+                "failure": classified.failure,
+                "check": classified.checks[0],
+            },
+        }
     elif request["type"] == "build_run":
         with EngineClient(real_engine) as engine:
             result = engine.build_run(
@@ -720,6 +754,17 @@ for line in sys.stdin:
         response = {{"type": "action", "action": "invoke_agent", "case_id": "one"}}
     elif request["type"] == "observe":
         response = {{"type": "action", "action": "wrong"}}
+    elif request["type"] == "classify_runtime_outcome":
+        with EngineClient(real_engine) as engine:
+            classified = engine.classify_runtime_outcome(request["outcome"])
+        response = {{
+            "type": "runtime_outcome",
+            "result": {{
+                "verdict": classified.verdict,
+                "failure": classified.failure,
+                "check": classified.checks[0],
+            }},
+        }}
     elif request["type"] == "cancel":
         response = {{
             "type": "result",
@@ -1324,7 +1369,11 @@ def test_engine_client_rejects_invalid_protocol_actions(
         if method == "start":
             client.start_case("eval", {})
         elif method == "complete":
-            client.complete_case("eval", observation={}, status="pass", failure=None)
+            client.complete_case(
+                "eval",
+                observation={},
+                runtime_outcome={"kind": "passed"},
+            )
         else:
             client.cancel_case("eval", "stop")
 
@@ -1356,8 +1405,7 @@ def test_engine_client_uses_authoritative_terminal_verdict(
     completion = client.complete_case(
         "eval",
         observation={},
-        status="fail",
-        failure={"category": "agent"},
+        runtime_outcome={"kind": "assertion_failed"},
     )
     assert completion == EngineCompletion(
         verdict="pass",
@@ -1365,8 +1413,56 @@ def test_engine_client_uses_authoritative_terminal_verdict(
         checks=({"id": "pytest", "outcome": "satisfied", "failure": None},),
         judges=(),
     )
-    with pytest.raises(KensaEngineError, match="Unknown check status"):
-        _check_outcome("unknown")
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        ({"type": "reset", "released": 0}, "invalid runtime outcome"),
+        ({"type": "runtime_outcome", "result": None}, "invalid runtime outcome"),
+        (
+            {
+                "type": "runtime_outcome",
+                "result": {"verdict": "invented", "failure": None, "check": {}},
+            },
+            "invalid runtime outcome",
+        ),
+        (
+            {
+                "type": "runtime_outcome",
+                "result": {
+                    "verdict": "pass",
+                    "failure": "invalid",
+                    "check": {"id": "pytest", "outcome": "satisfied", "failure": None},
+                },
+            },
+            "invalid runtime outcome",
+        ),
+        (
+            {
+                "type": "runtime_outcome",
+                "result": {
+                    "verdict": "pass",
+                    "failure": None,
+                    "check": {"id": "pytest", "outcome": "error", "failure": None},
+                },
+            },
+            "contradictory runtime outcome",
+        ),
+    ],
+)
+def test_engine_client_rejects_invalid_runtime_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, Any],
+    message: str,
+) -> None:
+    client = EngineClient()
+    monkeypatch.setattr(client, "_request", lambda request: response)
+
+    with pytest.raises(KensaEngineError, match=message):
+        client.classify_runtime_outcome({"kind": "passed"})
+
     client.close()
 
 
@@ -1374,8 +1470,8 @@ def test_passing_test_engine_finalize_failure_is_classified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Runtime:
-        def finalize_engine(self, status: str, failure: Any) -> tuple[str, Any]:
-            del status, failure
+        def finalize_engine(self, outcome: dict[str, Any]) -> tuple[str, Any]:
+            del outcome
             raise KensaEngineError("stopped", code="crash")
 
     class Outcome:
@@ -1410,6 +1506,133 @@ def test_passing_test_engine_finalize_failure_is_classified(
     assert str(outcome.exception) == "Kensa engine finalization failed: stopped"
 
 
+def test_engine_failure_marks_run_incomplete_when_recovery_cannot_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interruptions: list[tuple[Any, ...]] = []
+
+    class State:
+        @property
+        def recovery_engine(self) -> EngineClient:
+            raise KensaEngineError("recovery unavailable", code="startup")
+
+        def mark_incomplete(self, *args: Any, **kwargs: Any) -> None:
+            interruptions.append((*args, kwargs))
+
+    runtime = SimpleNamespace(nodeid="test_eval")
+    item = SimpleNamespace(config=object())
+    monkeypatch.setattr(pytest_plugin, "_state", lambda _: State())
+
+    pytest_plugin._record_engine_failure(
+        cast(Any, item),
+        cast(Any, runtime),
+        1.0,
+        KensaEngineError("stopped", code="crash"),
+    )
+
+    assert interruptions == [
+        (
+            "engine_failure",
+            "could not classify engine failure: recovery unavailable",
+            {"nodeid": "test_eval"},
+        )
+    ]
+
+
+def test_report_failure_classification_recovers_with_fresh_engine() -> None:
+    failure = {
+        "category": "agent",
+        "kind": "assertion",
+        "message": "expected true",
+        "evidence": {"exception_type": "AssertionError"},
+    }
+
+    class FailedEngine:
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            del outcome
+            raise KensaEngineError("primary stopped", code="crash")
+
+    class RecoveryEngine:
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            assert outcome == {"kind": "assertion_failed"}
+            return EngineCompletion(verdict="fail", failure=failure)
+
+    state = SimpleNamespace(
+        engine=FailedEngine(),
+        recovery_engine=RecoveryEngine(),
+        mark_incomplete=lambda *_args, **_kwargs: None,
+    )
+
+    classified = pytest_plugin._classified_report_failure(
+        cast(Any, state),
+        {"kind": "assertion_failed"},
+        nodeid="test_eval",
+    )
+
+    assert classified == ("fail", TrialFailure.model_validate(failure))
+
+
+def test_report_failure_classification_marks_incomplete_when_recovery_fails() -> None:
+    interruptions: list[tuple[Any, ...]] = []
+
+    class FailedEngine:
+        def __init__(self, message: str) -> None:
+            self.message = message
+
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+            del outcome
+            raise KensaEngineError(self.message, code="crash")
+
+    state = SimpleNamespace(
+        engine=FailedEngine("primary stopped"),
+        recovery_engine=FailedEngine("recovery stopped"),
+        mark_incomplete=lambda *args, **kwargs: interruptions.append((*args, kwargs)),
+    )
+
+    classified = pytest_plugin._classified_report_failure(
+        cast(Any, state),
+        {"kind": "skipped"},
+        nodeid="test_eval",
+    )
+
+    assert classified is None
+    assert interruptions == [
+        (
+            "engine_failure",
+            "could not classify pytest outcome: primary stopped; recovery failed: recovery stopped",
+            {"nodeid": "test_eval"},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        SimpleNamespace(skipped=True, when="call", outcome="skipped", failed=False),
+        SimpleNamespace(skipped=False, when="setup", outcome="failed", failed=True),
+    ],
+    ids=["skipped", "setup-error"],
+)
+def test_report_classification_failure_stops_metadata_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    report: SimpleNamespace,
+) -> None:
+    item = SimpleNamespace(config=object(), nodeid="test_eval")
+    call = SimpleNamespace(excinfo=None)
+    outcome = SimpleNamespace(get_result=lambda: report)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pytest_plugin, "_runtime_for_item", lambda _: object())
+        patcher.setattr(pytest_plugin, "_trial_metadata", lambda *_: None)
+        patcher.setattr(pytest_plugin, "_state", lambda _: object())
+        patcher.setattr(pytest_plugin, "_classified_report_failure", lambda *_args, **_kwargs: None)
+
+        hook = pytest_plugin.pytest_runtest_makereport(cast(Any, item), cast(Any, call))
+        next(hook)
+
+        with pytest.raises(StopIteration):
+            hook.send(outcome)
+
+
 def test_engine_nonpass_verdict_fails_passing_pytest_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1422,8 +1645,8 @@ def test_engine_nonpass_verdict_fails_passing_pytest_item(
     class Runtime:
         nodeid = "test_eval"
 
-        def finalize_engine(self, status: str, original: Any) -> tuple[str, TrialFailure]:
-            del status, original
+        def finalize_engine(self, outcome: dict[str, Any]) -> tuple[str, TrialFailure]:
+            del outcome
             return "fail", failure
 
         def metadata(self, **values: Any) -> Any:
@@ -1465,8 +1688,8 @@ def test_engine_pass_on_raising_pytest_item_marks_mismatch(
     class Runtime:
         nodeid = "test_eval"
 
-        def finalize_engine(self, status: str, failure: Any) -> tuple[str, None]:
-            del status, failure
+        def finalize_engine(self, outcome: dict[str, Any]) -> tuple[str, None]:
+            del outcome
             return "pass", None
 
         def metadata(self, **values: Any) -> Any:
@@ -1933,9 +2156,22 @@ def test_runtime_rejects_non_json_engine_input_and_reuses_verdict() -> None:
         engine=cast(Any, engine),
     )
     good_runtime.run_case(kensa_case(id="good", input=None), lambda: None)
-    assert good_runtime.finalize_engine("pass", None) == ("pass", None)
-    assert good_runtime.finalize_engine("error", None) == ("pass", None)
+    assert good_runtime.finalize_engine({"kind": "passed"}) == ("pass", None)
+    assert good_runtime.finalize_engine({"kind": "exception"}) == ("pass", None)
     assert engine.completed == 1
+
+
+def test_runtime_requires_engine_for_outcome_classification() -> None:
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test",
+        group_id="test",
+        case_id="test",
+        no_judge=False,
+    )
+
+    with pytest.raises(KensaCaseError, match="engine is required"):
+        runtime.finalize_engine({"kind": "passed"})
 
 
 def test_runtime_rejects_lossy_engine_evidence_as_case_failure() -> None:
@@ -1964,7 +2200,7 @@ def test_runtime_rejects_lossy_engine_evidence_as_case_failure() -> None:
     )
 
     with pytest.raises(KensaCaseError, match=r"trial evidence.*interoperable JSON range"):
-        runtime.finalize_engine("pass", None)
+        runtime.finalize_engine({"kind": "passed"})
 
     assert not engine.completed
 
@@ -2009,7 +2245,7 @@ def test_runtime_classifies_invalid_trace_evidence_as_case_failure(
     monkeypatch.setattr(runtime.trace, "to_dict", lambda: {"unsafe": b"bytes"})
 
     with pytest.raises(KensaCaseError, match="trial evidence must be JSON-serializable"):
-        runtime.finalize_engine("pass", None)
+        runtime.finalize_engine({"kind": "passed"})
 
     assert not engine.completed
 
@@ -2041,7 +2277,7 @@ def test_runtime_uses_and_validates_engine_terminal_failure() -> None:
         engine=cast(Any, StubEngine(EngineCompletion(verdict="fail", failure=terminal))),
     )
     runtime.run_case(kensa_case(id="terminal", input=None), lambda: "ok")
-    assert runtime.finalize_engine("pass", None) == (
+    assert runtime.finalize_engine({"kind": "passed"}) == (
         "fail",
         TrialFailure.model_validate(terminal),
     )
@@ -2064,5 +2300,5 @@ def test_runtime_uses_and_validates_engine_terminal_failure() -> None:
     )
     invalid_runtime.run_case(kensa_case(id="terminal", input=None), lambda: "ok")
     with pytest.raises(KensaEngineError, match="invalid terminal failure") as exc_info:
-        invalid_runtime.finalize_engine("pass", None)
+        invalid_runtime.finalize_engine({"kind": "passed"})
     assert exc_info.value.code == "protocol"

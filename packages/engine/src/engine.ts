@@ -1,6 +1,7 @@
 import {
   buildRunResult,
   cancelCase,
+  classifyRuntimeOutcome,
   completeCaseWithJudges,
   conversationAction,
   ConversationTransitionError,
@@ -205,9 +206,10 @@ export class KensaEngine {
       }
       case "check": {
         const state = this.#awaitingCheck(request.evaluation_id);
+        const runtime = classifyRuntimeOutcome(request.runtime_outcome);
         const complete = completeCaseWithJudges(
           state,
-          request.checks,
+          [runtime.check],
           request.judges,
         );
         return {
@@ -230,6 +232,14 @@ export class KensaEngine {
           },
         };
       }
+      case "classify_runtime_outcome":
+        return {
+          response: {
+            type: "runtime_outcome",
+            result: classifyRuntimeOutcome(request.outcome),
+          },
+          commit: () => {},
+        };
       case "start_conversation": {
         if (this.#conversations.has(request.conversation_id)) {
           throw new ConversationTransitionError(

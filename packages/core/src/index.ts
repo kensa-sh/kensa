@@ -1,6 +1,7 @@
 export {
   cancelCase,
   checkCase,
+  classifyRuntimeOutcome,
   completeCase,
   checkOutcomes,
   EvaluationTransitionError,
@@ -12,6 +13,7 @@ export {
   parseChecks,
   parseFailure,
   parseObservation,
+  parseRuntimeClassification,
   startCase,
   type AwaitingCheck,
   type AwaitingObservation,
@@ -25,6 +27,8 @@ export {
   type EvaluationState,
   type EvaluationVerdict,
   type MultiCheckComplete,
+  type RuntimeClassification,
+  type RuntimeOutcome,
 } from "./evaluation.js";
 export {
   completeCaseWithJudges,

@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -51,21 +52,17 @@ def kensa_run(case):
 
 
 @pytest.mark.parametrize(
-    ("operation", "category"),
+    "operation",
     [
-        (
-            ActiveOperation(
-                "kensa.conversation.respond",
-                {"kensa.conversation.source": "simulator"},
-            ),
-            "simulator",
+        ActiveOperation(
+            "kensa.conversation.respond",
+            {"kensa.conversation.source": "simulator"},
         ),
-        (ActiveOperation("judge"), "judge"),
+        ActiveOperation("judge"),
     ],
 )
-def test_watchdog_timeout_uses_active_operation_provenance(
+def test_watchdog_timeout_reports_active_operation_facts(
     operation: ActiveOperation,
-    category: str,
 ) -> None:
     active = ActiveTrial(
         nodeid="test.py::test_case[trial1]",
@@ -79,15 +76,114 @@ def test_watchdog_timeout_uses_active_operation_provenance(
         active_operation=operation,
     )
 
-    failure = watchdog._timeout_failure(active, "timed out")
+    outcome = watchdog._timeout_outcome(active, "timed out")
 
-    assert failure.category == category
-    assert failure.kind == "timeout"
-    assert failure.evidence == {
+    assert outcome == {
+        "kind": "timeout",
+        "message": "timed out",
         "timeout_s": 1,
         "phase": "call",
         "active_operation": operation.to_dict(),
     }
+
+
+def test_watchdog_rejects_timeout_classification_without_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = ActiveTrial(
+        nodeid="test.py::test_case[trial1]",
+        group_id="test.py::test_case",
+        case_id="case",
+        trial_index=1,
+        configured_trials=1,
+        timeout_s=1,
+        started_monotonic_ns=1,
+        phase="call",
+    )
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "result.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=1,
+    )
+
+    class Engine:
+        def __enter__(self) -> Engine:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> Any:
+            del outcome
+            return SimpleNamespace(failure=None)
+
+    monkeypatch.setattr(watchdog, "load_run_result", lambda _: SimpleNamespace(trials=[]))
+    monkeypatch.setattr(watchdog, "EngineClient", Engine)
+
+    with pytest.raises(RuntimeError, match="without failure provenance"):
+        watchdog._record_timeout(control, active, duration_ms=1000)
+
+
+def test_watchdog_reuses_engine_for_timeout_classification_and_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = ActiveTrial(
+        nodeid="test.py::test_case[trial1]",
+        group_id="test.py::test_case",
+        case_id="case",
+        trial_index=1,
+        configured_trials=1,
+        timeout_s=1,
+        started_monotonic_ns=1,
+        phase="call",
+    )
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "result.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=1,
+    )
+    constructions: list[None] = []
+    requests: list[str] = []
+
+    class Engine:
+        def __init__(self) -> None:
+            constructions.append(None)
+
+        def __enter__(self) -> Engine:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> Any:
+            requests.append(outcome["kind"])
+            return SimpleNamespace(
+                failure={
+                    "category": "agent",
+                    "kind": "timeout",
+                    "message": "timed out",
+                    "evidence": {"timeout_s": 1, "phase": "call"},
+                }
+            )
+
+        def build_run(self, **kwargs: Any) -> dict[str, Any]:
+            requests.append("build_run")
+            assert kwargs["complete"] is False
+            return {}
+
+    monkeypatch.setattr(watchdog, "load_run_result", lambda _: SimpleNamespace(trials=[]))
+    monkeypatch.setattr(watchdog, "EngineClient", Engine)
+    monkeypatch.setattr(watchdog, "write_run_artifacts", lambda **_: [])
+
+    result = watchdog._record_timeout(control, active, duration_ms=1000)
+
+    assert result.case_id == "case"
+    assert len(constructions) == 1
+    assert requests == ["timeout", "build_run"]
 
 
 @pytest.mark.parametrize("phase", ["setup", "call", "teardown"])

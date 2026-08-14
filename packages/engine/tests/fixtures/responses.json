@@ -14,6 +14,32 @@
     "action": "evaluate_check",
     "case_id": "case-1"
   },
+  "runtime_outcome": {
+    "type": "runtime_outcome",
+    "result": {
+      "verdict": "fail",
+      "failure": {
+        "category": "agent",
+        "kind": "assertion",
+        "message": "expected true",
+        "evidence": {
+          "exception_type": "AssertionError"
+        }
+      },
+      "check": {
+        "id": "pytest",
+        "outcome": "unsatisfied",
+        "failure": {
+          "category": "agent",
+          "kind": "assertion",
+          "message": "expected true",
+          "evidence": {
+            "exception_type": "AssertionError"
+          }
+        }
+      }
+    }
+  },
   "conversation_action": {
     "type": "conversation_action",
     "conversation_id": "conversation-1",
