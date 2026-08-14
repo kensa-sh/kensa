@@ -32,6 +32,7 @@ from kensa.target_command import (
 )
 
 _ResponseT = TypeVar("_ResponseT", bound=BaseModel)
+_STDERR_TAIL_BYTES = 65_536
 
 
 def _reject_json_constant(value: str) -> None:
@@ -68,6 +69,7 @@ class TargetCommandSession:
         self._request_sequence = 0
         self._last_completed_operation = "none"
         self._opened = False
+        self._failed = False
         self._closed = False
 
     def open(self, case: KensaCase) -> None:
@@ -97,6 +99,8 @@ class TargetCommandSession:
     def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
         if not self._opened or self._closed:
             raise RuntimeError("target command session is not active")
+        if self._failed:
+            raise RuntimeError("target command session cannot continue after a fatal error")
         try:
             response = self._exchange(
                 "turn",
@@ -124,6 +128,7 @@ class TargetCommandSession:
         if self._process is None:
             self._close_resources()
             return
+        deadline = time.monotonic() + self._timeout_s
         failure: KensaEvalError | None = None
         try:
             if self._opened:
@@ -131,15 +136,21 @@ class TargetCommandSession:
                     "close_session",
                     {"type": "close_session", "session_id": self._session_id},
                     _SessionClosedResponse,
+                    deadline=deadline,
                 )
                 self._opened = False
-            self._exchange("shutdown", {"type": "shutdown"}, _ShutdownResponse)
+            self._exchange(
+                "shutdown",
+                {"type": "shutdown"},
+                _ShutdownResponse,
+                deadline=deadline,
+            )
             self._close_stdin()
-            self._wait_for_exit()
+            self._wait_for_exit(deadline)
         except KensaEvalError as error:
             failure = error
         finally:
-            self._terminate()
+            self._terminate(deadline)
             self._annotate(failure)
             self._close_resources()
         if failure is not None:
@@ -176,7 +187,12 @@ class TargetCommandSession:
         operation: str,
         payload: dict[str, Any],
         response_type: type[_ResponseT],
+        *,
+        deadline: float | None = None,
     ) -> _ResponseT:
+        operation_deadline = (
+            deadline if deadline is not None else time.monotonic() + self._timeout_s
+        )
         self._request_sequence += 1
         request_id = f"request-{self._request_sequence}"
         request_payload = {**payload, "request_id": request_id}
@@ -192,8 +208,8 @@ class TargetCommandSession:
                 category="harness",
                 details={"exception_type": type(exc).__name__},
             ) from exc
-        self._write(frame + b"\n", operation)
-        raw = self._read(operation)
+        self._write(frame + b"\n", operation, operation_deadline)
+        raw = self._read(operation, operation_deadline)
         try:
             _validate_standard_json(raw)
             response = _RESPONSE_ADAPTER.validate_json(raw)
@@ -205,6 +221,8 @@ class TargetCommandSession:
             raise self._protocol_failure(operation, "target response request_id did not match")
         if isinstance(response, _ErrorResponse):
             self._last_completed_operation = operation
+            if response.fatal:
+                self._failed = True
             if operation == "turn" and response.code == "target_turn_failed":
                 raise _TargetResponderFailure("target responder failed")
             kind = (
@@ -228,10 +246,9 @@ class TargetCommandSession:
         self._last_completed_operation = operation
         return response
 
-    def _write(self, payload: bytes, operation: str) -> None:
+    def _write(self, payload: bytes, operation: str, deadline: float) -> None:
         process = self._require_process()
         stdin = cast(BinaryIO, process.stdin)
-        deadline = time.monotonic() + self._timeout_s
         offset = 0
         with selectors.DefaultSelector() as selector:
             selector.register(stdin, selectors.EVENT_WRITE)
@@ -249,43 +266,45 @@ class TargetCommandSession:
                     raise self._exit_failure(operation)
                 offset += written
 
-    def _read(self, operation: str) -> str:
+    def _read(self, operation: str, deadline: float) -> str:
         process = self._require_process()
         stdout = cast(BinaryIO, process.stdout)
-        deadline = time.monotonic() + self._timeout_s
-        while True:
-            newline = self._stdout_buffer.find(b"\n")
-            if newline >= 0:
-                frame = bytes(self._stdout_buffer[:newline])
-                del self._stdout_buffer[: newline + 1]
-                try:
-                    return frame.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise self._protocol_failure(
-                        operation, "target returned non-UTF-8 protocol output"
-                    ) from exc
-            remaining = deadline - time.monotonic()
-            with selectors.DefaultSelector() as selector:
-                selector.register(stdout, selectors.EVENT_READ)
+        with selectors.DefaultSelector() as selector:
+            selector.register(stdout, selectors.EVENT_READ)
+            while True:
+                newline = self._stdout_buffer.find(b"\n")
+                if newline >= 0:
+                    frame = bytes(self._stdout_buffer[:newline])
+                    del self._stdout_buffer[: newline + 1]
+                    try:
+                        return frame.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise self._protocol_failure(
+                            operation, "target returned non-UTF-8 protocol output"
+                        ) from exc
+                remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     raise self._timeout_failure(operation, "response")
-            try:
-                chunk = os.read(stdout.fileno(), 65_536)
-            except BlockingIOError:
-                continue
-            if chunk:
-                self._stdout_buffer.extend(chunk)
-                continue
-            if self._stdout_buffer:
-                raise self._protocol_failure(
-                    operation, "target ended a protocol frame without a newline"
-                )
-            raise self._exit_failure(operation)
+                try:
+                    chunk = os.read(stdout.fileno(), 65_536)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    self._stdout_buffer.extend(chunk)
+                    continue
+                if self._stdout_buffer:
+                    raise self._protocol_failure(
+                        operation, "target ended a protocol frame without a newline"
+                    )
+                raise self._exit_failure(operation)
 
-    def _wait_for_exit(self) -> None:
+    def _wait_for_exit(self, deadline: float) -> None:
         process = self._require_process()
+        remaining = deadline - time.monotonic()
         try:
-            returncode = process.wait(timeout=self._timeout_s)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, 0)
+            returncode = process.wait(timeout=remaining)
         except subprocess.TimeoutExpired as exc:
             raise self._timeout_failure("shutdown", "process exit") from exc
         if returncode != 0:
@@ -311,13 +330,19 @@ class TargetCommandSession:
         if self._process is not None and self._process.stdin is not None:
             self._process.stdin.close()
 
-    def _terminate(self) -> None:
+    def _terminate(self, deadline: float | None = None) -> None:
         process = self._process
         if process is None or process.poll() is not None:
             return
+        termination_deadline = (
+            deadline if deadline is not None else time.monotonic() + self._timeout_s
+        )
         process.terminate()
+        remaining = termination_deadline - time.monotonic()
         try:
-            process.wait(timeout=self._timeout_s)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, 0)
+            process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
@@ -344,9 +369,20 @@ class TargetCommandSession:
             return
         self._stderr.flush()
         size = os.fstat(self._stderr.fileno()).st_size
-        stderr = os.pread(self._stderr.fileno(), size, 0).decode("utf-8", errors="replace").strip()
+        captured = min(size, _STDERR_TAIL_BYTES)
+        offset = size - captured
+        stderr = (
+            os.pread(self._stderr.fileno(), captured, offset)
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
         if stderr:
-            error.add_note(f"Target stderr:\n{stderr}")
+            prefix = (
+                f"Target stderr truncated to last {_STDERR_TAIL_BYTES} bytes:\n"
+                if offset
+                else "Target stderr:\n"
+            )
+            error.add_note(prefix + stderr)
 
     def _timeout_failure(self, operation: str, boundary: str) -> KensaEvalError:
         return self._failure(

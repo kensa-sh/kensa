@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import tomllib
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import replace
@@ -60,6 +61,7 @@ _EACH_DIST_ERROR = (
     "on every worker. Use load or worksteal distribution."
 )
 _TARGET_FIXTURE_PLUGIN = "_kensa_target_fixture"
+_TARGET_CONFIG_KEYS = frozenset({"target_command", "target_timeout_s"})
 
 
 def _exception_path(error: BaseException) -> list[BaseException]:
@@ -357,18 +359,35 @@ class _ConfiguredTargetFixture:
 
 def _register_target_fixture(config: pytest.Config) -> None:
     root = Path(str(config.rootpath))
+    pyproject = find_pyproject(root)
+    if pyproject is None or not _declares_target_configuration(pyproject):
+        return
     try:
         project = read_project_config(root)
     except KensaConfigError as exc:
         raise pytest.UsageError(str(exc)) from exc
     if project.target_command is None or config.pluginmanager.hasplugin(_TARGET_FIXTURE_PLUGIN):
         return
-    pyproject = find_pyproject(root)
-    cwd = pyproject.parent if pyproject is not None else root
     config.pluginmanager.register(
-        _ConfiguredTargetFixture(project.target_command, project.target_timeout_s, cwd),
+        _ConfiguredTargetFixture(
+            project.target_command,
+            project.target_timeout_s,
+            pyproject.parent,
+        ),
         _TARGET_FIXTURE_PLUGIN,
     )
+
+
+def _declares_target_configuration(pyproject: Path) -> bool:
+    try:
+        data = tomllib.loads(pyproject.read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return False
+    kensa = tool.get("kensa")
+    return isinstance(kensa, dict) and not _TARGET_CONFIG_KEYS.isdisjoint(kensa)
 
 
 def _target_case(request: pytest.FixtureRequest) -> KensaCase:

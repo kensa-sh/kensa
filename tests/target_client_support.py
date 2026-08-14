@@ -235,8 +235,11 @@ def _fault_script(path: Path) -> Path:
             )
             sys.stdout.flush()
             time.sleep(60)
-        elif behavior == "turn_error":
-            sys.stderr.write("responder private diagnostic\n")
+        elif behavior in {"turn_error", "turn_error_large_stderr"}:
+            if behavior == "turn_error_large_stderr":
+                sys.stderr.write("stderr-head\n" + "x" * 70_000 + "\nstderr-tail\n")
+            else:
+                sys.stderr.write("responder private diagnostic\n")
             sys.stderr.flush()
             write({
                 "type": "error",

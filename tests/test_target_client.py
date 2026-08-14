@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from target_client_support import _fault_script, _host_script, _session
@@ -121,10 +122,82 @@ def test_turn_transport_and_target_failures_are_not_retried(tmp_path: Path) -> N
     with pytest.raises(RuntimeError, match="target responder failed") as responder:
         declared.respond(({"role": "user", "content": "hello"},))
     assert "private diagnostic" in "\n".join(getattr(responder.value, "__notes__", []))
+    request_sequence = declared._request_sequence
+    with pytest.raises(RuntimeError, match="cannot continue after a fatal error"):
+        declared.respond(({"role": "user", "content": "retry"},))
+    assert declared._request_sequence == request_sequence
     process = declared._process
     declared.close()
     assert process is not None
     assert process.poll() == 0
+
+
+def test_target_stderr_diagnostic_is_bounded_to_its_tail(tmp_path: Path) -> None:
+    script = _fault_script(tmp_path / "fault.py")
+    session = _session(script, "turn_error_large_stderr")
+    session.open(kensa_case(id="case", input="hello"))
+
+    with pytest.raises(RuntimeError, match="target responder failed") as raised:
+        session.respond(({"role": "user", "content": "hello"},))
+
+    notes = "\n".join(getattr(raised.value, "__notes__", []))
+    assert "truncated to last 65536 bytes" in notes
+    assert "stderr-tail" in notes
+    assert "stderr-head" not in notes
+    assert len(notes.encode()) < 66_000
+    session.close()
+
+
+def test_close_uses_one_deadline_for_all_teardown_steps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = TargetCommandSession(("unused",), timeout_s=1.0, cwd=tmp_path)
+    session._process = cast(Any, object())
+    session._opened = True
+    deadlines: list[float | None] = []
+
+    def exchange(
+        operation: str,
+        payload: dict[str, Any],
+        response_type: type[Any],
+        *,
+        deadline: float | None = None,
+    ) -> Any:
+        deadlines.append(deadline)
+        return object()
+
+    monkeypatch.setattr(session, "_exchange", exchange)
+    monkeypatch.setattr(session, "_close_stdin", lambda: None)
+    monkeypatch.setattr(session, "_wait_for_exit", deadlines.append)
+    monkeypatch.setattr(session, "_terminate", deadlines.append)
+    monkeypatch.setattr(session, "_close_resources", lambda: None)
+
+    session.close()
+
+    assert len(deadlines) == 4
+    assert deadlines[0] is not None
+    assert len(set(deadlines)) == 1
+
+
+def test_wait_for_exit_fails_immediately_after_teardown_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        args = ("target",)
+
+        def wait(self, timeout: float) -> int:
+            raise AssertionError(f"unexpected wait with timeout {timeout}")
+
+    session = TargetCommandSession(("unused",), timeout_s=1.0, cwd=tmp_path)
+    session._process = cast(Any, Process())
+    monkeypatch.setattr("kensa.target_client.time.monotonic", lambda: 2.0)
+
+    with pytest.raises(KensaEvalError, match="process exit") as raised:
+        session._wait_for_exit(1.0)
+
+    assert raised.value.failure.kind == "target_timeout"
 
 
 @pytest.mark.parametrize("behavior", ["output_nan", "output_infinity", "output_overflow"])
