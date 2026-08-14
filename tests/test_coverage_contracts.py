@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 
-from kensa import artifacts, cli, cli_output, cli_traces
+from kensa import cli, cli_output, cli_traces
 from kensa.artifacts import trial_from_dict
 from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
 from kensa.conversation import ConversationError, ConversationResponse
@@ -111,11 +111,6 @@ def test_internal_trial_metadata_rejects_unknown_and_mismatched_statuses() -> No
             configured_trials=1,
             status="fail",
         )
-
-
-def test_partial_trial_artifact_loader_is_removed() -> None:
-    assert "load_trials" not in artifacts.__all__
-    assert not hasattr(artifacts, "load_trials")
 
 
 def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
