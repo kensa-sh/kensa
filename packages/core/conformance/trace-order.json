@@ -1,0 +1,140 @@
+{
+  "name": "equal and missing span timestamps",
+  "expected_order": ["span-a", "span-b"],
+  "forward": {
+    "schema_version": "kensa.trace_view.v2",
+    "id": "trace_equal_timestamps",
+    "name": "support agent",
+    "source": {
+      "provider": "local",
+      "import_run_id": "import-forward",
+      "imported_at": "2026-08-11T00:00:00Z"
+    },
+    "started_at_unix_nano": null,
+    "ended_at_unix_nano": null,
+    "duration_ms": 0,
+    "status": "unknown",
+    "input": null,
+    "output": null,
+    "spans": [
+      {
+        "id": "span-a",
+        "trace_id": "trace_equal_timestamps",
+        "parent_id": null,
+        "name": "first",
+        "kind": "span",
+        "tool_name": null,
+        "started_at_unix_nano": null,
+        "ended_at_unix_nano": null,
+        "duration_ms": 0,
+        "status": "unknown",
+        "status_message": null,
+        "input": null,
+        "output": null,
+        "usage": {
+          "model_provider": null,
+          "model": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "total_tokens": null,
+          "cache_read_input_tokens": null,
+          "cache_creation_input_tokens": null,
+          "cost_usd": null
+        }
+      },
+      {
+        "id": "span-b",
+        "trace_id": "trace_equal_timestamps",
+        "parent_id": null,
+        "name": "second",
+        "kind": "span",
+        "tool_name": null,
+        "started_at_unix_nano": null,
+        "ended_at_unix_nano": null,
+        "duration_ms": 0,
+        "status": "unknown",
+        "status_message": null,
+        "input": null,
+        "output": null,
+        "usage": {
+          "model_provider": null,
+          "model": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "total_tokens": null,
+          "cache_read_input_tokens": null,
+          "cache_creation_input_tokens": null,
+          "cost_usd": null
+        }
+      }
+    ]
+  },
+  "reversed": {
+    "schema_version": "kensa.trace_view.v2",
+    "id": "trace_equal_timestamps",
+    "name": "support agent",
+    "source": {
+      "provider": "local",
+      "import_run_id": "import-reversed",
+      "imported_at": "2026-08-12T00:00:00Z"
+    },
+    "started_at_unix_nano": null,
+    "ended_at_unix_nano": null,
+    "duration_ms": 0,
+    "status": "unknown",
+    "input": null,
+    "output": null,
+    "spans": [
+      {
+        "id": "span-b",
+        "trace_id": "trace_equal_timestamps",
+        "parent_id": null,
+        "name": "second",
+        "kind": "span",
+        "tool_name": null,
+        "started_at_unix_nano": null,
+        "ended_at_unix_nano": null,
+        "duration_ms": 0,
+        "status": "unknown",
+        "status_message": null,
+        "input": null,
+        "output": null,
+        "usage": {
+          "model_provider": null,
+          "model": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "total_tokens": null,
+          "cache_read_input_tokens": null,
+          "cache_creation_input_tokens": null,
+          "cost_usd": null
+        }
+      },
+      {
+        "id": "span-a",
+        "trace_id": "trace_equal_timestamps",
+        "parent_id": null,
+        "name": "first",
+        "kind": "span",
+        "tool_name": null,
+        "started_at_unix_nano": null,
+        "ended_at_unix_nano": null,
+        "duration_ms": 0,
+        "status": "unknown",
+        "status_message": null,
+        "input": null,
+        "output": null,
+        "usage": {
+          "model_provider": null,
+          "model": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "total_tokens": null,
+          "cache_read_input_tokens": null,
+          "cache_creation_input_tokens": null,
+          "cost_usd": null
+        }
+      }
+    ]
+  }
+}

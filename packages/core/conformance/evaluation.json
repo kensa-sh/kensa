@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "name": "recorded-null-output-passes",
+      "case": { "id": "null-output", "input": null, "metadata": {} },
+      "observation": {
+        "output": null,
+        "output_recorded": true,
+        "trace": {
+          "spans": [],
+          "agent_runs": [],
+          "tools": [],
+          "tool_calls": [],
+          "incomplete": false,
+          "incomplete_reason": null,
+          "duration_ms": 0,
+          "cost_usd": null,
+          "known_cost_usd": null,
+          "cost_available": false,
+          "llm_turns": 0
+        },
+        "failure": null
+      },
+      "check": { "id": "pytest", "outcome": "satisfied", "failure": null },
+      "actions": ["invoke_agent", "evaluate_check", null],
+      "terminal": { "phase": "complete", "verdict": "pass", "failure": null }
+    },
+    {
+      "name": "agent-failure-is-terminal-error",
+      "case": {
+        "id": "agent-error",
+        "input": { "prompt": "hello" },
+        "metadata": { "constructor": "preserved" }
+      },
+      "observation": {
+        "output": null,
+        "output_recorded": false,
+        "trace": {
+          "spans": [],
+          "agent_runs": [],
+          "tools": [],
+          "tool_calls": [],
+          "incomplete": true,
+          "incomplete_reason": "agent raised",
+          "duration_ms": 2,
+          "cost_usd": null,
+          "known_cost_usd": 0.01,
+          "cost_available": false,
+          "llm_turns": 1
+        },
+        "failure": {
+          "category": "agent",
+          "kind": "exception",
+          "message": "agent raised",
+          "evidence": { "type": "RuntimeError" }
+        }
+      },
+      "check": {
+        "id": "pytest",
+        "outcome": "error",
+        "failure": {
+          "category": "agent",
+          "kind": "exception",
+          "message": "agent raised",
+          "evidence": { "type": "RuntimeError" }
+        }
+      },
+      "actions": ["invoke_agent", "evaluate_check", null],
+      "terminal": {
+        "phase": "complete",
+        "verdict": "error",
+        "failure": {
+          "category": "agent",
+          "kind": "exception",
+          "message": "agent raised",
+          "evidence": { "type": "RuntimeError" }
+        }
+      }
+    }
+  ],
+  "cancelled": {
+    "name": "observed-case-retains-evidence-on-cancel",
+    "case": { "id": "cancelled", "input": "hello", "metadata": {} },
+    "observation": {
+      "output": "partial",
+      "output_recorded": true,
+      "trace": {
+        "spans": [],
+        "agent_runs": [],
+        "tools": [],
+        "tool_calls": [],
+        "incomplete": false,
+        "incomplete_reason": null,
+        "duration_ms": 1,
+        "cost_usd": null,
+        "known_cost_usd": null,
+        "cost_available": false,
+        "llm_turns": 0
+      },
+      "failure": null
+    },
+    "reason": "worker interrupted",
+    "terminal": {
+      "phase": "cancelled",
+      "verdict": "error",
+      "failure": {
+        "category": "harness",
+        "kind": "cancelled",
+        "message": "worker interrupted",
+        "evidence": {}
+      }
+    }
+  },
+  "invalid": [
+    {
+      "name": "unknown-case-field",
+      "parser": "case",
+      "input": { "id": "case", "input": null, "metadata": {}, "extra": true },
+      "issue": { "code": "unknown_field", "path": [] }
+    },
+    {
+      "name": "blank-case-id",
+      "parser": "case",
+      "input": { "id": " ", "input": null, "metadata": {} },
+      "issue": { "code": "minimum", "path": ["id"] }
+    },
+    {
+      "name": "contradictory-check-failure",
+      "parser": "check",
+      "input": {
+        "id": "pytest",
+        "outcome": "satisfied",
+        "failure": {
+          "category": "agent",
+          "kind": "assertion",
+          "message": "failed",
+          "evidence": {}
+        }
+      },
+      "issue": { "code": "constraint", "path": ["failure"] }
+    }
+  ]
+}
