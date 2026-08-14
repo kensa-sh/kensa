@@ -47,7 +47,7 @@ If your evals call `judge(...)`, add the provider secret and (optionally) pin th
 - run: uv run kensa eval
   env:
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-    KENSA_JUDGE_MODEL: gpt-5.4-mini
+    KENSA_JUDGE_MODEL: gpt-5.6-luna
 ```
 
 To keep judge-bearing evals green without a live model, force a deterministic verdict instead:
