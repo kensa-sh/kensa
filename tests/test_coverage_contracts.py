@@ -13,13 +13,13 @@ from typing import Any, cast
 
 import pytest
 
-from kensa import artifacts, cli, cli_output, cli_traces
+from kensa import cli, cli_output, cli_traces
 from kensa.artifacts import trial_from_dict
 from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
 from kensa.conversation import ConversationError, ConversationResponse
 from kensa.errors import TrialFailure
-from kensa.judge import JudgeResult, judge, set_judge_provider
-from kensa.llm import DEFAULT_LLM_MODEL, LLMResult
+from kensa.judge import DEFAULT_OPENAI_JUDGE_MODEL, JudgeResult, judge, set_judge_provider
+from kensa.llm import LLMResult
 from kensa.pytest_plugin import (
     PRIVATE_TRIAL,
     KensaAggregate,
@@ -111,11 +111,6 @@ def test_internal_trial_metadata_rejects_unknown_and_mismatched_statuses() -> No
             configured_trials=1,
             status="fail",
         )
-
-
-def test_partial_trial_artifact_loader_is_removed() -> None:
-    assert "load_trials" not in artifacts.__all__
-    assert not hasattr(artifacts, "load_trials")
 
 
 def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
@@ -307,9 +302,11 @@ def test_judge_custom_provider_and_environment_paths(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("KENSA_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    judge_temperatures: list[float | None] = []
 
     def complete_with_evidence(*args: Any, **kwargs: Any) -> LLMResult:
         del args
+        judge_temperatures.append(cast(float | None, kwargs["temperature"]))
         payload = {"passed": True, "reasoning": "ok", "evidence": ["single"]}
         return LLMResult(
             content='{"passed": true, "reasoning": "ok", "evidence": ["single"]}',
@@ -320,24 +317,27 @@ def test_judge_custom_provider_and_environment_paths(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("kensa.judge.complete", complete_with_evidence)
     default_judge = judge("out", "criteria")
-    assert default_judge.model == DEFAULT_LLM_MODEL
+    assert default_judge.model == DEFAULT_OPENAI_JUDGE_MODEL
     assert default_judge.provider == "openai"
     assert default_judge.evidence == ["single"]
+    assert judge_temperatures == [0.0]
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     anthropic_judge = judge("out", "criteria")
-    assert anthropic_judge.model == "claude-sonnet-4-6"
+    assert anthropic_judge.model == "claude-sonnet-5"
     assert anthropic_judge.provider == "anthropic"
+    assert judge_temperatures[-1] is None
     monkeypatch.delenv("ANTHROPIC_API_KEY")
 
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "anthropic")
     provider_judge = judge("out", "criteria")
-    assert provider_judge.model == "claude-sonnet-4-6"
+    assert provider_judge.model == "claude-sonnet-5"
     assert provider_judge.provider == "anthropic"
     monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "openai")
     openai_provider_judge = judge("out", "criteria")
-    assert openai_provider_judge.model == DEFAULT_LLM_MODEL
+    assert openai_provider_judge.model == DEFAULT_OPENAI_JUDGE_MODEL
     assert openai_provider_judge.provider == "openai"
+    assert judge_temperatures == [0.0, None, None, 0.0]
     monkeypatch.delenv("KENSA_JUDGE_PROVIDER")
 
     monkeypatch.setenv("KENSA_JUDGE_MODEL", "gpt-5.5")

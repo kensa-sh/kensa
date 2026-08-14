@@ -21,7 +21,9 @@ StructuredResponseFormat = type[BaseModel]
 _MODEL_PROVIDERS: dict[LLMModel, LLMProvider] = {
     LLMModel.GPT_5_4_MINI: LLMProvider.OPENAI,
     LLMModel.GPT_5_5: LLMProvider.OPENAI,
+    LLMModel.GPT_5_6_LUNA: LLMProvider.OPENAI,
     LLMModel.CLAUDE_SONNET_4_6: LLMProvider.ANTHROPIC,
+    LLMModel.CLAUDE_SONNET_5: LLMProvider.ANTHROPIC,
     LLMModel.CLAUDE_OPUS_4_7: LLMProvider.ANTHROPIC,
 }
 

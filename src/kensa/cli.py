@@ -44,8 +44,7 @@ from kensa.constants import (
     TRACE_IMPORTS_DIR,
     WORKFLOW_TEXT,
 )
-from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
-from kensa.llm import DEFAULT_LLM_MODEL
+from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL, DEFAULT_OPENAI_JUDGE_MODEL
 from kensa.models import (
     AgentInstruction,
     EvidenceSource,
@@ -185,7 +184,7 @@ _JUDGE_API_KEY_ENVS: dict[_InitJudgeProvider, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
 }
 _JUDGE_DEFAULT_MODELS: dict[_InitJudgeProvider, str] = {
-    "openai": DEFAULT_LLM_MODEL,
+    "openai": DEFAULT_OPENAI_JUDGE_MODEL,
     "anthropic": DEFAULT_ANTHROPIC_JUDGE_MODEL,
 }
 _ENV_FILE_MANUAL_CHOICE = "__manual__"
