@@ -18,7 +18,7 @@ from pydantic import BaseModel, ValidationError
 from kensa.case import KensaCase, KensaMessage
 from kensa.conversation import ConversationResponse
 from kensa.errors import FailureCategory, KensaEvalError
-from kensa.target import attach_agent_run
+from kensa.target import AgentRunEvidence, attach_agent_run
 from kensa.target_command import (
     _REQUEST_ADAPTER,
     _RESPONSE_ADAPTER,
@@ -67,6 +67,7 @@ class TargetCommandSession:
         self._session_id = uuid4().hex
         self._request_sequence = 0
         self._last_completed_operation = "none"
+        self._last_evidence: AgentRunEvidence | None = None
         self._opened = False
         self._closed = False
 
@@ -113,9 +114,15 @@ class TargetCommandSession:
         except KensaEvalError as error:
             self._abort(error)
             raise
-        if response.evidence is not None:
-            attach_agent_run(response.evidence)
+        self._last_evidence = response.evidence
+        if self._last_evidence is not None:
+            attach_agent_run(self._last_evidence)
         return response.response
+
+    @property
+    def last_evidence(self) -> AgentRunEvidence | None:
+        """Return evidence from the most recent completed turn."""
+        return self._last_evidence
 
     def close(self) -> None:
         if self._closed:

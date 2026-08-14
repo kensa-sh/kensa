@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 import click
 from dotenv import load_dotenv
 
-from kensa import cli_inspect, cli_output, cli_traces, redact
+from kensa import cli_inspect, cli_output, cli_traces, redact, target_probe
 from kensa import config as kensa_config
 from kensa._smoke import is_smoke_aggregate
 from kensa.artifacts import write_run_artifacts
@@ -153,6 +153,11 @@ def kensa_run():
 _PERSISTENT_SMOKE_PATH = Path("tests/evals/test_kensa_smoke.py")
 _EVALS_NEXT_STEP = "Use kensa-evals to continue the Kensa lifecycle for this repo."
 _SMOKE_ONLY_WARNING = "Only the readiness smoke passed; evals readiness is missing."
+_TARGET_PROBE_WARNING = (
+    "Kensa doctor will invoke the configured target command with the supplied readiness case. "
+    "Use local, staging, mocked, or sandboxed dependencies unless live effects are explicitly "
+    "approved."
+)
 _DOTENV_ENV_VAR = "KENSA_DOTENV"
 _CONNECTION_SCHEMA_VERSION = "kensa.connection.v1"
 _DEFAULT_DOTENV_PATH = Path(".env.local")
@@ -481,14 +486,28 @@ def eval_command(
     is_flag=True,
     help="Warn instead of failing on suspicious harness authenticity patterns.",
 )
+@click.option(
+    "--target-case",
+    type=click.Path(path_type=Path),
+    help="JSON readiness case used to verify a configured target command.",
+)
+@click.option(
+    "--allow-live-target-effects",
+    is_flag=True,
+    help="Permit a verified target whose execution attestation declares live effects.",
+)
 def doctor(
     json_output: bool,
     allow_suspicious_harness: bool,
+    target_case: Path | None,
+    allow_live_target_effects: bool,
 ) -> None:
     """Check your setup."""
     args = SimpleNamespace(
         json=json_output,
         allow_suspicious_harness=allow_suspicious_harness,
+        target_case=target_case,
+        allow_live_target_effects=allow_live_target_effects,
     )
     raise click.exceptions.Exit(_cmd_doctor(args))
 
@@ -1204,7 +1223,18 @@ def _write_markdown_report(source: Path, destination: Path) -> None:
     destination.write_text("\n".join(lines) + "\n")
 
 
+def _doctor_will_probe_target(args: Any) -> bool:
+    if getattr(args, "target_case", None) is None:
+        return False
+    try:
+        return kensa_config.read_project_config().target_command is not None
+    except kensa_config.KensaConfigError:
+        return False
+
+
 def _cmd_doctor(args: Any) -> int:
+    if _doctor_will_probe_target(args):
+        cli_output.ERR_CONSOLE.print(_TARGET_PROBE_WARNING)
     result = _doctor_result(args)
     if bool(getattr(args, "json", False)):
         cli_output.print_json_envelope(
@@ -1220,6 +1250,7 @@ def _cmd_doctor(args: Any) -> int:
                 "harness_readiness": result["harness_readiness"],
                 "evals_readiness": result["evals_readiness"],
                 "smoke": result["smoke"],
+                "target": result["target"],
             },
             warnings=list(result["warnings"]),
             errors=list(result["problems"]),
@@ -1230,6 +1261,7 @@ def _cmd_doctor(args: Any) -> int:
     next_steps = list(result["next_steps"])
     cli_output.step("kensa doctor")
     _print_doctor_redaction(result["redaction"])
+    _print_doctor_target(result["target"])
     for warning in result["warnings"]:
         cli_output.item(f"warning: {warning}", ok=False)
     if result["problems"]:
@@ -1541,9 +1573,11 @@ def _name_tokens(name: str) -> tuple[str, ...]:
     return tuple(part for part in normalized.split("_") if part)
 
 
-def _doctor_redaction_report() -> dict[str, Any]:
+def _doctor_redaction_report(
+    project_config: KensaProjectConfig | None = None,
+) -> dict[str, Any]:
     missing = redact.missing_redaction_dependencies()
-    project_config = _read_project_config()
+    resolved_config = project_config if project_config is not None else _read_project_config()
     readiness: redact.RedactionReadiness | None = None
     readiness_error: str | None = None
     try:
@@ -1556,7 +1590,7 @@ def _doctor_redaction_report() -> dict[str, Any]:
         "ready": readiness_error is None and readiness is not None,
         "readiness": readiness.to_dict() if readiness is not None else None,
         "readiness_error": readiness_error,
-        "evidence_source": project_config.evidence_source,
+        "evidence_source": resolved_config.evidence_source,
         "unsafe_artifacts": unsafe_artifacts,
     }
 
@@ -1623,11 +1657,98 @@ def _print_doctor_redaction(report: dict[str, Any]) -> None:
         cli_output.item(f"Unsafe trace artifact (re-import required): {artifact}", ok=False)
 
 
+def _print_doctor_target(report: dict[str, Any]) -> None:
+    if not report["requested"]:
+        return
+    command = report["command"]
+    if command is None:
+        cli_output.item("Target command: missing", ok=False)
+    else:
+        cli_output.item(f"Target command: {json.dumps(command)}")
+    lifecycle = report["observed_lifecycle"]
+    if lifecycle:
+        cli_output.item("Observed target lifecycle: " + ", ".join(lifecycle))
+    attestation = report["attestation"]
+    if attestation is not None:
+        cli_output.item(
+            "Target-supplied attestation: "
+            f"revision={attestation['revision']}, "
+            f"environment={attestation['environment']}, effects={attestation['effects']}"
+        )
+    cli_output.item(
+        (
+            "Command target readiness: ready"
+            if report["ready"]
+            else "Command target readiness: failed"
+        ),
+        ok=bool(report["ready"]),
+    )
+
+
+def _target_probe_findings(
+    result: target_probe.TargetProbeResult,
+) -> tuple[list[str], list[str], list[str]]:
+    problems: list[str] = []
+    warnings: list[str] = []
+    next_steps: list[str] = []
+    if not result.requested:
+        return problems, warnings, next_steps
+    if result.attempted:
+        warnings.append(_TARGET_PROBE_WARNING)
+    if result.failure is not None:
+        problems.append(
+            f"Configured target verification failed at {result.failure.boundary}: "
+            f"{result.failure.message}"
+        )
+        next_steps.append(_target_probe_next_step(result.failure))
+    if result.cleanup_failure is not None:
+        warnings.append("Configured target cleanup also failed: " + result.cleanup_failure.message)
+        next_steps.append(_target_probe_next_step(result.cleanup_failure))
+    return problems, warnings, list(dict.fromkeys(next_steps))
+
+
+def _target_probe_next_step(failure: target_probe.TargetProbeFailure) -> str:
+    if failure.boundary == "configuration":
+        if failure.kind == "missing_case":
+            return "Pass --target-case PATH with a repository-owned JSON readiness case."
+        if failure.kind == "missing_command":
+            return "Configure [tool.kensa].target_command as a non-empty argument vector."
+        return "Fix [tool.kensa] and the readiness case, then rerun kensa doctor."
+    if failure.boundary == "startup":
+        return "Fix the configured command path and dependencies, then rerun kensa doctor."
+    if failure.boundary == "handshake":
+        return "Make the target complete the kensa.target.v1 handshake."
+    if failure.boundary == "session_open":
+        return "Make the target open one session for the supplied readiness case."
+    if failure.boundary == "turn":
+        return "Fix the target responder for the supplied readiness case."
+    if failure.boundary == "response":
+        return "Return one valid non-empty ConversationResponse from the readiness turn."
+    if failure.boundary == "evidence":
+        return (
+            "Return valid AgentRunEvidence with an execution attestation and completeness reason."
+        )
+    if failure.boundary == "effect_policy":
+        return (
+            "Use none, captured, or sandboxed effects, or explicitly pass "
+            "--allow-live-target-effects."
+        )
+    if failure.boundary == "cleanup":
+        return "Make target session close and process shutdown complete successfully once."
+    return "Increase target_timeout_s or fix the target operation reported in the diagnostic."
+
+
 def _doctor_result(args: Any) -> dict[str, Any]:
     problems: list[str] = []
-    warnings: list[str] = [_ENV_SAFETY_WARNING]
+    warnings: list[str] = []
     next_steps: list[str] = []
-    redaction_report = _doctor_redaction_report()
+    config_error: str | None = None
+    try:
+        project_config = kensa_config.read_project_config()
+    except kensa_config.KensaConfigError as exc:
+        project_config = KensaProjectConfig()
+        config_error = str(exc)
+    redaction_report = _doctor_redaction_report(project_config)
     redaction_problems, redaction_warnings, redaction_next_steps = _redaction_doctor_findings(
         redaction_report
     )
@@ -1656,9 +1777,31 @@ def _doctor_result(args: Any) -> dict[str, Any]:
             "or rerun kensa init from the subproject and remove the nested workflow."
         )
 
-    with cli_output.wait_status("Running Kensa smoke check"):
-        smoke = _run_persistent_smoke()
-    if smoke.returncode != 0:
+    pyproject = kensa_config.find_pyproject(Path.cwd())
+    target_result = target_probe.verify_configured_target(
+        project_config,
+        case_path=getattr(args, "target_case", None),
+        allow_live_effects=bool(getattr(args, "allow_live_target_effects", False)),
+        cwd=pyproject.parent if pyproject is not None else Path.cwd(),
+        config_error=config_error,
+    )
+    target_problems, target_warnings, target_next_steps = _target_probe_findings(target_result)
+    problems.extend(target_problems)
+    warnings.extend(target_warnings)
+    next_steps.extend(target_next_steps)
+
+    if target_result.requested:
+        smoke = subprocess.CompletedProcess(
+            args=["kensa", "doctor", "target"],
+            returncode=0 if target_result.ready else 1,
+            stdout="",
+            stderr="",
+        )
+    else:
+        warnings.insert(0, _ENV_SAFETY_WARNING)
+        with cli_output.wait_status("Running Kensa smoke check"):
+            smoke = _run_persistent_smoke()
+    if smoke.returncode != 0 and not target_result.requested:
         if not _persistent_smoke_path().exists():
             problems.append(
                 "Persistent smoke test missing: tests/evals/test_kensa_smoke.py. "
@@ -1681,12 +1824,12 @@ def _doctor_result(args: Any) -> dict[str, Any]:
             warnings.append(smoke.stdout.strip())
         if smoke.stderr:
             warnings.append(smoke.stderr.strip())
-    else:
+    elif smoke.returncode == 0:
         if not eval_readiness.evals_ready:
             warnings.append("Evals readiness also requires one passing domain-shaped Kensa eval.")
             next_steps.append(_EVALS_NEXT_STEP)
 
-    authenticity_warnings = _harness_authenticity_warnings()
+    authenticity_warnings = [] if target_result.requested else _harness_authenticity_warnings()
     if authenticity_warnings:
         if allow_suspicious_harness:
             warnings.extend(
@@ -1716,7 +1859,9 @@ def _doctor_result(args: Any) -> dict[str, Any]:
         "harness_authenticity_warnings": authenticity_warnings,
         "harness_readiness": {
             "ready": harness_ready,
-            "smoke_eval_count": 1 if smoke.returncode == 0 else 0,
+            "smoke_eval_count": (
+                0 if target_result.requested else 1 if smoke.returncode == 0 else 0
+            ),
         },
         "evals_readiness": {
             "ready": eval_readiness.evals_ready,
@@ -1727,6 +1872,7 @@ def _doctor_result(args: Any) -> dict[str, Any]:
             "stdout": smoke.stdout or "",
             "stderr": smoke.stderr or "",
         },
+        "target": target_result.to_dict(),
     }
 
 

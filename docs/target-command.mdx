@@ -97,6 +97,43 @@ A repository-defined `kensa_run` fixture overrides the configured command explic
 `target_command`, Kensa does not register the fixture and existing explicit-fixture behavior is
 unchanged.
 
+## Verify readiness
+
+Create a repository-owned JSON case that is safe to execute against the configured target:
+
+```json
+{
+  "id": "target-readiness",
+  "input": "Return the readiness response for this repository"
+}
+```
+
+Then run the behavioral doctor probe:
+
+```bash
+kensa doctor --target-case tests/evals/cases/target-readiness.json
+```
+
+Doctor states that it may invoke the configured model and dependencies before starting the probe.
+It starts one process, completes the protocol handshake, opens the supplied case, invokes one turn,
+requires a non-empty response and target-supplied execution attestation, checks the declared effect
+policy, and cleans up once. Configuration, startup, handshake, session open, turn, response,
+evidence, effect policy, cleanup, and timeout failures are reported separately.
+
+An attestation with `effects="live"` fails by default. Prefer `none`, `captured`, or `sandboxed`
+effects for readiness. If live effects are intentional and approved, opt in explicitly:
+
+```bash
+kensa doctor \
+  --target-case tests/evals/cases/target-readiness.json \
+  --allow-live-target-effects
+```
+
+Successful verification proves only the observed protocol lifecycle and the target-supplied
+attestation. It does not prove which constructor or internal implementation the command uses.
+Keep credentials in inherited environment variables rather than command arguments or readiness
+case data.
+
 ## Language-neutral artifacts
 
 - [JSON Schema v1](/protocol/target-command-v1.schema.json)
