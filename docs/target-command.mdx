@@ -61,9 +61,10 @@ stderr.
 | `close_session` | `session_closed` | Run optional session cleanup once |
 | `shutdown` | `shutdown` | End the process cleanly |
 
-Request IDs must be non-empty and unique within the process. Session IDs on turn and close frames
-must match the opened session. Unknown fields, invalid order, malformed messages, unsupported
-versions, history divergence, and non-JSON response values are rejected without invoking target
+Request IDs must be non-empty and unique within the process. One process accepts at most 65,536
+requests so duplicate detection remains bounded. Session IDs on turn and close frames must match
+the opened session. Unknown fields, invalid order, malformed messages, unsupported versions,
+history divergence, and non-JSON request or response values are rejected without invoking target
 code.
 
 Target exceptions are reported as `error` frames. The stable `code` identifies the failed boundary,
