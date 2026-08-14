@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import subprocess
@@ -139,16 +140,32 @@ def test_target_command_serves_one_case_aware_session_through_shutdown() -> None
 
 def test_async_target_factory_responder_and_cleanup_match_sync_wire_behavior() -> None:
     calls: list[str] = []
+    loops: list[asyncio.AbstractEventLoop] = []
 
     class Agent:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._release = asyncio.Event()
+            self._task = asyncio.create_task(self._release.wait())
+
         async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            loop = asyncio.get_running_loop()
+            loops.append(loop)
+            assert loop is self._loop
+            assert self._task.get_loop() is loop
             calls.append(f"respond:{len(messages)}")
             return ConversationResponse(content="async reply")
 
         async def close(self) -> None:
+            loop = asyncio.get_running_loop()
+            loops.append(loop)
+            assert loop is self._loop
+            self._release.set()
+            await self._task
             calls.append("close")
 
     async def open_session(case: KensaCase) -> Agent:
+        loops.append(asyncio.get_running_loop())
         calls.append(f"open:{case.id}")
         return Agent()
 
@@ -172,11 +189,20 @@ def test_async_target_factory_responder_and_cleanup_match_sync_wire_behavior() -
                 messages=[],
             ),
             _request(
-                type="close_session",
+                type="turn",
                 request_id="request-4",
                 session_id="session-1",
+                messages=[
+                    {"role": "assistant", "content": "async reply"},
+                    {"role": "user", "content": "again"},
+                ],
             ),
-            _request(type="shutdown", request_id="request-5"),
+            _request(
+                type="close_session",
+                request_id="request-5",
+                session_id="session-1",
+            ),
+            _request(type="shutdown", request_id="request-6"),
         ],
         open_session,
     )
@@ -186,6 +212,7 @@ def test_async_target_factory_responder_and_cleanup_match_sync_wire_behavior() -
         "handshake",
         "session_opened",
         "turn",
+        "turn",
         "session_closed",
         "shutdown",
     ]
@@ -194,7 +221,9 @@ def test_async_target_factory_responder_and_cleanup_match_sync_wire_behavior() -
         "output": None,
         "termination_reason": None,
     }
-    assert calls == ["open:async-case", "respond:0", "close"]
+    assert calls == ["open:async-case", "respond:0", "respond:2", "close"]
+    assert len({id(loop) for loop in loops}) == 1
+    assert loops[0].is_closed()
     assert stderr == ""
 
 
@@ -430,6 +459,12 @@ def test_protocol_rejects_remaining_invalid_states_and_message_shapes() -> None:
                 session_id="session",
             ),
             _request(
+                type="open_session",
+                request_id="open-after-close",
+                session_id="other-session",
+                case={"id": "other-case", "row": {}},
+            ),
+            _request(
                 type="close_session",
                 request_id="duplicate-close",
                 session_id="session",
@@ -459,6 +494,7 @@ def test_protocol_rejects_remaining_invalid_states_and_message_shapes() -> None:
         "invalid_request",
         "turn",
         "session_closed",
+        "invalid_state",
         "invalid_state",
         "shutdown",
     ]

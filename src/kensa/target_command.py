@@ -292,6 +292,7 @@ class _Host:
         self._session_id: str | None = None
         self._accepted_messages: list[dict[str, JsonValue]] = []
         self._request_ids: set[str] = set()
+        self._runner: asyncio.Runner | None = None
 
     def process(self, line: str) -> bool:
         request_id = _extract_request_id(line)
@@ -323,6 +324,7 @@ class _Host:
     def finish_eof(self) -> int:
         if self._session is not None:
             self._cleanup("target process reached EOF with an active session")
+        self._close_runner()
         self._diagnostic("target process reached EOF before shutdown")
         return 1
 
@@ -359,7 +361,7 @@ class _Host:
             return
         self._opened = True
         try:
-            session = _resolve(self._open_session(request.case.to_case()))
+            session = self._resolve(self._open_session(request.case.to_case()))
             if not callable(getattr(session, "respond", None)):
                 raise TypeError("opened session must provide respond(messages)")
         except Exception as exc:
@@ -409,7 +411,7 @@ class _Host:
             return
         try:
             session = cast(TargetSession, self._session)
-            value = _resolve(session.respond(cast(tuple[KensaMessage, ...], tuple(messages))))
+            value = self._resolve(session.respond(cast(tuple[KensaMessage, ...], tuple(messages))))
         except Exception as exc:
             self._failed = True
             self._diagnostic(f"target turn failed: {exc}")
@@ -477,6 +479,7 @@ class _Host:
                 "close the active session before shutdown",
             )
             return False
+        self._close_runner()
         self._write({"type": "shutdown", "request_id": request.request_id})
         return True
 
@@ -513,11 +516,24 @@ class _Host:
             self._diagnostic(f"{context}: {error}")
             return error
         try:
-            _resolve(close())
+            self._resolve(close())
         except Exception as exc:
             self._diagnostic(f"{context}: {exc}")
             return exc
         return None
+
+    def _resolve(self, value: _T | Awaitable[_T]) -> _T:
+        if not inspect.isawaitable(value):
+            return value
+        if self._runner is None:
+            self._runner = asyncio.Runner()
+        return self._runner.run(_await_value(cast(Awaitable[_T], value)))
+
+    def _close_runner(self) -> None:
+        if self._runner is None:
+            return
+        self._runner.close()
+        self._runner = None
 
     def _write_error(
         self,
@@ -614,12 +630,6 @@ def _turn_result(value: Any) -> TargetTurnResult:
 
 async def _await_value(value: Awaitable[_T]) -> _T:
     return await value
-
-
-def _resolve(value: _T | Awaitable[_T]) -> _T:
-    if inspect.isawaitable(value):
-        return asyncio.run(_await_value(cast(Awaitable[_T], value)))
-    return value
 
 
 def _validate_json(value: Any) -> None:
