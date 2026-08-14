@@ -17,5 +17,5 @@
 - [ ] `uv run ty check`
 - [ ] `uv run pytest -q`
 - [ ] `uv run python -m coverage run -m pytest -q && uv run python -m coverage report`
-- [ ] `uv build`
+- [ ] `node scripts/build-engine-wheel.mjs`
 - [ ] User-facing changes include matching `docs/` updates, or are not applicable

@@ -1,0 +1,107 @@
+{
+  "handshake": {
+    "type": "handshake",
+    "protocol_version": "kensa.engine.v1",
+    "engine_version": "__ENGINE_VERSION__"
+  },
+  "invoke_agent": {
+    "type": "action",
+    "action": "invoke_agent",
+    "case_id": "case-1"
+  },
+  "evaluate_check": {
+    "type": "action",
+    "action": "evaluate_check",
+    "case_id": "case-1"
+  },
+  "reset": {
+    "type": "reset",
+    "released": 1
+  },
+  "complete": {
+    "type": "result",
+    "evaluation": {
+      "phase": "complete",
+      "case_id": "case-1",
+      "verdict": "pass",
+      "output": "world",
+      "output_recorded": true,
+      "trace": {
+        "spans": [],
+        "agent_runs": [],
+        "tools": [],
+        "tool_calls": [],
+        "incomplete": false,
+        "incomplete_reason": null,
+        "duration_ms": 0,
+        "cost_usd": null,
+        "known_cost_usd": null,
+        "cost_available": false,
+        "llm_turns": 0
+      },
+      "failure": null,
+      "check_id": "pytest"
+    }
+  },
+  "cancelled": {
+    "type": "result",
+    "evaluation": {
+      "phase": "cancelled",
+      "case_id": "case-1",
+      "reason": "stopped",
+      "verdict": "error",
+      "observation": null,
+      "failure": {
+        "category": "harness",
+        "kind": "cancelled",
+        "message": "stopped",
+        "evidence": {}
+      }
+    }
+  },
+  "run_result": {
+    "type": "run_result",
+    "result": {
+      "schema_version": "kensa.result.v1",
+      "run_id": "run-1",
+      "complete": true,
+      "interruption": null,
+      "trials": [],
+      "aggregates": [],
+      "summary": {
+        "pass_k_curve": [],
+        "pass_k_cohorts": [],
+        "eligible_agent_trials": 0,
+        "error_counts": {
+          "agent": 0,
+          "configuration": 0,
+          "harness": 0,
+          "infrastructure": 0,
+          "judge": 0,
+          "simulator": 0,
+          "unknown": 0
+        },
+        "excluded_error_trials": 0,
+        "cost_latency": {
+          "latency_p50_ms": 0,
+          "latency_p95_ms": 0,
+          "latency_mean_ms": 0,
+          "total_cost_usd": null,
+          "known_cost_usd": 0,
+          "cost_per_pass_usd": null,
+          "mean_llm_turns": 0,
+          "cost_known_trials": 0,
+          "cost_relevant_trials": 0,
+          "cost_coverage": 0,
+          "has_cost": false,
+          "cost_complete": false,
+          "cost_partial": false
+        }
+      }
+    }
+  },
+  "trace_views": {
+    "type": "trace_views",
+    "traces": []
+  }
+}

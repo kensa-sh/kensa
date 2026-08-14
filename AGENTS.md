@@ -2,14 +2,15 @@
 
 ## Project Structure & Module Organization
 
-Kensa is a Python package under `src/kensa/`. Core pytest authoring APIs live in
-`src/kensa/pytest.py`, the pytest plugin in `src/kensa/pytest_plugin.py`, tracing in
-`src/kensa/tracing.py` and `src/kensa/runtime.py`, trace import helpers in
-`src/kensa/traces.py`, and CLI entrypoints in `src/kensa/cli.py`.
+Kensa's Python SDK is under `sdk/python/src/kensa/`. Core pytest authoring APIs live in
+`sdk/python/src/kensa/pytest.py`, the pytest plugin in `sdk/python/src/kensa/pytest_plugin.py`,
+tracing in `sdk/python/src/kensa/tracing.py` and `sdk/python/src/kensa/runtime.py`, trace import
+helpers in `sdk/python/src/kensa/traces.py`, and CLI entrypoints in
+`sdk/python/src/kensa/cli.py`.
 
-Tests live in `tests/`. Contributor, security, and release docs live in the repo root. GitHub
-templates and workflows live under `.github/`. User documentation lives in `docs/` and deploys
-through Mintlify.
+Python tests live in `sdk/python/tests/`. Contributor, security, and release docs live in the repo
+root. GitHub templates and workflows live under `.github/`. User documentation lives in `docs/`
+and deploys through Mintlify.
 
 ## Build, Test, and Development Commands
 
@@ -23,11 +24,11 @@ uv run python -m coverage report
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
-uv build
+node scripts/build-engine-wheel.mjs
 ```
 
-`pytest` runs the suite. Coverage is configured in `pyproject.toml` and must remain 100% for
-`src/kensa`. `ruff` handles linting and formatting. `ty` runs strict type checking.
+`pytest` runs the suite. Coverage is configured in the root `pyproject.toml` and must remain 100%
+for `sdk/python/src/kensa`. `ruff` handles linting and formatting. `ty` runs strict type checking.
 
 ## Coding Style & Naming Conventions
 
@@ -36,7 +37,7 @@ clear boundaries. Keep public API surface narrow: test authors should use `kensa
 process-level tracing should use `kensa.instrument()`.
 
 Prefer existing local patterns over new abstractions. Keep eval files constrained to
-`tests/evals/test_*.py`.
+Keep eval files constrained to `tests/evals/test_*.py`.
 
 ## Testing Guidelines
 

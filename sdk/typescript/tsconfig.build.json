@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "paths": {
+      "@kensa/core": ["packages/core/dist/index.d.ts"]
+    },
+    "rootDir": "src",
+    "types": []
+  },
+  "include": ["src"]
+}
