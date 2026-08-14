@@ -79,7 +79,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter kensa-engine build
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --group dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} python -m coverage run -m pytest -q -m "not live"
@@ -106,7 +115,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17
+          cache: pnpm
       - uses: astral-sh/setup-uv@v7
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter kensa-engine build
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
       - run: uv sync --group dev --all-packages --extra redaction
@@ -204,6 +222,8 @@ jobs:
       - run: mkdir -p dist/npm
       - run: pnpm --filter @kensa/core pack --pack-destination "$GITHUB_WORKSPACE/dist/npm"
       - run: pnpm --filter @kensa/sdk pack --pack-destination "$GITHUB_WORKSPACE/dist/npm"
+      - run: npm install --global npm@11.5.1
+      - run: node scripts/verify-npm-packages.mjs dist/npm
       - uses: actions/upload-artifact@v7
         with:
           name: dist-npm

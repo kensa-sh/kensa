@@ -10,6 +10,7 @@ PYTHON_PROJECT = ROOT / "sdk" / "python" / "pyproject.toml"
 RELEASE_SCRIPT = ROOT / "scripts" / "release.sh"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 
 
 def test_release_pr_body_requires_changelog_update_and_manual_merge() -> None:
@@ -109,6 +110,20 @@ def test_release_workflow_requires_live_redaction_before_tagging() -> None:
     assert "needs: [prepare, test, lint, redaction, build-wheels, package-npm]" in workflow
 
 
+def test_release_source_jobs_build_the_development_engine() -> None:
+    workflow = RELEASE_WORKFLOW.read_text()
+    test_job = workflow.split("\n  test:\n", maxsplit=1)[1].split("\n  lint:\n", maxsplit=1)[0]
+    redaction_job = workflow.split("\n  redaction:\n", maxsplit=1)[1].split(
+        "\n  build-wheels:\n", maxsplit=1
+    )[0]
+
+    for job in (test_job, redaction_job):
+        assert "pnpm/action-setup@v6" in job
+        assert "actions/setup-node@v6" in job
+        assert "pnpm install --frozen-lockfile" in job
+        assert "pnpm --filter kensa-engine build" in job
+
+
 def test_release_workflow_publishes_only_verified_platform_wheels() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
     publish_job = workflow.split("\n  publish-pypi:\n", maxsplit=1)[1].split(
@@ -149,6 +164,8 @@ def test_release_workflow_uses_npm_trusted_publishing() -> None:
     assert "set-typescript-version.mjs --check" in package_job
     assert "pnpm --filter @kensa/core pack" in package_job
     assert "pnpm --filter @kensa/sdk pack" in package_job
+    assert "npm install --global npm@11.5.1" in package_job
+    assert "node scripts/verify-npm-packages.mjs dist/npm" in package_job
     assert "name: dist-npm" in package_job
     assert "dist/npm/kensa-build-manifest.json" in package_job
     assert "needs: [prepare, tag, package-npm]" in core_job
@@ -162,6 +179,14 @@ def test_release_workflow_uses_npm_trusted_publishing() -> None:
     assert 'npm publish "dist/npm/kensa-core-$VERSION.tgz"' in core_job
     assert 'npm publish "dist/npm/kensa-sdk-$VERSION.tgz"' in sdk_job
     assert 'gh release create "$TAG" dist/*.whl dist/npm/kensa-build-manifest.json' in workflow
+
+
+def test_contributor_setup_documents_fail_closed_engine_resolution() -> None:
+    contributing = CONTRIBUTING.read_text()
+
+    assert "keeps the existing Python path" not in contributing
+    assert "fails closed" in contributing
+    assert "pnpm build" in contributing
 
 
 def test_typescript_package_versions_match_python_release() -> None:
