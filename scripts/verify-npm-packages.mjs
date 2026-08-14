@@ -1,44 +1,77 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const packageDirectory = process.argv[2];
-if (packageDirectory === undefined) {
-  process.stderr.write("usage: verify-npm-packages.mjs <package-directory>\n");
-  process.exit(2);
+const dependencies = {
+  makeTemporaryDirectory: mkdtempSync,
+  nodeExecutable: process.execPath,
+  npmExecutable: npmExecutable(process.env, process.platform),
+  readDirectory: readdirSync,
+  removeDirectory: rmSync,
+  runCommand: run,
+  temporaryDirectory: tmpdir(),
+  writeFile: writeFileSync,
+};
+
+export function main(arguments_, operations, stderr, stdout) {
+  const packageDirectory = arguments_[0];
+  if (packageDirectory === undefined) {
+    stderr.write("usage: verify-npm-packages.mjs <package-directory>\n");
+    return 2;
+  }
+
+  verifyNpmPackages(packageDirectory, operations, stdout);
+  return 0;
 }
 
-const directory = resolve(packageDirectory);
-const core = packageTarball(directory, "kensa-core-");
-const sdk = packageTarball(directory, "kensa-sdk-");
-const consumer = mkdtempSync(join(tmpdir(), "kensa-npm-consumer-"));
-
-try {
-  writeFileSync(
-    join(consumer, "package.json"),
-    `${JSON.stringify({ name: "kensa-package-verification", private: true, type: "module" })}\n`,
+export function verifyNpmPackages(packageDirectory, operations, stdout) {
+  const directory = resolve(packageDirectory);
+  const core = packageTarball(
+    directory,
+    "kensa-core-",
+    operations.readDirectory,
   );
-  const installArguments = [
-    "install",
-    "--ignore-scripts",
-    "--no-audit",
-    "--no-fund",
-  ];
-  run(npmExecutable(), [...installArguments, core]);
-  run(npmExecutable(), [...installArguments, sdk]);
-  writeFileSync(join(consumer, "verify.mjs"), verificationSource());
-  run(process.execPath, ["verify.mjs"]);
-} finally {
-  rmSync(consumer, { recursive: true, force: true });
+  const sdk = packageTarball(directory, "kensa-sdk-", operations.readDirectory);
+  const consumer = operations.makeTemporaryDirectory(
+    join(operations.temporaryDirectory, "kensa-npm-consumer-"),
+  );
+
+  try {
+    operations.writeFile(
+      join(consumer, "package.json"),
+      `${JSON.stringify({ name: "kensa-package-verification", private: true, type: "module" })}\n`,
+    );
+    const installArguments = [
+      "install",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+    ];
+    operations.runCommand(
+      operations.npmExecutable,
+      [...installArguments, core],
+      consumer,
+    );
+    operations.runCommand(
+      operations.npmExecutable,
+      [...installArguments, sdk],
+      consumer,
+    );
+    operations.writeFile(join(consumer, "verify.mjs"), verificationSource());
+    operations.runCommand(operations.nodeExecutable, ["verify.mjs"], consumer);
+  } finally {
+    operations.removeDirectory(consumer, { recursive: true, force: true });
+  }
+
+  stdout.write(
+    `verified ${basename(core)} and ${basename(sdk)} as an external consumer\n`,
+  );
 }
 
-process.stdout.write(
-  `verified ${basename(core)} and ${basename(sdk)} as an external consumer\n`,
-);
-
-function packageTarball(directory, prefix) {
-  const matches = readdirSync(directory)
+export function packageTarball(directory, prefix, readDirectory) {
+  const matches = readDirectory(directory)
     .filter((name) => name.startsWith(prefix) && name.endsWith(".tgz"))
     .map((name) => join(directory, name));
   if (matches.length !== 1) {
@@ -49,14 +82,13 @@ function packageTarball(directory, prefix) {
   return matches[0];
 }
 
-function npmExecutable() {
+export function npmExecutable(environment, platform) {
   return (
-    process.env.KENSA_NPM_BINARY ??
-    (process.platform === "win32" ? "npm.cmd" : "npm")
+    environment.KENSA_NPM_BINARY ?? (platform === "win32" ? "npm.cmd" : "npm")
   );
 }
 
-function run(command, arguments_) {
+export function run(command, arguments_, consumer) {
   const result = spawnSync(command, arguments_, {
     cwd: consumer,
     encoding: "utf8",
@@ -73,7 +105,7 @@ function run(command, arguments_) {
   }
 }
 
-function verificationSource() {
+export function verificationSource() {
   return `
 import coreManifest from "@kensa/core/build-manifest.json" with { type: "json" };
 import sdkManifest from "@kensa/sdk/build-manifest.json" with { type: "json" };
@@ -112,4 +144,14 @@ if (coreManifest.digest !== sdkManifest.digest) {
   throw new Error("package build manifests do not match");
 }
 `;
+}
+
+/* v8 ignore next 3 -- exercised through subprocess tests */
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  process.exitCode = main(
+    process.argv.slice(2),
+    dependencies,
+    process.stderr,
+    process.stdout,
+  );
 }
