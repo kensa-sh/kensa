@@ -42,6 +42,19 @@ def test_read_project_config_allows_unknown_keys(tmp_path: Path) -> None:
     assert read_dotenv_path(tmp_path / "pyproject.toml") == Path("config/dev.env")
 
 
+def test_read_project_config_parses_structured_target_command(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.kensa]\n"
+        'target_command = ["uv", "run", "python", "scripts/target.py"]\n'
+        "target_timeout_s = 12.5\n"
+    )
+
+    config = read_project_config(tmp_path)
+
+    assert config.target_command == ("uv", "run", "python", "scripts/target.py")
+    assert config.target_timeout_s == 12.5
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -50,6 +63,13 @@ def test_read_project_config_allows_unknown_keys(tmp_path: Path) -> None:
         '[tool]\nkensa = "not-a-table"\n',
         '[tool.kensa]\nevidence_source = "invalid"\n',
         '[tool.kensa]\nredaction_model = "medium"\n',
+        "[tool.kensa]\ntarget_command = []\n",
+        '[tool.kensa]\ntarget_command = ["python", " "]\n',
+        '[tool.kensa]\ntarget_command = "python target.py"\n',
+        "[tool.kensa]\ntarget_timeout_s = 0\n",
+        "[tool.kensa]\ntarget_timeout_s = inf\n",
+        "[tool.kensa]\ntarget_timeout_s = true\n",
+        '[tool.kensa]\ntarget_timeout_s = "30"\n',
     ],
 )
 def test_read_project_config_rejects_invalid_known_configuration(

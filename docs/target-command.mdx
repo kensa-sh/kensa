@@ -73,6 +73,30 @@ client must not retry an ambiguous open or turn. It may still close the session 
 An explicit `shutdown` returns process status 0. EOF before shutdown closes an active session and
 returns status 1.
 
+## Pytest command target
+
+Configure the launcher as an argument vector in `pyproject.toml`:
+
+```toml
+[tool.kensa]
+target_command = ["uv", "run", "python", "scripts/kensa_target.py"]
+target_timeout_s = 30
+```
+
+Kensa then supplies the function-scoped `kensa_run` fixture, so existing evals keep calling
+`case.run(kensa_run)`. Each trial starts a fresh process, opens one session with the exact case,
+forwards the complete conversation history, attaches returned run evidence, and closes or
+terminates the process during fixture cleanup.
+
+The command is executed directly without a shell from the directory containing `pyproject.toml`.
+It inherits the pytest process environment. `target_timeout_s` bounds each protocol write, response,
+and cleanup operation. Kensa never retries an open or turn after a timeout, malformed response,
+crash, or ambiguous write.
+
+A repository-defined `kensa_run` fixture overrides the configured command explicitly. Without
+`target_command`, Kensa does not register the fixture and existing explicit-fixture behavior is
+unchanged.
+
 ## Language-neutral artifacts
 
 - [JSON Schema v1](/protocol/target-command-v1.schema.json)

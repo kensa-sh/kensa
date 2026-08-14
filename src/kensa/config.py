@@ -15,7 +15,9 @@ from pydantic import ValidationError
 from kensa.models import KensaProjectConfig
 
 _CONFIG_KEYS = frozenset({"dotenv", "evidence_source", "redaction_model"})
-_PROJECT_KEYS = frozenset({"evidence_source", "redaction_model"})
+_PROJECT_KEYS = frozenset(
+    {"evidence_source", "redaction_model", "target_command", "target_timeout_s"}
+)
 _KENSA_HEADER = re.compile(r"^\s*\[tool\.kensa\]\s*(?:#.*)?$")
 _TABLE_HEADER = re.compile(r"^\s*\[\[?.+?\]\]?\s*(?:#.*)?$")
 

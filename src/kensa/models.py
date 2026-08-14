@@ -54,6 +54,15 @@ class KensaProjectConfig(KensaModel):
 
     evidence_source: EvidenceSource | None = None
     redaction_model: RedactionModelChoice | None = None
+    target_command: tuple[str, ...] | None = None
+    target_timeout_s: float = Field(default=30.0, gt=0, allow_inf_nan=False, strict=True)
+
+    @field_validator("target_command")
+    @classmethod
+    def _valid_target_command(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is not None and (not value or any(not argument.strip() for argument in value)):
+            raise ValueError("target_command must be a non-empty argument vector")
+        return value
 
 
 class InspectStatus(StrEnum):

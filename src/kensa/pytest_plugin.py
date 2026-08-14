@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from kensa.artifacts import (
     write_run_artifacts,
 )
 from kensa.case import KensaCase
+from kensa.config import KensaConfigError, find_pyproject, read_project_config
 from kensa.conversation import ConversationError
 from kensa.errors import KensaCaseError, KensaEvalError, TrialFailure
 from kensa.llm import LLMConfigurationError
@@ -36,6 +38,7 @@ from kensa.runtime import (
     set_current_runtime,
 )
 from kensa.scoring import run_summary
+from kensa.target_client import TargetCommandSession
 from kensa.watchdog import (
     DEFAULT_JUDGE_TIMEOUT_S,
     ActiveTrial,
@@ -56,6 +59,7 @@ _EACH_DIST_ERROR = (
     "pytest --dist=each is incompatible with Kensa trials because it runs every trial "
     "on every worker. Use load or worksteal distribution."
 )
+_TARGET_FIXTURE_PLUGIN = "_kensa_target_fixture"
 
 
 def _exception_path(error: BaseException) -> list[BaseException]:
@@ -327,6 +331,62 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     _state(config)
     ensure_tracing()
+    _register_target_fixture(config)
+
+
+class _ConfiguredTargetFixture:
+    def __init__(self, command: tuple[str, ...], timeout_s: float, cwd: Path) -> None:
+        self._command = command
+        self._timeout_s = timeout_s
+        self._cwd = cwd
+
+    @pytest.fixture
+    def kensa_run(self, request: pytest.FixtureRequest) -> Iterator[TargetCommandSession]:
+        case = _target_case(request)
+        session = TargetCommandSession(
+            self._command,
+            timeout_s=self._timeout_s,
+            cwd=self._cwd,
+        )
+        try:
+            session.open(case)
+            yield session
+        finally:
+            session.close()
+
+
+def _register_target_fixture(config: pytest.Config) -> None:
+    root = Path(str(config.rootpath))
+    try:
+        project = read_project_config(root)
+    except KensaConfigError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    if project.target_command is None or config.pluginmanager.hasplugin(_TARGET_FIXTURE_PLUGIN):
+        return
+    pyproject = find_pyproject(root)
+    cwd = pyproject.parent if pyproject is not None else root
+    config.pluginmanager.register(
+        _ConfiguredTargetFixture(project.target_command, project.target_timeout_s, cwd),
+        _TARGET_FIXTURE_PLUGIN,
+    )
+
+
+def _target_case(request: pytest.FixtureRequest) -> KensaCase:
+    callspec = getattr(request.node, "callspec", None)
+    params = getattr(callspec, "params", {}) if callspec is not None else {}
+    cases = [value for value in params.values() if isinstance(value, KensaCase)]
+    if len(cases) == 1:
+        return cases[0]
+    if not cases and "case" in request.fixturenames:
+        case = request.getfixturevalue("case")
+        if isinstance(case, KensaCase):
+            return case
+    raise KensaEvalError(
+        "configured target command requires exactly one KensaCase fixture value",
+        category="harness",
+        kind="target_case",
+        evidence={"case_count": len(cases)},
+    )
 
 
 @pytest.hookimpl(tryfirst=True)
