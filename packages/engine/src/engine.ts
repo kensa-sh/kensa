@@ -12,6 +12,7 @@ import {
   normalizeTraceViews,
   observeCase,
   observeConversation,
+  resolveRuntimeOutcome,
   startCase,
   startConversation,
   type AwaitingCheck,
@@ -236,7 +237,7 @@ export class KensaEngine {
         return {
           response: {
             type: "runtime_outcome",
-            result: classifyRuntimeOutcome(request.outcome),
+            result: resolveRuntimeOutcome(request.current, request.outcome),
           },
           commit: () => {},
         };

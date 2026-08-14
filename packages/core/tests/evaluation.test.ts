@@ -15,6 +15,7 @@ import {
   parseChecks,
   parseObservation,
   parseRuntimeClassification,
+  resolveRuntimeOutcome,
   startCase,
   type AwaitingCheck,
   type AwaitingObservation,
@@ -835,5 +836,67 @@ describe("runtime outcome classification", () => {
     expect(() => parseRuntimeClassification(input)).toThrow(
       CoreValidationError,
     );
+  });
+
+  it.each([
+    ["fail", "agent"],
+    ["error", "infrastructure"],
+  ] as const)(
+    "preserves a prior %s verdict when teardown skips",
+    (verdict, category) => {
+      const currentFailure = failure(category);
+
+      const result = resolveRuntimeOutcome(
+        { verdict, failure: currentFailure },
+        { kind: "skipped", message: "teardown skip", phase: "teardown" },
+      );
+
+      expect(result).toMatchObject({
+        verdict,
+        failure: currentFailure,
+        check: { failure: currentFailure },
+      });
+    },
+  );
+
+  it("uses the latest core classification for every other lifecycle event", () => {
+    const current = { verdict: "fail", failure: failure("agent") } as const;
+
+    expect(
+      resolveRuntimeOutcome(current, {
+        kind: "lifecycle_error",
+        message: "teardown failed",
+        phase: "teardown",
+      }),
+    ).toMatchObject({ verdict: "error", failure: { kind: "teardown" } });
+    expect(
+      resolveRuntimeOutcome(
+        { verdict: "pass", failure: null },
+        { kind: "skipped", message: "teardown skip", phase: "teardown" },
+      ),
+    ).toMatchObject({ verdict: "skipped", failure: { kind: "skip" } });
+    expect(
+      resolveRuntimeOutcome(null, {
+        kind: "xfailed",
+        message: "known failure",
+        phase: "setup",
+        outcome: "skipped",
+      }),
+    ).toMatchObject({ verdict: "skipped", failure: { kind: "xfail" } });
+  });
+
+  it("rejects a contradictory prior terminal outcome", () => {
+    expect(() =>
+      resolveRuntimeOutcome(
+        { verdict: "pass", failure: failure("agent") },
+        { kind: "passed" },
+      ),
+    ).toThrow(CoreValidationError);
+    expect(() =>
+      resolveRuntimeOutcome(
+        { verdict: "skipped", failure: failure("agent") },
+        { kind: "passed" },
+      ),
+    ).toThrow(CoreValidationError);
   });
 });

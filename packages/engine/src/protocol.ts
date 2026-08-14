@@ -41,6 +41,7 @@ const checkRequest = z.strictObject({
 });
 const classifyRuntimeOutcomeRequest = z.strictObject({
   type: z.literal("classify_runtime_outcome"),
+  current: z.unknown().nullable(),
   outcome: z.unknown(),
 });
 const startConversationRequest = z.strictObject({

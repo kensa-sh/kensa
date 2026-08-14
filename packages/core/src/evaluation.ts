@@ -251,6 +251,42 @@ const runtimeClassificationSchema = z
       );
     }
   });
+const runtimeTerminalSchema = z
+  .strictObject({
+    verdict: z.enum(["pass", "fail", "error", "skipped"]),
+    failure: failureSchema.nullable(),
+  })
+  .superRefine((terminal, context) => {
+    const requiresFailure = terminal.verdict !== "pass";
+    if (requiresFailure !== (terminal.failure !== null)) {
+      addIssue(
+        context,
+        "failure",
+        `runtime ${terminal.verdict} verdict has contradictory failure provenance`,
+      );
+      return;
+    }
+    if (terminal.failure === null) {
+      return;
+    }
+    const expectedOutcome = {
+      error: "error",
+      fail: "unsatisfied",
+      pass: "satisfied",
+      skipped: "skipped",
+    } as const;
+    if (
+      !allowedOutcomes(terminal.failure.category).includes(
+        expectedOutcome[terminal.verdict],
+      )
+    ) {
+      addIssue(
+        context,
+        "verdict",
+        `${terminal.failure.category} failure cannot produce ${terminal.verdict}`,
+      );
+    }
+  });
 
 export type EvaluationCase = z.infer<typeof caseSchema>;
 export type EvaluationFailure = z.infer<typeof failureSchema>;
@@ -259,6 +295,7 @@ export type EvaluationCheck = z.infer<typeof checkSchema>;
 export type EvaluationVerdict = "pass" | "fail" | "error" | "skipped";
 export type EvaluationAction = "invoke_agent" | "evaluate_check";
 export type RuntimeOutcome = z.infer<typeof runtimeOutcomeSchema>;
+export type RuntimeTerminal = z.infer<typeof runtimeTerminalSchema>;
 
 export interface RuntimeClassification {
   verdict: EvaluationVerdict;
@@ -418,6 +455,34 @@ export function classifyRuntimeOutcome(input: unknown): RuntimeClassification {
     case "timeout":
       return runtimeClassification("error", timeoutFailure(outcome));
   }
+}
+
+export function resolveRuntimeOutcome(
+  currentInput: unknown,
+  outcomeInput: unknown,
+): RuntimeClassification {
+  const current =
+    currentInput === null
+      ? null
+      : parseInput(
+          runtimeTerminalSchema,
+          currentInput,
+          "runtime terminal outcome violates the core contract",
+        );
+  const outcome = parseInput(
+    runtimeOutcomeSchema,
+    outcomeInput,
+    "runtime outcome violates the core contract",
+  );
+  if (
+    current !== null &&
+    (current.verdict === "fail" || current.verdict === "error") &&
+    (outcome.kind === "skipped" || outcome.kind === "xfailed") &&
+    outcome.phase === "teardown"
+  ) {
+    return runtimeClassification(current.verdict, current.failure);
+  }
+  return classifyRuntimeOutcome(outcome);
 }
 
 export function parseRuntimeClassification(

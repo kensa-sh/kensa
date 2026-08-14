@@ -182,6 +182,16 @@ def test_engine_client_runs_case_and_cancellation() -> None:
                 },
             ),
         )
+        preserved = client.classify_runtime_outcome(
+            {
+                "kind": "skipped",
+                "message": "teardown skip",
+                "phase": "teardown",
+            },
+            current={"verdict": classified.verdict, "failure": classified.failure},
+        )
+        assert preserved.verdict == "fail"
+        assert preserved.failure == classified.failure
         client.start_case(
             "passing",
             {"id": "hello", "input": "world", "metadata": {"id": "hello"}},
@@ -656,7 +666,9 @@ for line in sys.stdin:
         response = {"type": "action", "action": "invoke_agent", "case_id": "one"}
     elif request["type"] == "classify_runtime_outcome":
         with EngineClient(real_engine) as engine:
-            classified = engine.classify_runtime_outcome(request["outcome"])
+            classified = engine.classify_runtime_outcome(
+                request["outcome"], current=request["current"]
+            )
         response = {
             "type": "runtime_outcome",
             "result": {
@@ -756,7 +768,9 @@ for line in sys.stdin:
         response = {{"type": "action", "action": "wrong"}}
     elif request["type"] == "classify_runtime_outcome":
         with EngineClient(real_engine) as engine:
-            classified = engine.classify_runtime_outcome(request["outcome"])
+            classified = engine.classify_runtime_outcome(
+                request["outcome"], current=request["current"]
+            )
         response = {{
             "type": "runtime_outcome",
             "result": {{
@@ -1548,13 +1562,25 @@ def test_report_failure_classification_recovers_with_fresh_engine() -> None:
     }
 
     class FailedEngine:
-        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+        def classify_runtime_outcome(
+            self,
+            outcome: dict[str, Any],
+            *,
+            current: dict[str, Any] | None = None,
+        ) -> EngineCompletion:
             del outcome
+            assert current == {"verdict": "fail", "failure": failure}
             raise KensaEngineError("primary stopped", code="crash")
 
     class RecoveryEngine:
-        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+        def classify_runtime_outcome(
+            self,
+            outcome: dict[str, Any],
+            *,
+            current: dict[str, Any] | None = None,
+        ) -> EngineCompletion:
             assert outcome == {"kind": "assertion_failed"}
+            assert current == {"verdict": "fail", "failure": failure}
             return EngineCompletion(verdict="fail", failure=failure)
 
     state = SimpleNamespace(
@@ -1567,6 +1593,7 @@ def test_report_failure_classification_recovers_with_fresh_engine() -> None:
         cast(Any, state),
         {"kind": "assertion_failed"},
         nodeid="test_eval",
+        current={"verdict": "fail", "failure": failure},
     )
 
     assert classified == ("fail", TrialFailure.model_validate(failure))
@@ -1579,8 +1606,14 @@ def test_report_failure_classification_marks_incomplete_when_recovery_fails() ->
         def __init__(self, message: str) -> None:
             self.message = message
 
-        def classify_runtime_outcome(self, outcome: dict[str, Any]) -> EngineCompletion:
+        def classify_runtime_outcome(
+            self,
+            outcome: dict[str, Any],
+            *,
+            current: dict[str, Any] | None = None,
+        ) -> EngineCompletion:
             del outcome
+            assert current is None
             raise KensaEngineError(self.message, code="crash")
 
     state = SimpleNamespace(
@@ -1593,6 +1626,7 @@ def test_report_failure_classification_marks_incomplete_when_recovery_fails() ->
         cast(Any, state),
         {"kind": "skipped"},
         nodeid="test_eval",
+        current=None,
     )
 
     assert classified is None

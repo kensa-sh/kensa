@@ -162,12 +162,13 @@ def test_watchdog_reuses_engine_for_timeout_classification_and_build(
         def classify_runtime_outcome(self, outcome: dict[str, Any]) -> Any:
             requests.append(outcome["kind"])
             return SimpleNamespace(
+                verdict="error",
                 failure={
                     "category": "agent",
                     "kind": "timeout",
                     "message": "timed out",
                     "evidence": {"timeout_s": 1, "phase": "call"},
-                }
+                },
             )
 
         def build_run(self, **kwargs: Any) -> dict[str, Any]:

@@ -178,9 +178,12 @@ def _runtime_outcome(
 
 
 def _classified_failure(
-    engine: EngineClient, outcome: dict[str, Any]
+    engine: EngineClient,
+    outcome: dict[str, Any],
+    *,
+    current: dict[str, Any] | None = None,
 ) -> tuple[str, TrialFailure | None]:
-    completion = engine.classify_runtime_outcome(outcome)
+    completion = engine.classify_runtime_outcome(outcome, current=current)
     failure = (
         TrialFailure.model_validate(completion.failure) if completion.failure is not None else None
     )
@@ -192,12 +195,13 @@ def _classified_report_failure(
     outcome: dict[str, Any],
     *,
     nodeid: str,
+    current: dict[str, Any] | None,
 ) -> tuple[str, TrialFailure | None] | None:
     try:
-        return _classified_failure(state.engine, outcome)
+        return _classified_failure(state.engine, outcome, current=current)
     except Exception as primary_error:
         try:
-            return _classified_failure(state.recovery_engine, outcome)
+            return _classified_failure(state.recovery_engine, outcome, current=current)
         except Exception as recovery_error:
             state.mark_incomplete(
                 "engine_failure",
@@ -780,74 +784,70 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
         return
     if getattr(report, "skipped", False):
         existing = _trial_metadata(item.config, item.nodeid)
-        preserve_call_failure = (
-            report.when == "teardown"
-            and existing is not None
-            and existing.status in {"fail", "error"}
-        )
-        if not preserve_call_failure and (existing is None or existing.status != "skipped"):
-            wasxfail = getattr(report, "wasxfail", None)
-            if wasxfail is not None:
-                classified = _classified_report_failure(
-                    _state(item.config),
-                    {
-                        "kind": "xfailed",
-                        "message": str(wasxfail).strip() or "pytest expected failure",
-                        "phase": report.when,
-                        "outcome": report.outcome,
-                    },
-                    nodeid=item.nodeid,
-                )
-            else:
-                error = (
-                    call.excinfo.value
-                    if call.excinfo is not None
-                    else pytest.skip.Exception(f"pytest {report.when} skipped")
-                )
-                classified = _classified_report_failure(
-                    _state(item.config),
-                    _runtime_outcome(error, phase=report.when),
-                    nodeid=item.nodeid,
-                )
-            if classified is None:
-                return
-            _, failure = classified
-            _record_trial(
-                item.config,
-                runtime.metadata(
-                    status="skipped",
-                    duration_ms=existing.duration_ms if existing is not None else 0.0,
-                    failure=failure,
-                ),
+        wasxfail = getattr(report, "wasxfail", None)
+        if wasxfail is not None:
+            classified = _classified_report_failure(
+                _state(item.config),
+                {
+                    "kind": "xfailed",
+                    "message": str(wasxfail).strip() or "pytest expected failure",
+                    "phase": report.when,
+                    "outcome": report.outcome,
+                },
+                nodeid=item.nodeid,
+                current=_terminal_outcome(existing),
             )
+        else:
+            error = (
+                call.excinfo.value
+                if call.excinfo is not None
+                else pytest.skip.Exception(f"pytest {report.when} skipped")
+            )
+            classified = _classified_report_failure(
+                _state(item.config),
+                _runtime_outcome(error, phase=report.when),
+                nodeid=item.nodeid,
+                current=_terminal_outcome(existing),
+            )
+        if classified is None:
+            return
+        status, failure = classified
+        _record_trial(
+            item.config,
+            runtime.metadata(
+                status=status,
+                duration_ms=existing.duration_ms if existing is not None else 0.0,
+                failure=failure,
+            ),
+        )
         metadata = _trial_metadata(item.config, item.nodeid)
         if metadata is not None:
             report.__dict__[_TRIAL_METADATA_REPORT_KEY] = metadata.to_dict()
         return
     if report.when in {"setup", "teardown"} and report.failed:
         existing = _trial_metadata(item.config, item.nodeid)
-        if report.when != "setup" or existing is None or existing.status == _PROVISIONAL_STATUS:
-            error = (
-                call.excinfo.value
-                if call.excinfo is not None
-                else RuntimeError(f"pytest {report.when} failed")
-            )
-            classified = _classified_report_failure(
-                _state(item.config),
-                _runtime_outcome(error, phase=report.when),
-                nodeid=item.nodeid,
-            )
-            if classified is None:
-                return
-            _, failure = classified
-            _record_trial(
-                item.config,
-                runtime.metadata(
-                    status="error",
-                    duration_ms=0.0,
-                    failure=failure,
-                ),
-            )
+        error = (
+            call.excinfo.value
+            if call.excinfo is not None
+            else RuntimeError(f"pytest {report.when} failed")
+        )
+        classified = _classified_report_failure(
+            _state(item.config),
+            _runtime_outcome(error, phase=report.when),
+            nodeid=item.nodeid,
+            current=_terminal_outcome(existing),
+        )
+        if classified is None:
+            return
+        status, failure = classified
+        _record_trial(
+            item.config,
+            runtime.metadata(
+                status=status,
+                duration_ms=0.0,
+                failure=failure,
+            ),
+        )
     if report.when in {"call", "teardown"} or (report.when == "setup" and report.failed):
         metadata = _trial_metadata(item.config, item.nodeid)
         if metadata is not None:
@@ -862,6 +862,17 @@ def _record_trial(config: pytest.Config, metadata: TrialMetadata) -> None:
         state.set_trial_snapshot(metadata)
     if state.write_artifacts:
         _write_artifacts(state)
+
+
+def _terminal_outcome(metadata: TrialMetadata | None) -> dict[str, Any] | None:
+    if metadata is None or metadata.status == _PROVISIONAL_STATUS:
+        return None
+    return {
+        "verdict": metadata.status,
+        "failure": (
+            metadata.failure.model_dump(mode="json") if metadata.failure is not None else None
+        ),
+    }
 
 
 def _record_trial_snapshot(config: pytest.Config, runtime: KensaTrialRuntime) -> None:

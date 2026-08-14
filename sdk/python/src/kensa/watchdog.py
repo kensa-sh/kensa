@@ -520,6 +520,7 @@ def _record_timeout(
             duration_ms=duration_ms,
             message=message,
             trials=trials,
+            status=classification.verdict,
             failure=failure,
         )
 
@@ -532,6 +533,7 @@ def _write_timeout_result(
     duration_ms: float,
     message: str,
     trials: list[TrialMetadata],
+    status: Literal["pass", "fail", "error", "skipped"],
     failure: TrialFailure,
 ) -> TimeoutResult:
     existing = next((trial for trial in trials if trial.nodeid == active.nodeid), None)
@@ -556,7 +558,7 @@ def _write_timeout_result(
             case_id=active.case_id,
             trial_index=active.trial_index,
             configured_trials=active.configured_trials,
-            status="error",
+            status=status,
             failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=trace,
@@ -570,7 +572,7 @@ def _write_timeout_result(
         trace["incomplete_reason"] = message
         metadata = replace(
             existing,
-            status="error",
+            status=status,
             failure=failure,
             duration_ms=round(duration_ms, 3),
             trace=trace,

@@ -205,10 +205,16 @@ class EngineClient:
     def classify_runtime_outcome(
         self,
         outcome: Mapping[str, Any],
+        *,
+        current: Mapping[str, Any] | None = None,
     ) -> EngineCompletion:
         response = self._request(
             {
                 "type": "classify_runtime_outcome",
+                "current": cast(
+                    dict[str, Any] | None,
+                    _wire_json_value(current),
+                ),
                 "outcome": cast(
                     dict[str, Any],
                     _wire_json_value(dict(outcome)),

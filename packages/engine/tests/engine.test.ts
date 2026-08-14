@@ -112,6 +112,7 @@ describe("KensaEngine", () => {
       engine.processLine(
         message("2", {
           type: "classify_runtime_outcome",
+          current: null,
           outcome: {
             kind: "assertion_failed",
             message: "expected true",
@@ -123,6 +124,38 @@ describe("KensaEngine", () => {
     expect(engine.processLine(message("3", { type: "reset" }))).toMatchObject({
       ok: true,
       response: { released: 0 },
+    });
+  });
+
+  it("resolves pytest lifecycle precedence without evaluation state", () => {
+    const engine = new KensaEngine();
+    ready(engine);
+    const failure = {
+      category: "agent",
+      kind: "assertion",
+      message: "call failed",
+      evidence: {},
+    };
+
+    expect(
+      engine.processLine(
+        message("2", {
+          type: "classify_runtime_outcome",
+          current: { verdict: "fail", failure },
+          outcome: {
+            kind: "skipped",
+            message: "teardown skip",
+            phase: "teardown",
+          },
+        }),
+      ),
+    ).toMatchObject({
+      id: "2",
+      ok: true,
+      response: {
+        type: "runtime_outcome",
+        result: { verdict: "fail", failure },
+      },
     });
   });
 
