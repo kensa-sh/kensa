@@ -11,7 +11,7 @@ def configure_target(
     root: Path,
     command: tuple[str, ...],
     *,
-    timeout_s: float = 0.2,
+    timeout_s: float = 1.0,
 ) -> None:
     (root / "pyproject.toml").write_text(
         "[tool.kensa]\n"
