@@ -20,8 +20,7 @@ from rich.console import Console
 from kensa import cli, cli_output, cli_traces
 from kensa.cli import main
 from kensa.config import update_project_config
-from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
-from kensa.llm import DEFAULT_LLM_MODEL
+from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL, DEFAULT_OPENAI_JUDGE_MODEL
 from kensa.traces import ImportResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -3484,7 +3483,7 @@ def test_init_langfuse_credentials_create_root_dotenv_and_connect(
     assert "LANGFUSE_SECRET_KEY='sk-test'" in dotenv.read_text()
     assert "OPENAI_API_KEY='openai-test'" in dotenv.read_text()
     assert "KENSA_JUDGE_PROVIDER='openai'" in dotenv.read_text()
-    assert f"KENSA_JUDGE_MODEL='{DEFAULT_LLM_MODEL}'" in dotenv.read_text()
+    assert f"KENSA_JUDGE_MODEL='{DEFAULT_OPENAI_JUDGE_MODEL}'" in dotenv.read_text()
     assert "LANGFUSE_BASE_URL='https://cloud.langfuse.com'" in dotenv.read_text()
     assert (tmp_path / ".gitignore").read_text() == ".env.local\n"
     assert tomllib.loads((tmp_path / "pyproject.toml").read_text())["tool"]["kensa"] == {

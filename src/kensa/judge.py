@@ -12,12 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from kensa._serialization import json_value
 from kensa.errors import KensaEvalError
-from kensa.llm import DEFAULT_LLM_MODEL, complete, resolve_llm_config, validate_structured_result
-from kensa.models import LLMModel
+from kensa.llm import complete, resolve_llm_config, validate_structured_result
+from kensa.models import LLMModel, LLMProvider
 from kensa.runtime import current_runtime
 from kensa.watchdog import DEFAULT_JUDGE_TIMEOUT_S, format_timeout_s, timeout_value
 
-DEFAULT_ANTHROPIC_JUDGE_MODEL = LLMModel.CLAUDE_SONNET_4_6.value
+DEFAULT_OPENAI_JUDGE_MODEL = LLMModel.GPT_5_6_LUNA.value
+DEFAULT_ANTHROPIC_JUDGE_MODEL = LLMModel.CLAUDE_SONNET_5.value
 _JUDGE_CONTRACT_ERROR = "Judge result violates the JudgeResult contract."
 
 
@@ -295,7 +296,7 @@ def _provider_from_environment() -> JudgeProvider | None:
         provider = "anthropic"
         model = DEFAULT_ANTHROPIC_JUDGE_MODEL
     return _LLMJudge(
-        model=model or DEFAULT_LLM_MODEL,
+        model=model or DEFAULT_OPENAI_JUDGE_MODEL,
         provider=provider,
     )
 
@@ -303,7 +304,7 @@ def _provider_from_environment() -> JudgeProvider | None:
 def _default_judge_model_for_provider(provider: str) -> str:
     if provider.strip().lower() == "anthropic":
         return DEFAULT_ANTHROPIC_JUDGE_MODEL
-    return DEFAULT_LLM_MODEL
+    return DEFAULT_OPENAI_JUDGE_MODEL
 
 
 class _EnvJudge:
@@ -367,7 +368,7 @@ class _LLMJudge:
             ],
             model=self.config.model,
             provider=self.config.provider,
-            temperature=0.0,
+            temperature=(0.0 if self.config.provider is LLMProvider.OPENAI else None),
             response_format=_JudgeLLMResponse,
             metadata={"task": "judge"},
             timeout_s=timeout_s,

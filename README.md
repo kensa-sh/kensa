@@ -168,7 +168,7 @@ jobs:
 ```
 
 If you only use deterministic assertions, you do not need API keys. If you use LLM-as-judge
-assertions, add provider secrets in CI. By default, Kensa uses a small frontier model through Any
+assertions, add provider secrets in CI. By default, Kensa uses a frontier model through Any
 LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 
 ## FAQ

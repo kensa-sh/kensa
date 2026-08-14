@@ -309,14 +309,22 @@ def test_completion_forwards_supported_model_slugs_to_any_llm(
 
     monkeypatch.setattr("any_llm.completion", fake_completion)
 
-    for model in (LLMModel.GPT_5_5, LLMModel.CLAUDE_SONNET_4_6, LLMModel.CLAUDE_OPUS_4_7):
+    for model in (
+        LLMModel.GPT_5_5,
+        LLMModel.GPT_5_6_LUNA,
+        LLMModel.CLAUDE_SONNET_4_6,
+        LLMModel.CLAUDE_SONNET_5,
+        LLMModel.CLAUDE_OPUS_4_7,
+    ):
         config = resolve_llm_config(model=model)
         assert AnyLLMProvider.from_string(config.provider.value)
         _completion(model=config.model.value, messages=[], provider=config.provider.value)
 
     assert calls == [
         {"model": "gpt-5.5", "messages": [], "provider": "openai"},
+        {"model": "gpt-5.6-luna", "messages": [], "provider": "openai"},
         {"model": "claude-sonnet-4-6", "messages": [], "provider": "anthropic"},
+        {"model": "claude-sonnet-5", "messages": [], "provider": "anthropic"},
         {"model": "claude-opus-4-7", "messages": [], "provider": "anthropic"},
     ]
 
