@@ -1,0 +1,7 @@
+{"type":"handshake","request_id":"request-1","version":"kensa.target.v1"}
+{"type":"session_opened","request_id":"request-2","session_id":"session-1"}
+{"type":"turn","request_id":"request-3","session_id":"session-1","response":{"content":"Which item should I refund?","output":null,"termination_reason":null}}
+{"type":"turn","request_id":"request-4","session_id":"session-1","response":{"content":"The headphones are eligible.","output":{"eligible":true},"termination_reason":"complete"},"evidence":{"schema_version":"kensa.agent_run.v1","run_id":"run-1","attestation":{"revision":"abc123","environment":"test","effects":"sandboxed"},"events":[],"trace":null,"trajectory_completeness":"complete","state":[],"state_completeness":"complete","incomplete_reason":null}}
+{"type":"session_closed","request_id":"request-5","session_id":"session-1"}
+{"type":"shutdown","request_id":"request-6"}
+{"type":"error","request_id":null,"code":"invalid_json","message":"request must be valid JSON","fatal":false}

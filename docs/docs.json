@@ -55,7 +55,8 @@
           "assertions",
           "judge",
           "tracing",
-          "pytest"
+          "pytest",
+          "target-command"
         ]
       },
       {

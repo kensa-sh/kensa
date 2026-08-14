@@ -1,0 +1,6 @@
+{"type":"handshake","request_id":"request-1","version":"kensa.target.v1"}
+{"type":"open_session","request_id":"request-2","session_id":"session-1","case":{"id":"refund-policy","row":{"id":"refund-policy","input":"Refund order 123"}}}
+{"type":"turn","request_id":"request-3","session_id":"session-1","messages":[]}
+{"type":"turn","request_id":"request-4","session_id":"session-1","messages":[{"role":"assistant","content":"Which item should I refund?"},{"role":"user","content":"The headphones"}]}
+{"type":"close_session","request_id":"request-5","session_id":"session-1"}
+{"type":"shutdown","request_id":"request-6"}

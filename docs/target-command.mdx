@@ -1,0 +1,83 @@
+---
+title: Target command protocol
+description: Expose a repository-owned agent session through Kensa's versioned JSON Lines contract.
+sidebarTitle: Target command
+keywords:
+  - target command
+  - protocol
+  - JSON Lines
+---
+
+The target command protocol lets a repository expose its production agent constructor without
+reimplementing Kensa transport or lifecycle logic. The repository owns the session factory and
+safe effect adapters. Kensa owns request validation, message framing, session dispatch, structured
+errors, and shutdown.
+
+## Python host
+
+Create a thin launcher around the production session factory:
+
+```python
+from kensa.case import KensaCase
+from kensa.target_command import serve_target
+
+from my_agent import ProductionAgent
+
+
+def open_session(case: KensaCase) -> ProductionAgent:
+    return ProductionAgent(case)
+
+
+raise SystemExit(serve_target(open_session))
+```
+
+The returned session implements `respond(messages)`. It may also implement `close()`. The factory,
+responder, and cleanup can each be synchronous or asynchronous. A process opens no more than one
+session, and the factory runs exactly once for that session.
+
+`respond(messages)` receives the complete accepted history on every turn and returns
+`ConversationResponse`. To include target-owned execution evidence, return `TargetTurnResult`:
+
+```python
+from kensa.target_command import TargetTurnResult
+
+
+def respond(self, messages):
+    response, evidence = self.agent.respond_with_evidence(messages)
+    return TargetTurnResult(response=response, evidence=evidence)
+```
+
+## Wire contract
+
+The protocol version is `kensa.target.v1`. Every stdin line is one JSON request. Every stdout line
+is one JSON response. Stdout is reserved for protocol frames. Write repository diagnostics to
+stderr.
+
+| Request | Successful response | Purpose |
+|---|---|---|
+| `handshake` | `handshake` | Agree on the exact protocol version |
+| `open_session` | `session_opened` | Construct one session from the supplied case |
+| `turn` | `turn` | Invoke the same session with the complete message history |
+| `close_session` | `session_closed` | Run optional session cleanup once |
+| `shutdown` | `shutdown` | End the process cleanly |
+
+Request IDs must be non-empty and unique within the process. Session IDs on turn and close frames
+must match the opened session. Unknown fields, invalid order, malformed messages, unsupported
+versions, history divergence, and non-JSON response values are rejected without invoking target
+code.
+
+Target exceptions are reported as `error` frames. The stable `code` identifies the failed boundary,
+while diagnostic details remain on stderr. A target failure closes that path to later turns, so a
+client must not retry an ambiguous open or turn. It may still close the session and shut down.
+
+An explicit `shutdown` returns process status 0. EOF before shutdown closes an active session and
+returns status 1.
+
+## Language-neutral artifacts
+
+- [JSON Schema v1](/protocol/target-command-v1.schema.json)
+- [Canonical request stream](/protocol/target-command-v1.requests.jsonl)
+- [Canonical response and error stream](/protocol/target-command-v1.responses.jsonl)
+
+The schema is the portable source for request, response, message, error, lifecycle, and external
+evidence shapes. Implementations in other languages do not need to reproduce Python model behavior.
