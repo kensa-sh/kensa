@@ -34,6 +34,15 @@ from kensa.target_command import (
 _ResponseT = TypeVar("_ResponseT", bound=BaseModel)
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _validate_standard_json(raw: str) -> None:
+    payload = json.loads(raw, parse_constant=_reject_json_constant)
+    json.dumps(payload, allow_nan=False)
+
+
 class _TargetResponderFailure(RuntimeError):
     pass
 
@@ -186,8 +195,9 @@ class TargetCommandSession:
         self._write(frame + b"\n", operation)
         raw = self._read(operation)
         try:
+            _validate_standard_json(raw)
             response = _RESPONSE_ADAPTER.validate_json(raw)
-        except (ValueError, ValidationError) as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             raise self._protocol_failure(
                 operation, "target returned malformed protocol output"
             ) from exc

@@ -5,6 +5,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -225,7 +226,21 @@ def _fault_script(path: Path) -> Path:
             sys.stderr.write("turn crash diagnostic\n")
             sys.stderr.flush()
             raise SystemExit(9)
-        if behavior == "turn_error":
+        if behavior.startswith("output_"):
+            number = {
+                "output_nan": "NaN",
+                "output_infinity": "Infinity",
+                "output_overflow": "1e400",
+            }[behavior]
+            sys.stdout.write(
+                '{"type":"turn","request_id":"%s","session_id":"%s",'
+                '"response":{"content":"reply","output":{"value":%s},'
+                '"termination_reason":null}}\n'
+                % (turn["request_id"], session_id, number)
+            )
+            sys.stdout.flush()
+            time.sleep(60)
+        elif behavior == "turn_error":
             sys.stderr.write("responder private diagnostic\n")
             sys.stderr.flush()
             write({
@@ -284,6 +299,49 @@ def _session(script: Path, behavior: str, *, timeout_s: float = 0.5) -> TargetCo
         timeout_s=timeout_s,
         cwd=script.parent,
     )
+
+
+def _assert_serialized_evidence(
+    run: dict[str, Any],
+    *,
+    case_id: str,
+    complete: bool,
+) -> None:
+    run_id = run["run_id"]
+    assert run["schema_version"] == "kensa.agent_run.v1"
+    assert run_id.endswith(case_id)
+    assert run["attestation"] == {
+        "revision": "revision-1",
+        "environment": "sandbox",
+        "effects": "sandboxed",
+    }
+    assert run["events"] == [
+        {
+            "id": f"event-{run_id}",
+            "parent_id": None,
+            "sequence": 1,
+            "kind": "action",
+            "name": "configured-target",
+            "input": None,
+            "output": None,
+            "attributes": {},
+            "status": "completed",
+            "started_at_ns": None,
+            "ended_at_ns": None,
+        }
+    ]
+    assert run["state"] == [
+        {
+            "name": "session",
+            "value": {"sentinel": run_id},
+            "source": "target",
+            "observed_at_ns": None,
+        }
+    ]
+    expected_completeness = "complete" if complete else "partial"
+    assert run["trajectory_completeness"] == expected_completeness
+    assert run["state_completeness"] == ("complete" if complete else "unavailable")
+    assert run["incomplete_reason"] == (None if complete else "target omitted some evidence")
 
 
 def test_target_command_session_forwards_turn_and_closes_once(tmp_path: Path) -> None:
@@ -398,6 +456,29 @@ def test_turn_transport_and_target_failures_are_not_retried(tmp_path: Path) -> N
     declared.close()
     assert process is not None
     assert process.poll() == 0
+
+
+@pytest.mark.parametrize("behavior", ["output_nan", "output_infinity", "output_overflow"])
+def test_nonstandard_response_numbers_abort_without_retry_and_reap_process(
+    tmp_path: Path,
+    behavior: str,
+) -> None:
+    script = _fault_script(tmp_path / "fault.py")
+    session = _session(script, behavior, timeout_s=0.1)
+    session.open(kensa_case(id="case", input="hello"))
+
+    with pytest.raises(KensaEvalError, match="malformed protocol output") as raised:
+        session.respond(({"role": "user", "content": "hello"},))
+
+    assert raised.value.failure.category == "infrastructure"
+    assert raised.value.failure.kind == "target_protocol"
+    assert raised.value.failure.evidence == {
+        "operation": "turn",
+        "last_completed_operation": "open_session",
+    }
+    assert session._request_sequence == 3
+    assert session._process is not None
+    assert session._process.poll() is not None
 
 
 @pytest.mark.parametrize(
@@ -550,6 +631,130 @@ def test_ambiguous_write_aborts_without_retry(
     assert session._process.poll() is not None
 
 
+def test_configured_fixture_matches_in_process_case_results(
+    pytester: pytest.Pytester,
+) -> None:
+    root = Path(str(pytester.path))
+    log = root / "target.jsonl"
+    script = _host_script(root / "target.py")
+    _configure_target(root, (sys.executable, str(script), str(log)))
+    pytester.makepyfile(
+        test_eval="""
+        import pytest
+        from kensa.pytest import ConversationResponse, kensa_case
+
+
+        class Simulator:
+            def respond(self, messages):
+                return ConversationResponse(content="simulated user")
+
+
+        @pytest.mark.kensa
+        @pytest.mark.parametrize("case", [kensa_case(id="direct", input="hello")])
+        def test_direct(case, kensa_run):
+            case.run(kensa_run)
+
+
+        @pytest.mark.kensa
+        @pytest.mark.asyncio
+        @pytest.mark.parametrize(
+            "case",
+            [kensa_case(id="simulated", input="hello", termination_reason="done")],
+        )
+        async def test_simulated(case, kensa_run):
+            await case.run(
+                kensa_run,
+                simulator=Simulator(),
+                max_turns=2,
+                starts_with="simulator",
+            )
+        """
+    )
+
+    command_run = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    command_run.assert_outcomes(passed=2)
+    command_artifacts = set((root / ".kensa" / "results").glob("*.json"))
+    assert len(command_artifacts) == 1
+    command_trials = json.loads(next(iter(command_artifacts)).read_text())["trials"]
+
+    pytester.makeconftest(
+        """
+        import pytest
+        from kensa.pytest import ConversationResponse
+
+
+        @pytest.fixture
+        def kensa_run(case):
+            class Agent:
+                def respond(self, messages):
+                    return ConversationResponse(
+                        content=f"reply:{len(messages)}",
+                        output={"case": case.id, "messages": len(messages)},
+                        termination_reason=case.row.get("termination_reason"),
+                    )
+            return Agent()
+        """
+    )
+
+    in_process_run = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    in_process_run.assert_outcomes(passed=2)
+    all_artifacts = set((root / ".kensa" / "results").glob("*.json"))
+    in_process_artifacts = all_artifacts - command_artifacts
+    assert len(in_process_artifacts) == 1
+    in_process_trials = json.loads(next(iter(in_process_artifacts)).read_text())["trials"]
+    assert len(command_trials) == len(in_process_trials) == 2
+    command_results = {trial["case_id"]: trial["output"] for trial in command_trials}
+    in_process_results = {trial["case_id"]: trial["output"] for trial in in_process_trials}
+    assert command_results == in_process_results
+
+
+def test_configured_fixture_persists_evidence_in_trial_snapshot(
+    pytester: pytest.Pytester,
+) -> None:
+    root = Path(str(pytester.path))
+    log = root / "target.jsonl"
+    script = _host_script(root / "target.py")
+    _configure_target(root, (sys.executable, str(script), str(log)))
+    pytester.makepyfile(
+        test_eval="""
+        import json
+        from pathlib import Path
+
+        import pytest
+        from kensa.pytest import kensa_case
+
+
+        @pytest.mark.kensa
+        @pytest.mark.parametrize(
+            "case",
+            [kensa_case(id="snapshot", input="hello", evidence=True)],
+        )
+        def test_snapshot(case, kensa_run, kensa_trace):
+            case.run(kensa_run)
+            assert len(kensa_trace.agent_runs) == 1
+            serialized = kensa_trace.agent_runs[0].model_dump(mode="json")
+            snapshot_path = next(Path(".kensa/results").glob("*.json"))
+            snapshot = json.loads(snapshot_path.read_text())
+            assert snapshot["complete"] is False
+            assert snapshot["trials"][0]["status"] == "provisional"
+            assert snapshot["trials"][0]["trace"]["agent_runs"] == [serialized]
+        """
+    )
+
+    result = pytester.runpytest("-q", "--kensa-write-artifacts")
+
+    result.assert_outcomes(passed=1)
+    artifact = next((root / ".kensa" / "results").glob("*.json"))
+    trial = json.loads(artifact.read_text())["trials"][0]
+    _assert_serialized_evidence(
+        trial["trace"]["agent_runs"][0],
+        case_id="snapshot",
+        complete=True,
+    )
+
+
 @pytest.mark.parametrize("xdist", [False, True])
 def test_configured_fixture_runs_fresh_processes_and_preserves_evidence(
     pytester: pytest.Pytester,
@@ -563,6 +768,30 @@ def test_configured_fixture_runs_fresh_processes_and_preserves_evidence(
         test_eval="""
         import pytest
         from kensa.pytest import kensa_case
+
+
+        def assert_evidence(run, case):
+            assert run.schema_version == "kensa.agent_run.v1"
+            assert run.run_id.endswith(case.id)
+            assert run.attestation.revision == "revision-1"
+            assert run.attestation.environment == "sandbox"
+            assert run.attestation.effects == "sandboxed"
+            assert len(run.events) == 1
+            assert run.events[0].id == f"event-{run.run_id}"
+            assert run.events[0].sequence == 1
+            assert run.events[0].kind == "action"
+            assert run.events[0].name == "configured-target"
+            assert run.events[0].status == "completed"
+            assert len(run.state) == 1
+            assert run.state[0].name == "session"
+            assert run.state[0].value == {"sentinel": run.run_id}
+            assert run.state[0].source == "target"
+            complete = case.row.get("complete", True)
+            assert run.trajectory_completeness == ("complete" if complete else "partial")
+            assert run.state_completeness == ("complete" if complete else "unavailable")
+            assert run.incomplete_reason == (
+                None if complete else "target omitted some evidence"
+            )
 
 
         @pytest.mark.kensa(trials=2)
@@ -583,7 +812,7 @@ def test_configured_fixture_runs_fresh_processes_and_preserves_evidence(
             assert result.output == {"case": case.id, "messages": 0}
             assert result.messages[-1] == {"role": "assistant", "content": "reply:0"}
             assert len(kensa_trace.agent_runs) == 1
-            assert kensa_trace.agent_runs[0].run_id.endswith(case.id)
+            assert_evidence(kensa_trace.agent_runs[0], case)
 
 
         class Simulator:
@@ -633,6 +862,12 @@ def test_configured_fixture_runs_fresh_processes_and_preserves_evidence(
     assert len(trials) == 5
     evidence_trials = [trial for trial in trials if trial["case_id"] != "simulated"]
     assert len({trial["trace"]["agent_runs"][0]["run_id"] for trial in evidence_trials}) == 4
+    for trial in evidence_trials:
+        _assert_serialized_evidence(
+            trial["trace"]["agent_runs"][0],
+            case_id=trial["case_id"],
+            complete=trial["case_id"] == "complete",
+        )
     partial = next(trial for trial in trials if trial["case_id"] == "partial")
     run = partial["trace"]["agent_runs"][0]
     assert run["trajectory_completeness"] == "partial"
@@ -640,8 +875,21 @@ def test_configured_fixture_runs_fresh_processes_and_preserves_evidence(
     assert run["incomplete_reason"] == "target omitted some evidence"
     trace_path = next((root / ".kensa" / "traces" / "runs").glob("*/trials.jsonl"))
     trace_rows = [json.loads(line) for line in trace_path.read_text().splitlines()]
-    partial_trace = next(row for row in trace_rows if row["case_id"] == "partial")
-    assert partial_trace["agent_runs"] == partial["trace"]["agent_runs"]
+    evidence_trace_rows = [row for row in trace_rows if row["case_id"] != "simulated"]
+    assert len(evidence_trace_rows) == 4
+    for row in evidence_trace_rows:
+        _assert_serialized_evidence(
+            row["agent_runs"][0],
+            case_id=row["case_id"],
+            complete=row["case_id"] == "complete",
+        )
+        artifact_trial = next(
+            trial
+            for trial in evidence_trials
+            if trial["case_id"] == row["case_id"]
+            and trial["trial_index"] == int(row["id"].rsplit("_trial", 1)[1])
+        )
+        assert row["agent_runs"] == artifact_trial["trace"]["agent_runs"]
 
 
 @pytest.mark.parametrize(
