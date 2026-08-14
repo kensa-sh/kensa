@@ -1,0 +1,26 @@
+{
+  "version": "kensa.redactor.v2",
+  "mandatory": true,
+  "language": "en",
+  "value_redaction_applied": true,
+  "redaction_available": true,
+  "redacted_span_count": 1,
+  "changed_value_count": 1,
+  "secret_keys_redacted": false,
+  "trace_count": 1,
+  "ruleset_hash": "96332f6e9bdb07b0d837e733c393f3e4dd2ecd0b8e910fff06ba6266114ae422",
+  "pseudonymization": "instance-counter",
+  "entity_instance_counts": {
+    "PERSON": 1
+  },
+  "detectors": {
+    "fixture": {
+      "version": "1"
+    }
+  },
+  "model": {
+    "name": "en_core_web_sm",
+    "version": "3.8.0",
+    "checksum_verified": true
+  }
+}

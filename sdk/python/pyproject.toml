@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kensa"
+version = "0.19.1"
+description = "Pytest-native evals harness for agent regression tests"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "satyaborg", email = "satya@kensa.sh" }]
+keywords = ["pytest", "agents", "evals", "regression", "opentelemetry"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+dependencies = [
+  "any-llm-sdk>=1.15.0",
+  "click>=8.1,<9",
+  "langfuse>=4,<5",
+  "opentelemetry-api>=1.42.1",
+  "opentelemetry-sdk>=1.42.1",
+  "pydantic>=2.0",
+  "pytest>=8.0",
+  "pytest-xdist>=3.8,<4",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "rich>=13.0.0",
+  "typing-extensions>=4.15.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kensa-sh/kensa"
+Repository = "https://github.com/kensa-sh/kensa"
+Issues = "https://github.com/kensa-sh/kensa/issues"
+Changelog = "https://github.com/kensa-sh/kensa/releases"
+
+[project.scripts]
+kensa = "kensa.cli:main"
+
+[project.entry-points.pytest11]
+kensa = "kensa.pytest_plugin"
+
+[project.optional-dependencies]
+redaction = [
+  "detect-secrets==1.5.0",
+  "phonenumbers>=9.0.36",
+  "presidio-analyzer==2.2.362",
+  "spacy>=3.8,<3.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kensa"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/kensa",
+  "tests",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+  "CODE_OF_CONDUCT.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../../CODE_OF_CONDUCT.md" = "CODE_OF_CONDUCT.md"
+"../../CONTRIBUTING.md" = "CONTRIBUTING.md"
+"../../SECURITY.md" = "SECURITY.md"

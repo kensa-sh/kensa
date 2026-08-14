@@ -1,0 +1,1082 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from kensa import artifacts, cli, cli_output, cli_traces
+from kensa.artifacts import trial_from_dict
+from kensa.case import KensaCase, KensaCaseError, KensaMessage, kensa_case
+from kensa.conversation import ConversationError, ConversationResponse
+from kensa.errors import TrialFailure
+from kensa.judge import JudgeResult, judge, set_judge_provider
+from kensa.llm import DEFAULT_LLM_MODEL, LLMResult
+from kensa.pytest_plugin import (
+    PRIVATE_TRIAL,
+    KensaAggregate,
+    KensaSessionState,
+    _case_id,
+    _kensa_trial_fixture,
+    _marker_timeout,
+    _marker_trials,
+    _runtime_for_item,
+    pytest_make_parametrize_id,
+    pytest_runtest_makereport,
+    pytest_runtest_protocol,
+    pytest_terminal_summary,
+)
+from kensa.pytest_plugin import kensa_trace as kensa_trace_fixture
+from kensa.runtime import (
+    ActiveOperation,
+    KensaSpan,
+    KensaTrace,
+    KensaTrial,
+    KensaTrialRuntime,
+    TrialMetadata,
+    collect_spans,
+    current_runtime,
+    ensure_tracing,
+    reset_current_runtime,
+    set_current_runtime,
+)
+from kensa.tracing import JSONLSpanExporter, instrument
+from kensa.watchdog import ActiveTrial, WatchdogControl, read_control, write_control
+
+
+def test_trial_artifact_reconstruction_rejects_legacy_unknown_and_mismatched_shapes() -> None:
+    base = {
+        "nodeid": "test.py::test_agent[trial1]",
+        "group_id": "test.py::test_agent",
+        "case_id": "case",
+        "trial_index": 1,
+        "configured_trials": 1,
+        "status": "error",
+        "case": {"id": "case"},
+        "output": None,
+        "failure": {
+            "category": "agent",
+            "kind": "execution",
+            "message": "failed",
+            "evidence": {},
+        },
+        "duration_ms": 0.0,
+        "trace": {},
+        "judges": [],
+        "active_operation": None,
+        "smoke": False,
+    }
+
+    assert trial_from_dict(base).failure == TrialFailure.model_validate(base["failure"])
+    with pytest.raises(ValueError, match="error"):
+        trial_from_dict({**base, "error": "failed"})
+    with pytest.raises(ValueError, match="error_kind"):
+        trial_from_dict({**base, "error_kind": "exception"})
+    with pytest.raises(ValueError, match="status"):
+        trial_from_dict({**base, "status": "other"})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({**base, "status": "pass"})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({**base, "failure": None})
+    with pytest.raises(ValueError, match="failure"):
+        trial_from_dict({key: value for key, value in base.items() if key != "failure"})
+    with pytest.raises(ValueError, match="object"):
+        trial_from_dict({**base, "failure": "failed"})
+
+
+def test_internal_trial_metadata_rejects_unknown_and_mismatched_statuses() -> None:
+    with pytest.raises(ValueError, match="Unknown trial status"):
+        TrialMetadata(
+            nodeid="node",
+            group_id="group",
+            case_id="case",
+            trial_index=1,
+            configured_trials=1,
+            status="unknown",
+        )
+    with pytest.raises(ValueError, match="one failure"):
+        TrialMetadata(
+            nodeid="node",
+            group_id="group",
+            case_id="case",
+            trial_index=1,
+            configured_trials=1,
+            status="fail",
+        )
+
+
+def test_partial_trial_artifact_loader_is_removed() -> None:
+    assert "load_trials" not in artifacts.__all__
+    assert not hasattr(artifacts, "load_trials")
+
+
+def test_case_fallbacks_and_uninstrumented_run_paths() -> None:
+    assert (
+        KensaCase("direct_input", MappingProxyType({"id": "direct_input", "input": "x"})).input
+        == "x"
+    )
+    assert KensaCase(
+        "direct_messages",
+        MappingProxyType({"id": "direct_messages", "messages": [1]}),
+    ).input == [1]
+    assert kensa_case(id="single", customer="c1").input == "c1"
+    assert kensa_case(id="multi", customer="c1", region="us").input == {
+        "customer": "c1",
+        "region": "us",
+    }
+    messages: list[KensaMessage] = [{"role": "user", "content": "hello"}]
+    assert kensa_case(id="messages", messages=messages).messages == messages
+    with pytest.raises(KensaCaseError, match=r"messages=\.\.\."):
+        _ = kensa_case(id="raw_input", input=messages).messages
+    with pytest.raises(KensaCaseError, match="messages"):
+        _ = kensa_case(id="no_messages", input="hello").messages
+    with pytest.raises(KensaCaseError, match="Use either input"):
+        kensa_case(id="bad", input="hello", messages=messages)
+
+    case = kensa_case(id="run", input="hello")
+    assert repr(case) == "run"
+
+    class Agent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse(output={"seen": case.input})
+
+    assert case.run(Agent()).output == {"seen": "hello"}
+
+    class InvalidAgent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return ConversationResponse(output={case.id})
+
+    with pytest.raises(ConversationError, match="JSON-serializable"):
+        case.run(InvalidAgent())
+
+
+def test_case_uninstrumented_async_run_paths() -> None:
+    async def _run() -> str:
+        case = kensa_case(id="async", input="hello")
+
+        class Agent:
+            async def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+                return ConversationResponse(output={"seen": case.input})
+
+        result = await case.run(Agent())
+        return cast(dict[str, str], result.output)["seen"]
+
+    assert asyncio.run(_run()) == "hello"
+
+
+def test_kensa_trace_and_span_edge_paths() -> None:
+    span = KensaSpan(name="s", start_time_unix_nano=None, end_time_unix_nano=None)
+    assert span.duration_ms == 0
+    invalid_cost = KensaSpan(name="s", attributes={"cost_usd": "bad"})
+    assert invalid_cost.cost_usd == 0
+    assert invalid_cost.cost_available is False
+    assert invalid_cost.to_dict()["cost_usd"] is None
+    assert KensaSpan(name="s", attributes={"cost_usd": float("nan")}).cost_available is False
+    assert KensaSpan(name="s", attributes={"cost_usd": -1}).cost_available is False
+    assert KensaSpan(name="s", attributes={"cost_usd": True}).cost_available is False
+    llm_span = KensaSpan(name="llm", kind="llm", tool_name="lookup", attributes={"cost_usd": 0.2})
+    assert llm_span.cost_available is True
+    assert llm_span.to_dict()["cost_available"] is True
+    trace = KensaTrace()
+    assert trace.duration_ms == 0
+    assert trace.cost_available is False
+    assert trace.to_dict()["cost_usd"] is None
+    trace.replace([span, llm_span])
+    assert trace.duration_ms == 0
+    assert not hasattr(trace, "called")
+    assert trace.tools.names == ["lookup"]
+    assert trace.tools.include([])
+    assert trace.tools.include(["lookup"])
+    assert not trace.tools.include(["missing"])
+    assert trace.tools.exclude(["missing"])
+    assert trace.tools.order([])
+    assert trace.tools.order(["lookup"])
+    assert not trace.tools.order(["missing"])
+    assert trace.tools.no_repeats()
+    assert trace.cost_usd == 0.2
+    assert trace.cost_available is True
+    assert trace.llm_turns == 1
+    assert trace.to_dict()["llm_turns"] == 1
+    trace.replace([llm_span, KensaSpan(name="unknown", kind="llm")])
+    assert trace.cost_available is False
+    assert trace.cost_usd is None
+    partial_cost = trace.to_dict()
+    assert partial_cost["cost_usd"] is None
+    assert partial_cost["known_cost_usd"] == 0.2
+
+
+def test_record_llm_call_counts_toward_kensa_trace_llm_turns() -> None:
+    from kensa import record_llm_call
+
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test_record_llm_call",
+        group_id="group",
+        case_id="case",
+        no_judge=False,
+    )
+
+    case = kensa_case(id="llm_case", input="hello")
+
+    class Agent:
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            with record_llm_call(provider="test-provider", model="test-model"):
+                return ConversationResponse(output={"seen": str(case.input)})
+
+    token = set_current_runtime(runtime)
+    try:
+        result = case.run(Agent())
+    finally:
+        reset_current_runtime(token)
+    assert result.output == {"seen": "hello"}
+    assert runtime.trace.llm_turns == 1
+    assert runtime.trace.cost_available is False
+    assert runtime.trace.to_dict()["cost_usd"] is None
+    llm_spans = [span for span in runtime.trace.spans if span.kind == "llm"]
+    assert len(llm_spans) == 1
+    assert llm_spans[0].attributes["kensa.llm.provider"] == "test-provider"
+    assert llm_spans[0].attributes["kensa.llm.model"] == "test-model"
+
+
+def test_wait_status_renders_only_on_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str] | str] = []
+
+    class FakeStatus:
+        def __enter__(self) -> None:
+            calls.append("enter")
+
+        def __exit__(self, *args: object) -> None:
+            calls.append("exit")
+
+    class FakeTerminalConsole:
+        is_terminal = True
+
+        def status(self, text: str, *, spinner: str) -> FakeStatus:
+            calls.append((text, spinner))
+            return FakeStatus()
+
+    monkeypatch.setattr(cli_output, "ERR_CONSOLE", FakeTerminalConsole())
+
+    with cli_output.wait_status("Checking [status]"):
+        calls.append("body")
+
+    assert calls == [("Checking \\[status]", "line"), "enter", "body", "exit"]
+
+    class FakeNonTerminalConsole:
+        is_terminal = False
+
+        def status(self, text: str, *, spinner: str) -> FakeStatus:
+            raise AssertionError("status should not render off-terminal")
+
+    calls.clear()
+    monkeypatch.setattr(cli_output, "ERR_CONSOLE", FakeNonTerminalConsole())
+
+    with cli_output.wait_status("Checking"):
+        calls.append("body")
+
+    assert calls == ["body"]
+
+
+def test_judge_custom_provider_and_environment_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Provider:
+        def judge(self, **kwargs: Any) -> JudgeResult:
+            return JudgeResult(True, f"ok {kwargs['criteria']}", evidence=["e"])
+
+    set_judge_provider(Provider())
+    assert judge("out", "criteria").passed
+    set_judge_provider(None)
+
+    monkeypatch.setenv("KENSA_JUDGE_RESULT", "yes")
+    assert judge("out", "criteria").model == "KENSA_JUDGE_RESULT"
+    monkeypatch.delenv("KENSA_JUDGE_RESULT")
+    with monkeypatch.context() as context:
+        context.setattr("kensa.judge._provider_from_environment", lambda: None)
+        assert judge("out", "criteria").error
+
+    monkeypatch.delenv("KENSA_JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("KENSA_LLM_MODEL", raising=False)
+    monkeypatch.delenv("KENSA_JUDGE_PROVIDER", raising=False)
+    monkeypatch.delenv("KENSA_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def complete_with_evidence(*args: Any, **kwargs: Any) -> LLMResult:
+        del args
+        payload = {"passed": True, "reasoning": "ok", "evidence": ["single"]}
+        return LLMResult(
+            content='{"passed": true, "reasoning": "ok", "evidence": ["single"]}',
+            provider=cast(str, kwargs["provider"]),
+            model=cast(str, kwargs["model"]),
+            parsed=payload,
+        )
+
+    monkeypatch.setattr("kensa.judge.complete", complete_with_evidence)
+    default_judge = judge("out", "criteria")
+    assert default_judge.model == DEFAULT_LLM_MODEL
+    assert default_judge.provider == "openai"
+    assert default_judge.evidence == ["single"]
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    anthropic_judge = judge("out", "criteria")
+    assert anthropic_judge.model == "claude-sonnet-4-6"
+    assert anthropic_judge.provider == "anthropic"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "anthropic")
+    provider_judge = judge("out", "criteria")
+    assert provider_judge.model == "claude-sonnet-4-6"
+    assert provider_judge.provider == "anthropic"
+    monkeypatch.setenv("KENSA_JUDGE_PROVIDER", "openai")
+    openai_provider_judge = judge("out", "criteria")
+    assert openai_provider_judge.model == DEFAULT_LLM_MODEL
+    assert openai_provider_judge.provider == "openai"
+    monkeypatch.delenv("KENSA_JUDGE_PROVIDER")
+
+    monkeypatch.setenv("KENSA_JUDGE_MODEL", "gpt-5.5")
+
+    def complete_without_evidence(*args: Any, **kwargs: Any) -> LLMResult:
+        del args, kwargs
+        return LLMResult(
+            content='{"passed": false, "reasoning": "no"}',
+            parsed={"passed": False, "reasoning": "no"},
+        )
+
+    monkeypatch.setattr("kensa.judge.complete", complete_without_evidence)
+    fallback_judge = judge("out", "criteria")
+    assert fallback_judge.evidence == []
+    assert fallback_judge.provider == "openai"
+    assert fallback_judge.model == "gpt-5.5"
+
+
+def test_cli_edge_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert cli.main([]) == 2
+    assert cli._latest_result_artifact(tmp_path / "missing") is None
+    result_dir = tmp_path / ".kensa" / "results"
+    result_dir.mkdir(parents=True)
+    artifact = result_dir / "run.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "aggregates": [
+                    {
+                        "verdict": "pass",
+                        "group_id": "g",
+                        "case_id": "domain_case",
+                        "passed": 1,
+                        "total": 1,
+                    }
+                ]
+            }
+        )
+    )
+    cli._write_markdown_report(artifact, tmp_path / "report.md")
+    assert "Kensa Eval Report" in (tmp_path / "report.md").read_text()
+    artifact.write_text("{")
+    assert cli._latest_eval_readiness().evals_ready is False
+    skipped_readiness = cli._eval_readiness({"aggregates": [{}, {"verdict": "fail"}]})
+    assert skipped_readiness.evals_ready is False
+    artifact.write_text(
+        json.dumps(
+            {
+                "aggregates": [
+                    {
+                        "verdict": "pass",
+                        "group_id": "g",
+                        "case_id": "domain_case",
+                        "passed": 1,
+                        "total": 1,
+                    }
+                ]
+            }
+        )
+    )
+
+    def successful_eval(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args
+        control = read_control(Path(kwargs["control_path"]))
+        cli.write_run_artifacts(
+            run_id=control.run_id,
+            trials=[
+                TrialMetadata(
+                    nodeid="n",
+                    group_id="g",
+                    case_id="domain_case",
+                    trial_index=1,
+                    configured_trials=1,
+                    status="pass",
+                )
+            ],
+            result_path=control.result_path,
+            artifact_dir=control.artifact_dir,
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="", timeout=None)
+
+    monkeypatch.setattr(cli, "run_eval_process", successful_eval)
+    args = argparse.Namespace(
+        paths=[], no_judge=True, json_report=None, markdown_report=None, workers=1
+    )
+    assert cli._cmd_eval(args, ["-k", "x"]) == 0
+    assert capsys.readouterr().err == ""
+    assert cli._cmd_eval(args, []) == 0
+    args = argparse.Namespace(
+        paths=[],
+        no_judge=False,
+        json_report=str(tmp_path / "eval.json"),
+        markdown_report=str(tmp_path / "eval.md"),
+        workers=1,
+    )
+    assert cli._cmd_eval(args, []) == 0
+    assert (tmp_path / "eval.json").exists()
+    assert (tmp_path / "eval.md").exists()
+
+    readiness = cli._EvalReadiness(
+        harness_smoke_count=0,
+        domain_eval_count=0,
+        trace_artifact=None,
+    )
+    cli._print_eval_readiness_terminal(readiness, ["custom warning"], [], [])
+    assert "custom warning" in capsys.readouterr().out
+
+    existing = tmp_path / "exists.txt"
+    existing.write_text("old")
+    cli._write_if_missing(existing, "new")
+    assert existing.read_text() == "old"
+    assert cli._write_text_if_changed(existing, "old") is False
+    assert cli._find_git_root(Path("/")) == Path("/")
+    assert cli._summarize_init_added_paths(
+        [
+            Path(".agents/skills/kensa-setup/SKILL.md"),
+            Path(".agents/skills/kensa-setup/extra.md"),
+        ]
+    ) == [".agents/skills/kensa-setup/ (2 files)"]
+
+    monkeypatch.setenv("LOCAL_URL", "http://localhost:3000")
+    monkeypatch.setenv("LOCAL_DOMAIN_URL", "https://service.local")
+    monkeypatch.setenv("BAD_URL", "not-url")
+    assert "LOCAL_URL" not in cli._non_local_endpoint_markers()
+
+    monkeypatch.setenv("PRODUCTION_URL", "https://prod.example.com")
+    monkeypatch.setattr(
+        cli,
+        "_run_persistent_smoke",
+        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+    assert cli.main(["doctor"]) == 0
+    monkeypatch.setattr(
+        cli,
+        "_run_persistent_smoke",
+        lambda: subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+    )
+    assert cli.main(["doctor"]) == 1
+    assert cli.main(["init"]) == 0
+
+    monkeypatch.setattr(
+        cli,
+        "_run_persistent_smoke",
+        lambda: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.delenv("PRODUCTION_URL", raising=False)
+    assert cli._run_doctor_check().returncode == 0
+    trace_source = tmp_path / "traces.jsonl"
+    trace_source.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "redaction": {
+                    "version": "kensa.redactor.v2",
+                    "mandatory": True,
+                    "language": "en",
+                    "value_redaction_applied": True,
+                    "redaction_available": True,
+                    "ruleset_hash": cli.redact.RULESET_HASH,
+                    "pseudonymization": "instance-counter",
+                    "model": {
+                        "name": "en_core_web_sm",
+                        "version": "3.8.0",
+                        "checksum_verified": True,
+                    },
+                }
+            }
+        )
+    )
+    trace_source.write_text(
+        json.dumps(
+            {
+                "schema_version": "kensa.trace_view.v2",
+                "id": "tr",
+                "name": None,
+                "source": {
+                    "provider": "jsonl",
+                    "import_run_id": "import",
+                    "imported_at": "2026-06-30T00:00:00Z",
+                },
+                "started_at_unix_nano": None,
+                "ended_at_unix_nano": None,
+                "duration_ms": 0.0,
+                "status": "unknown",
+                "input": None,
+                "output": None,
+                "spans": [],
+            }
+        )
+        + "\n"
+    )
+    manifest_path = trace_source.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_sha256"] = hashlib.sha256(trace_source.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="sample", source=str(trace_source), json=False)
+        )
+        == 0
+    )
+    assert '"tr"' in capsys.readouterr().out
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(
+                traces_command="get",
+                source=str(trace_source),
+                trace_id="missing",
+                json=False,
+            )
+        )
+        == 1
+    )
+    assert (
+        cli_traces.cmd_traces(argparse.Namespace(traces_command="bad", source=str(trace_source)))
+        == 2
+    )
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="bad", source=str(trace_source), json=True)
+        )
+        == 2
+    )
+    empty_source = tmp_path / "empty.jsonl"
+    empty_source.write_text("")
+    empty_manifest = dict(manifest)
+    empty_manifest["artifact_sha256"] = hashlib.sha256(empty_source.read_bytes()).hexdigest()
+    empty_source.with_suffix(".manifest.json").write_text(json.dumps(empty_manifest))
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="sample", source=str(empty_source), json=False)
+        )
+        == 0
+    )
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="sample", source=str(empty_source), json=True)
+        )
+        == 0
+    )
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="list", source="local-dev", json=False)
+        )
+        == 1
+    )
+    monkeypatch.setenv("KENSA_ENABLE_LOCAL_DEV_TRACES", "1")
+    monkeypatch.delenv("KENSA_LOCAL_DEV_TRACES", raising=False)
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="list", source="local-dev", json=False)
+        )
+        == 1
+    )
+    assert (
+        cli_traces.cmd_traces(
+            argparse.Namespace(traces_command="list", source="local-dev", json=True)
+        )
+        == 1
+    )
+
+    monkeypatch.setattr(
+        cli_traces,
+        "load_trace_views",
+        lambda source, **kwargs: (_ for _ in ()).throw(ValueError("bad source")),
+    )
+    assert (
+        cli_traces.cmd_traces(argparse.Namespace(traces_command="list", source="bad", json=False))
+        == 1
+    )
+
+
+def test_pytest_plugin_direct_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert (
+        pytest_make_parametrize_id(cast(Any, None), kensa_case(id="case_id", input="x"), "case")
+        == "case_id"
+    )
+    assert pytest_make_parametrize_id(cast(Any, None), KensaTrial(2, 3), "_kensa_trial") == "trial2"
+    assert pytest_make_parametrize_id(cast(Any, None), object(), "x") is None
+    trial_fixture = cast(Any, _kensa_trial_fixture).__wrapped__
+    trace_fixture = cast(Any, kensa_trace_fixture).__wrapped__
+    assert trial_fixture(SimpleNamespace(param="bad")).id == "trial1"
+    assert trial_fixture(SimpleNamespace(param=KensaTrial(3, 3))).id == "trial3"
+    assert isinstance(trace_fixture(SimpleNamespace(node=object())), KensaTrace)
+    assert _marker_trials(cast(Any, SimpleNamespace(args=[2], kwargs={}))) == 2
+    with pytest.raises(pytest.UsageError):
+        _marker_trials(cast(Any, SimpleNamespace(args=["bad"], kwargs={})))
+    with pytest.raises(pytest.UsageError):
+        _marker_trials(cast(Any, SimpleNamespace(args=[], kwargs={"trials": 0})))
+    aggregate = KensaAggregate(
+        group_id="g",
+        case_id="c",
+        configured_trials=1,
+        total=1,
+        passed=1,
+        failed=0,
+        errored=0,
+        partial=False,
+        verdict="pass",
+        trials=[],
+    )
+    assert aggregate.to_dict()["verdict"] == "pass"
+    assert _case_id(cast(Any, SimpleNamespace())) == "default"
+    markerless_item = SimpleNamespace(
+        callspec=SimpleNamespace(params={PRIVATE_TRIAL: KensaTrial(1, 1)}),
+        get_closest_marker=lambda name: None,
+    )
+    assert _runtime_for_item(cast(Any, markerless_item)) is None
+    config = SimpleNamespace(getoption=lambda name: None)
+    state = KensaSessionState(cast(Any, config))
+    assert len(state.run_id) == 32
+    assert state.artifact_dir == Path.cwd() / ".kensa"
+    assert not state.write_artifacts
+
+    class Terminal:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write_sep(self, sep: str, title: str) -> None:
+            self.lines.append(f"{sep}{title}")
+
+        def write_line(self, line: str) -> None:
+            self.lines.append(line)
+
+    class Config:
+        def __init__(self, report: str = "json") -> None:
+            self.report = report
+
+        def getoption(self, name: str) -> Any:
+            return self.report if name == "--kensa-report" else None
+
+    term = Terminal()
+    config_obj = Config()
+    state = KensaSessionState(cast(Any, config_obj))
+    state.aggregates = [aggregate]
+    state.trials = [
+        TrialMetadata(
+            nodeid="n",
+            group_id="g",
+            case_id="c",
+            trial_index=1,
+            configured_trials=1,
+            status="pass",
+        )
+    ]
+    config_obj.__dict__["_kensa_state"] = state
+    pytest_terminal_summary(cast(Any, term), 0, cast(Any, config_obj))
+    assert any('"aggregates"' in line for line in term.lines)
+    assert any('"summary"' in line for line in term.lines)
+
+    term_config = Config("term")
+    term_state = KensaSessionState(cast(Any, term_config))
+    term_state.aggregates = [aggregate]
+    term_state.trials = state.trials
+    term_config.__dict__["_kensa_state"] = term_state
+    pytest_terminal_summary(cast(Any, term), 0, cast(Any, term_config))
+    assert "Cost: n/a" in term.lines
+
+    class Outcome:
+        def __init__(self, report: Any) -> None:
+            self._report = report
+
+        def get_result(self) -> Any:
+            return self._report
+
+    non_runtime_item = SimpleNamespace(nodeid="n", config=config_obj)
+    report = SimpleNamespace(when="setup", failed=True, passed=False)
+    call = SimpleNamespace(excinfo=None)
+    hook = pytest_runtest_makereport(cast(Any, non_runtime_item), cast(Any, call))
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(Outcome(report))
+
+
+def test_pytest_plugin_watchdog_control_paths(
+    tmp_path: Path,
+) -> None:
+    control_path = tmp_path / "control.json"
+    control = WatchdogControl(
+        run_id="run",
+        result_path=tmp_path / "results" / "run.json",
+        artifact_dir=tmp_path,
+        default_timeout_s=10,
+    )
+    write_control(control_path, control)
+
+    class Config:
+        def getoption(self, name: str) -> Any:
+            if name == "--kensa-control-path":
+                return str(control_path)
+            if name == "--kensa-write-artifacts":
+                return True
+            return None
+
+    config = Config()
+    state = KensaSessionState(cast(Any, config))
+    config.__dict__["_kensa_state"] = state
+    assert state.artifact_dir == tmp_path
+    assert state.result_path == tmp_path / "results" / "run.json"
+    assert state.write_artifacts
+    marker = cast(Any, SimpleNamespace(args=[], kwargs={"timeout_s": 2}))
+    assert _marker_timeout(marker, cast(Any, config)) == 2
+    with pytest.raises(pytest.UsageError, match="positive finite"):
+        _marker_timeout(
+            cast(Any, SimpleNamespace(args=[], kwargs={"timeout_s": True})),
+            cast(Any, config),
+        )
+
+    item = SimpleNamespace(
+        nodeid="test.py::test_agent[trial1]",
+        config=config,
+        callspec=SimpleNamespace(params={PRIVATE_TRIAL: KensaTrial(1, 1, timeout_s=2)}),
+        get_closest_marker=lambda name: (
+            SimpleNamespace(args=[], kwargs={"timeout_s": 2}) if name == "kensa" else None
+        ),
+    )
+    hook = pytest_runtest_protocol(cast(Any, item), None)
+    next(hook)
+    active = read_control(control_path).active_trial
+    assert active is not None
+    assert active.timeout_s == 2
+    assert active.phase == "setup"
+    operation = ActiveOperation("model.call", {"attempt": 1}, kind="llm")
+    assert operation.to_dict()["kind"] == "llm"
+    state.set_active_phase("other", "call")
+    assert read_control(control_path).active_trial == active
+    state.set_active_operation("other", operation)
+    assert read_control(control_path).active_trial == active
+    state.set_active_operation(item.nodeid, operation)
+    operation_active = read_control(control_path).active_trial
+    assert operation_active is not None
+    assert operation_active.active_operation == operation
+    state.set_active_phase(item.nodeid, "call")
+    call_active = read_control(control_path).active_trial
+    assert call_active is not None
+    assert call_active.phase == "call"
+    assert call_active.call_started_monotonic_ns is not None
+    assert call_active.active_operation is None
+    state.set_active_operation(item.nodeid, None)
+    cleared_active = read_control(control_path).active_trial
+    assert cleared_active is not None
+    assert cleared_active.active_operation is None
+    with pytest.raises(StopIteration):
+        hook.send(None)
+    completed_control = read_control(control_path)
+    assert completed_control.active_trial is None
+    snapshot = TrialMetadata(
+        nodeid=item.nodeid,
+        group_id="g",
+        case_id="c",
+        trial_index=1,
+        configured_trials=1,
+        status="provisional",
+    )
+    state.set_trial_snapshot(snapshot)
+    assert read_control(control_path).trial_snapshot == snapshot
+    state.set_active_trial(active)
+    assert read_control(control_path).active_trial == active
+    assert read_control(control_path).trial_snapshot is None
+    state.set_active_trial(None)
+    state.mark_incomplete("pytest_stopped", "stopped")
+    assert state.complete is False
+    assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
+    state.mark_incomplete("engine_failure", "secondary failure")
+    assert state.interruption == {"kind": "pytest_stopped", "message": "stopped"}
+
+    plain_state = KensaSessionState(cast(Any, SimpleNamespace(getoption=lambda name: None)))
+    plain_state.set_trial_snapshot(snapshot)
+    plain_state.set_active_operation("n", operation)
+    plain_state.set_active_phase("n", "call")
+    plain_state.set_active_trial(
+        ActiveTrial(
+            nodeid="n",
+            group_id="g",
+            case_id="c",
+            trial_index=1,
+            configured_trials=1,
+            timeout_s=1,
+            started_monotonic_ns=1,
+        )
+    )
+
+    class Outcome:
+        def __init__(self, report: Any) -> None:
+            self._report = report
+
+        def get_result(self) -> Any:
+            return self._report
+
+    report = SimpleNamespace(when="setup", failed=True)
+    call = SimpleNamespace(excinfo=None)
+    runtime_item = SimpleNamespace(
+        nodeid="n[trial1]",
+        config=config,
+        callspec=SimpleNamespace(params={PRIVATE_TRIAL: KensaTrial(1, 1)}),
+        get_closest_marker=lambda name: (
+            SimpleNamespace(
+                args=[],
+                kwargs={},
+            )
+            if name == "kensa"
+            else None
+        ),
+    )
+    state.trials = [
+        TrialMetadata(
+            nodeid="n[trial1]",
+            group_id="n",
+            case_id="default",
+            trial_index=1,
+            configured_trials=1,
+            status="error",
+            failure=TrialFailure(
+                category="harness",
+                kind="setup",
+                message="setup failed",
+                evidence={"phase": "setup"},
+            ),
+        )
+    ]
+    hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(Outcome(report))
+
+    skipped_report = SimpleNamespace(when="setup", failed=False, skipped=True)
+    skipped_hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
+    next(skipped_hook)
+    with pytest.raises(StopIteration):
+        skipped_hook.send(Outcome(skipped_report))
+    assert state.trials[0].status == "skipped"
+    assert state.trials[0].failure is not None
+    assert state.trials[0].failure.kind == "skip"
+
+    state.trials[0] = TrialMetadata(
+        nodeid="n[trial1]",
+        group_id="n",
+        case_id="default",
+        trial_index=1,
+        configured_trials=1,
+        status="fail",
+        failure=TrialFailure(
+            category="agent",
+            kind="assertion",
+            message="failed",
+        ),
+    )
+    teardown_skip = SimpleNamespace(when="teardown", failed=False, skipped=True)
+    teardown_hook = pytest_runtest_makereport(cast(Any, runtime_item), cast(Any, call))
+    next(teardown_hook)
+    with pytest.raises(StopIteration):
+        teardown_hook.send(Outcome(teardown_skip))
+    assert state.trials[0].status == "fail"
+
+
+def test_runtime_direct_error_and_flush_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    case = kensa_case(id="runtime", input="hello")
+    runtime = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="test.py::test_runtime[trial1-runtime]",
+        group_id="g",
+        case_id="runtime",
+        no_judge=False,
+    )
+    token = set_current_runtime(runtime)
+    assert current_runtime() is runtime
+    reset_current_runtime(token)
+    assert current_runtime() is None
+
+    with pytest.raises(RuntimeError, match="sync"):
+        runtime.run_case(case, lambda: (_ for _ in ()).throw(RuntimeError("sync")))
+    runtime2 = KensaTrialRuntime(
+        trial=KensaTrial(1, 1),
+        nodeid="n",
+        group_id="g",
+        case_id="runtime",
+        no_judge=False,
+    )
+
+    async def _bad():
+        raise RuntimeError("async")
+
+    with pytest.raises(RuntimeError, match="async"):
+        asyncio.run(runtime2.run_case(case, _bad))
+
+    class TypeErrorFlush:
+        def force_flush(self) -> bool:
+            return False
+
+    runtime2._trace_id = "missing"
+    monkeypatch.setattr("kensa.runtime.trace.get_tracer_provider", lambda: TypeErrorFlush())
+    runtime2._flush_and_populate_trace()
+    assert runtime2.trace.incomplete
+
+    class ExceptionFlush:
+        def force_flush(self, timeout_millis: int | None = None) -> bool:
+            raise RuntimeError("flush failed")
+
+    monkeypatch.setattr("kensa.runtime.trace.get_tracer_provider", lambda: ExceptionFlush())
+    runtime2._flush_and_populate_trace()
+    assert "flush failed" in str(runtime2.trace.incomplete_reason)
+    assert collect_spans(None) == []
+    assert KensaSpan(name="x", attributes={"bad": {1, 2}}).to_dict()["attributes"]["bad"] == {1, 2}
+    with pytest.raises(KensaCaseError, match="JSON-serializable"):
+        runtime2._record_output_and_trace({1})
+
+    class DuplicateExporter:
+        def get_finished_spans(self) -> list[Any]:
+            context = SimpleNamespace(trace_id=1, span_id=2)
+            raw = SimpleNamespace(
+                name="dup",
+                parent=None,
+                start_time=None,
+                end_time=None,
+                attributes={},
+                status=SimpleNamespace(status_code=SimpleNamespace(name="OK")),
+                get_span_context=lambda: context,
+            )
+            return [raw, raw]
+
+    import kensa.runtime as runtime_module
+
+    previous_exporter = runtime_module._EXPORTER
+    runtime_module._EXPORTER = DuplicateExporter()
+    assert len(collect_spans("00000000000000000000000000000001")) == 1
+    runtime_module._EXPORTER = previous_exporter
+    assert runtime_module.jsonable({1, 2}).startswith("{")
+
+    monkeypatch.setattr(
+        "kensa.runtime.trace.set_tracer_provider",
+        lambda provider: (_ for _ in ()).throw(RuntimeError("set")),
+    )
+    monkeypatch.setattr(
+        "kensa.runtime.trace.get_tracer_provider",
+        lambda: SimpleNamespace(_kensa_exporter="fallback"),
+    )
+
+    previous_ready = runtime_module._PROVIDER_READY
+    previous_exporter = runtime_module._EXPORTER
+    runtime_module._PROVIDER_READY = False
+    ensure_tracing()
+    assert runtime_module._EXPORTER == "fallback"
+    runtime_module._PROVIDER_READY = previous_ready
+    runtime_module._EXPORTER = previous_exporter
+
+
+def test_tracing_exporter_edge_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = JSONLSpanExporter(tmp_path / "spans.jsonl")
+    assert exporter.force_flush() is True
+    assert exporter.shutdown() is None
+    manifest_exporter = JSONLSpanExporter(tmp_path / "run" / "spans.jsonl", run_id="run")
+    assert manifest_exporter.force_flush() is True
+    assert manifest_exporter.shutdown() is None
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["span_count"] == 0
+    monkeypatch.delenv("KENSA_TRACE_DIR", raising=False)
+    instrument()
+
+    class Provider:
+        pass
+
+    from kensa import tracing
+
+    assert not tracing._add_jsonl_processor(Provider(), tmp_path / "x.jsonl")
+    assert tracing.jsonable({1, 2}).startswith("{")
+
+    class NoContextSpan:
+        name = "no_context"
+        parent = None
+        start_time = None
+        end_time = None
+        status = SimpleNamespace(status_code=SimpleNamespace(name="OK"))
+
+        def __init__(self) -> None:
+            self.attributes: dict[str, Any] = {}
+
+        def get_span_context(self) -> None:
+            return None
+
+    assert tracing.span_to_dict(cast(Any, NoContextSpan()))["trace_id"] is None
+
+    class ProviderWithProcessor:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    provider = ProviderWithProcessor()
+    monkeypatch.setattr("kensa.tracing.trace.get_tracer_provider", lambda: provider)
+    instrument(tmp_path / "instrument")
+    assert provider.processors
+    provider_path = ProviderWithProcessor()
+    assert tracing._add_jsonl_processor(provider_path, tmp_path / "path.jsonl")
+    assert provider_path.processors
+
+    class LinkContextSpan:
+        name = "with_link"
+        parent = None
+        start_time = None
+        end_time = None
+        status = SimpleNamespace(status_code=SimpleNamespace(name="OK"))
+
+        def __init__(self) -> None:
+            self.attributes: dict[str, Any] = {}
+            self.events: list[Any] = []
+            self.links = [
+                SimpleNamespace(
+                    context=SimpleNamespace(trace_id=1, span_id=2),
+                    attributes={"link_attr": {1, 2}},
+                )
+            ]
+
+        def get_span_context(self) -> Any:
+            return SimpleNamespace(trace_id=3, span_id=4, trace_state="state")
+
+    link_row = tracing.span_to_dict(cast(Any, LinkContextSpan()))
+    assert link_row["links"][0]["span_id"] == "0000000000000002"
+    assert link_row["links"][0]["attributes"]["link_attr"].startswith("{")
+
+    class NoAddProvider:
+        pass
+
+    monkeypatch.setattr("kensa.tracing.trace.get_tracer_provider", lambda: NoAddProvider())
+    monkeypatch.setattr(
+        "kensa.tracing.trace.set_tracer_provider",
+        lambda provider: (_ for _ in ()).throw(RuntimeError("set")),
+    )
+    instrument(tmp_path / "fallback")
+
+
+def test_cli_module_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(sys.modules, "kensa.cli", raising=False)
+    monkeypatch.setattr("sys.argv", ["kensa", "--help"])
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "kensa" / "cli.py"
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(str(cli_path), run_name="__main__")
+    assert excinfo.value.code == 0
