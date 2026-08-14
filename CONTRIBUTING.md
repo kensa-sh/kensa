@@ -13,9 +13,9 @@ pnpm install --frozen-lockfile
 pnpm build
 ```
 
-The source checkout runs Python eval tests against the locally built TypeScript engine. During the
-transition, an installed package without that engine keeps the existing Python path; setting
-`KENSA_ENGINE_COMMAND` opts into an explicit engine and fails closed if it cannot start.
+The source checkout runs Python eval tests against the locally built TypeScript engine. Engine
+resolution fails closed: released wheels use their bundled executable, editable checkouts use the
+engine produced by `pnpm build`, and `KENSA_ENGINE_COMMAND` selects an explicit executable.
 
 Pip users can install the same editable development environment with:
 
