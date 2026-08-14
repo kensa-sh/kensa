@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,24 @@ from kensa import cli, target_probe
 from kensa.cli import main
 from kensa.errors import KensaEvalError
 from kensa.models import KensaProjectConfig
+
+
+def _stub_doctor_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["pytest", "tests/evals/test_kensa_smoke.py"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(cli, "_run_persistent_smoke", run)
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -95,6 +114,7 @@ def test_doctor_reports_target_failure_boundary_in_text_and_json(
     json_output: bool,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     case_path = write_case(tmp_path)
     if behavior == "startup":
         command = (str(tmp_path / "missing-target"),)
@@ -121,7 +141,7 @@ def test_doctor_reports_target_failure_boundary_in_text_and_json(
 
 
 @pytest.mark.parametrize("json_output", [False, True])
-@pytest.mark.parametrize("failure", ["missing_command", "invalid_vector", "missing_case"])
+@pytest.mark.parametrize("failure", ["missing_command", "invalid_vector"])
 def test_doctor_reports_target_configuration_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -130,14 +150,11 @@ def test_doctor_reports_target_configuration_failures(
     failure: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     case_path = write_case(tmp_path)
     if failure == "invalid_vector":
         (tmp_path / "pyproject.toml").write_text("[tool.kensa]\ntarget_command = []\n")
-    elif failure == "missing_case":
-        configure_target(tmp_path, (sys.executable, "unused.py"))
-    args = ["doctor"]
-    if failure != "missing_case":
-        args.extend(("--target-case", str(case_path)))
+    args = ["doctor", "--target-case", str(case_path)]
     if json_output:
         args.append("--json")
 
@@ -155,6 +172,52 @@ def test_doctor_reports_target_configuration_failures(
         )
     else:
         assert "failed at configuration" in captured.err
+
+
+def test_configured_target_without_target_case_keeps_probe_inactive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
+    configure_target(tmp_path, (sys.executable, "unused.py"))
+
+    code = main(["doctor", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["data"]["target"]["requested"] is False
+    assert payload["data"]["target"]["configured"] is True
+    assert payload["data"]["target"]["failure"] is None
+    assert payload["data"]["harness_readiness"] == {
+        "ready": True,
+        "smoke_eval_count": 1,
+    }
+    assert not any("--target-case" in error for error in payload["errors"])
+
+
+def test_invalid_target_config_without_target_case_runs_regular_doctor_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch, stdout="real smoke output")
+    (tmp_path / "pyproject.toml").write_text("[tool.kensa]\ntarget_timeout_s = 0\n")
+
+    code = main(["doctor", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["data"]["target"]["requested"] is False
+    assert payload["data"]["smoke"] == {
+        "returncode": 0,
+        "stdout": "real smoke output",
+        "stderr": "",
+    }
+    assert any("invalid Kensa configuration" in error for error in payload["errors"])
+    assert not any("--target-case" in error for error in payload["errors"])
 
 
 @pytest.mark.parametrize(
@@ -214,6 +277,7 @@ def test_doctor_allows_explicit_live_effects_and_states_probe_before_invocation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     case_path = write_case(tmp_path)
     command = fault_command(tmp_path, "live", tmp_path / "target.jsonl")
     configure_target(tmp_path, command)
@@ -252,15 +316,26 @@ def test_doctor_success_keeps_observation_and_authenticity_claims_separate(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     log = tmp_path / "target.jsonl"
     command = success_command(tmp_path, "sync", log)
     configure_target(tmp_path, command)
     case_path = write_case(tmp_path)
+    original_read_config = cli.kensa_config.read_project_config
+    config_reads = 0
+
+    def read_config(*args: Any, **kwargs: Any) -> KensaProjectConfig:
+        nonlocal config_reads
+        config_reads += 1
+        return original_read_config(*args, **kwargs)
+
+    monkeypatch.setattr(cli.kensa_config, "read_project_config", read_config)
 
     code = main(["doctor", "--target-case", str(case_path), "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
+    assert config_reads == 1
     target = payload["data"]["target"]
     assert target["command"] == list(command)
     assert target["observed_lifecycle"][-1] == "cleanup"
@@ -270,12 +345,83 @@ def test_doctor_success_keeps_observation_and_authenticity_claims_separate(
     assert "production constructor" not in rendered
 
 
+def test_doctor_probe_preserves_actual_smoke_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(
+        monkeypatch,
+        returncode=7,
+        stdout="smoke stdout",
+        stderr="smoke stderr",
+    )
+    command = success_command(tmp_path, "sync", tmp_path / "target.jsonl")
+    configure_target(tmp_path, command)
+    case_path = write_case(tmp_path)
+
+    code = main(["doctor", "--target-case", str(case_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["data"]["target"]["ready"] is True
+    assert payload["data"]["smoke"] == {
+        "returncode": 7,
+        "stdout": "smoke stdout",
+        "stderr": "smoke stderr",
+    }
+    assert payload["data"]["harness_readiness"]["smoke_eval_count"] == 0
+    assert cli._ENV_SAFETY_WARNING in payload["warnings"]
+
+
+def test_doctor_probe_cannot_bypass_harness_authenticity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
+    eval_dir = tmp_path / "tests" / "evals"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "conftest.py").write_text(
+        """import pytest
+from kensa.pytest import ConversationResponse
+
+
+class FakeAgent:
+    pass
+
+
+@pytest.fixture
+def kensa_run(case):
+    class Agent:
+        def respond(self, messages):
+            return ConversationResponse(output={"ok": case.input})
+    return Agent()
+"""
+    )
+    command = success_command(tmp_path, "sync", tmp_path / "target.jsonl")
+    configure_target(tmp_path, command)
+    case_path = write_case(tmp_path)
+
+    code = main(["doctor", "--target-case", str(case_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["data"]["target"]["ready"] is True
+    assert payload["data"]["harness_readiness"]["smoke_eval_count"] == 1
+    assert payload["data"]["harness_authenticity_warnings"]
+    assert any("Harness authenticity check failed" in error for error in payload["errors"])
+
+
 def test_doctor_terminal_reports_config_lifecycle_and_target_attestation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     log = tmp_path / "target.jsonl"
     command = success_command(tmp_path, "sync", log)
     configure_target(tmp_path, command)
@@ -301,6 +447,7 @@ def test_doctor_forwards_complete_message_case_history(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _stub_doctor_smoke(monkeypatch)
     log = tmp_path / "target.jsonl"
     command = success_command(tmp_path, "sync", log)
     configure_target(tmp_path, command)
@@ -377,7 +524,7 @@ def test_domain(case, kensa_run):
     assert doctor_payload["data"]["target"]["ready"] is True
     assert doctor_payload["data"]["harness_readiness"] == {
         "ready": True,
-        "smoke_eval_count": 0,
+        "smoke_eval_count": 1,
     }
     assert eval_code == 0
     assert eval_payload["data"]["harness_readiness"]["ready"] is True
@@ -405,8 +552,11 @@ def test_domain(case, kensa_run):
         "open",
         "turn",
         "close",
+        "open",
+        "turn",
+        "close",
     ]
-    assert len({event["sentinel"] for event in events}) == 3
+    assert len({event["sentinel"] for event in events}) == 4
 
 
 def test_target_probe_secondary_cleanup_failure_preserves_primary_boundary(

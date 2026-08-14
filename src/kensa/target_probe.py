@@ -104,9 +104,7 @@ def verify_configured_target(
     cwd: Path,
     config_error: str | None = None,
 ) -> TargetProbeResult:
-    requested = (
-        config_error is not None or config.target_command is not None or case_path is not None
-    )
+    requested = case_path is not None
     result = TargetProbeResult(
         requested=requested,
         configured=config.target_command is not None,
@@ -132,13 +130,7 @@ def verify_configured_target(
             kind="missing_command",
         )
         return result
-    if case_path is None:
-        result.failure = TargetProbeFailure(
-            boundary="configuration",
-            message="a readiness case is required; pass --target-case PATH",
-            kind="missing_case",
-        )
-        return result
+    assert case_path is not None
     try:
         case = _readiness_case(case_path)
     except (OSError, ValueError, KensaCaseError) as exc:

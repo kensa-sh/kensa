@@ -123,6 +123,10 @@ requires a non-empty response and target-supplied execution attestation, checks 
 policy, and cleans up once. Configuration, startup, handshake, session open, turn, response,
 evidence, effect policy, cleanup, and timeout failures are reported separately.
 
+The probe runs only when `--target-case` is supplied. It is additional to the regular doctor
+checks: doctor still runs the persistent smoke test, reports its real subprocess result, and
+enforces the harness-authenticity gate when a repository fixture exists.
+
 An attestation with `effects="live"` fails by default. Prefer `none`, `captured`, or `sandboxed`
 effects for readiness. If live effects are intentional and approved, opt in explicitly:
 
