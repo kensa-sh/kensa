@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import io
 import json
@@ -916,8 +917,8 @@ def test_protocol_schema_and_transcripts_are_canonical_and_language_neutral() ->
 
     assert schema == target_protocol_schema()
     Draft202012Validator.check_schema(schema)
-    request_validator = Draft202012Validator(schema["$defs"]["request"])
-    response_validator = Draft202012Validator(schema["$defs"]["response"])
+    request_validator = Draft202012Validator({**schema, "$ref": "#/$defs/request"})
+    response_validator = Draft202012Validator({**schema, "$ref": "#/$defs/response"})
     for line in _REQUEST_TRANSCRIPT_PATH.read_text().splitlines():
         request_validator.validate(json.loads(line))
     for line in _RESPONSE_TRANSCRIPT_PATH.read_text().splitlines():
@@ -928,12 +929,24 @@ def test_target_host_adds_no_agent_framework_or_process_dependency() -> None:
     source = (_ROOT / "src" / "kensa" / "target_command.py").read_text()
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text())
     dependencies = project["project"]["dependencies"]
+    imports: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imports.add(node.module.split(".")[0])
 
     assert not any("jsonschema" in dependency for dependency in dependencies)
-    assert "import pytest" not in source
-    assert "import subprocess" not in source
-    assert "import requests" not in source
-    assert "import httpx" not in source
-    assert "import openai" not in source
-    assert "import anthropic" not in source
-    assert "import langfuse" not in source
+    assert imports == {
+        "__future__",
+        "asyncio",
+        "collections",
+        "copy",
+        "inspect",
+        "json",
+        "kensa",
+        "pydantic",
+        "sys",
+        "types",
+        "typing",
+    }

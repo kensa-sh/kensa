@@ -663,8 +663,10 @@ def target_protocol_schema() -> dict[str, Any]:
         "$id": "https://kensa.sh/schemas/target-command-v1.json",
         "title": "Kensa target command protocol v1",
         "$defs": {
-            "request": _REQUEST_ADAPTER.json_schema(),
-            "response": _RESPONSE_ADAPTER.json_schema(),
+            "request": _REQUEST_ADAPTER.json_schema(ref_template="#/$defs/request/$defs/{model}"),
+            "response": _RESPONSE_ADAPTER.json_schema(
+                ref_template="#/$defs/response/$defs/{model}"
+            ),
         },
     }
 
