@@ -27,6 +27,7 @@ from kensa.conversation import ConversationResponse
 from kensa.target import AgentRunEvidence
 
 TARGET_PROTOCOL_VERSION = "kensa.target.v1"
+_MAX_REQUESTS_PER_PROCESS = 65_536
 
 _MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
 _T = TypeVar("_T")
@@ -66,6 +67,7 @@ class _FunctionCall(BaseModel):
     def _validate_arguments(cls, value: str) -> str:
         try:
             parsed = json.loads(value, parse_constant=_reject_json_constant)
+            _validate_json(parsed)
         except (json.JSONDecodeError, ValueError) as exc:
             raise ValueError("must contain a JSON object") from exc
         if not isinstance(parsed, dict):
@@ -295,17 +297,25 @@ class _Host:
         self._runner: asyncio.Runner | None = None
 
     def process(self, line: str) -> bool:
-        request_id = _extract_request_id(line)
         try:
             request = _parse_request(line)
         except _RequestError as exc:
-            self._write_error(request_id, exc.code, exc.message, fatal=exc.fatal)
+            self._write_error(exc.request_id, exc.code, exc.message, fatal=exc.fatal)
             return False
         if request.request_id in self._request_ids:
             self._write_error(
                 request.request_id,
                 "duplicate_request_id",
                 "request_id must be unique within a target process",
+            )
+            return False
+        if len(self._request_ids) >= _MAX_REQUESTS_PER_PROCESS:
+            self._failed = True
+            self._write_error(
+                request.request_id,
+                "request_limit_exceeded",
+                f"target process accepts at most {_MAX_REQUESTS_PER_PROCESS} requests",
+                fatal=True,
             )
             return False
         self._request_ids.add(request.request_id)
@@ -571,26 +581,23 @@ class _Host:
 
 
 class _RequestError(ValueError):
-    def __init__(self, code: str, message: str, *, fatal: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        request_id: str | None = None,
+        fatal: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.request_id = request_id
         self.fatal = fatal
 
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
-
-
-def _extract_request_id(line: str) -> str | None:
-    try:
-        payload = json.loads(line, parse_constant=_reject_json_constant)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    value = payload.get("request_id")
-    return value if isinstance(value, str) and value.strip() else None
 
 
 def _parse_request(line: str) -> TargetRequest:
@@ -600,10 +607,26 @@ def _parse_request(line: str) -> TargetRequest:
         raise _RequestError("invalid_json", "request must be valid JSON") from exc
     if not isinstance(payload, dict):
         raise _RequestError("invalid_request", "request must be a JSON object")
+    raw_request_id = payload.get("request_id")
+    request_id = (
+        raw_request_id if isinstance(raw_request_id, str) and raw_request_id.strip() else None
+    )
+    try:
+        _validate_json(payload)
+    except (TypeError, ValueError) as exc:
+        raise _RequestError(
+            "invalid_json",
+            "request must be valid JSON",
+            request_id=request_id,
+        ) from exc
     try:
         return _REQUEST_ADAPTER.validate_python(payload)
     except ValidationError as exc:
-        raise _RequestError("invalid_request", "request does not match the protocol") from exc
+        raise _RequestError(
+            "invalid_request",
+            "request does not match the protocol",
+            request_id=request_id,
+        ) from exc
 
 
 def _validated_messages(value: list[_WireMessage]) -> list[dict[str, JsonValue]]:

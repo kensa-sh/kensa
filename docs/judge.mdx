@@ -98,19 +98,21 @@ Put deterministic assertions before `judge(...)` so obvious failures fail fast a
 The judge resolves a model in this order:
 
 1. `KENSA_JUDGE_MODEL` (or `KENSA_LLM_MODEL`) - explicit override
-2. Default: `gpt-5.4-mini` via OpenAI
+2. Provider default: `gpt-5.6-luna` for OpenAI or `claude-sonnet-5` for Anthropic
 
 Provider is taken from `KENSA_JUDGE_PROVIDER` (or `KENSA_LLM_PROVIDER`), otherwise inferred from the model. Calls go through the [Any LLM](https://pypi.org/project/any-llm-sdk/) SDK, so the supported providers are `openai` and `anthropic`.
 
 | Model | Provider |
 |---|---|
-| `gpt-5.4-mini` (default) | `openai` |
+| `gpt-5.6-luna` (OpenAI default) | `openai` |
 | `gpt-5.5` | `openai` |
+| `gpt-5.4-mini` | `openai` |
+| `claude-sonnet-5` (Anthropic default) | `anthropic` |
 | `claude-sonnet-4-6` | `anthropic` |
 | `claude-opus-4-7` | `anthropic` |
 
 ```bash
-export KENSA_JUDGE_MODEL=claude-sonnet-4-6
+export KENSA_JUDGE_MODEL=claude-sonnet-5
 export KENSA_JUDGE_PROVIDER=anthropic
 kensa eval
 ```

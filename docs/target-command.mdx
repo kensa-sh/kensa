@@ -61,14 +61,16 @@ stderr.
 | `close_session` | `session_closed` | Run optional session cleanup once |
 | `shutdown` | `shutdown` | End the process cleanly |
 
-Request IDs must be non-empty and unique within the process. Session IDs on turn and close frames
-must match the opened session. Unknown fields, invalid order, malformed messages, unsupported
-versions, history divergence, and non-JSON response values are rejected without invoking target
+Request IDs must be non-empty and unique within the process. One process accepts at most 65,536
+requests so duplicate detection remains bounded. Session IDs on turn and close frames must match
+the opened session. Unknown fields, invalid order, malformed messages, unsupported versions,
+history divergence, and non-JSON request or response values are rejected without invoking target
 code.
 
 Target exceptions are reported as `error` frames. The stable `code` identifies the failed boundary,
-while diagnostic details remain on stderr. A target failure closes that path to later turns, so a
-client must not retry an ambiguous open or turn. It may still close the session and shut down.
+while diagnostic details remain on stderr. An error with `fatal=true` makes the session unavailable
+for later turns, but the client may still close the session and shut down. A client must not retry an
+ambiguous open or turn.
 
 An explicit `shutdown` returns process status 0. EOF before shutdown closes an active session and
 returns status 1.
@@ -89,9 +91,10 @@ forwards the complete conversation history, attaches returned run evidence, and 
 terminates the process during fixture cleanup.
 
 The command is executed directly without a shell from the directory containing `pyproject.toml`.
-It inherits the pytest process environment. `target_timeout_s` bounds each protocol write, response,
-and cleanup operation. Kensa never retries an open or turn after a timeout, malformed response,
-crash, or ambiguous write.
+It inherits the pytest process environment. `target_timeout_s` bounds each normal protocol
+operation and the complete close, shutdown, and process-reaping sequence. Kensa never retries an
+open or turn after a timeout, malformed response, crash, or ambiguous write. Failure diagnostics
+include at most the final 64 KiB of target stderr and state when earlier output was truncated.
 
 A repository-defined `kensa_run` fixture overrides the configured command explicitly. Without
 `target_command`, Kensa does not register the fixture and existing explicit-fixture behavior is

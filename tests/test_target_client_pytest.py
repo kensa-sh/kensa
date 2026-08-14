@@ -12,6 +12,8 @@ from target_client_support import (
     _host_script,
 )
 
+from kensa import pytest_plugin
+
 
 def test_configured_fixture_matches_in_process_case_results(
     pytester: pytest.Pytester,
@@ -401,15 +403,68 @@ def test_configured_fixture_requires_exactly_one_case(pytester: pytest.Pytester)
     result.stdout.fnmatch_lines(["*requires exactly one KensaCase fixture value*"])
 
 
-def test_invalid_target_configuration_fails_pytest_startup(pytester: pytest.Pytester) -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        "[tool.kensa]\ntarget_command = []\n",
+        "[tool.kensa]\ntarget_timeout_s = 0\n",
+    ],
+)
+def test_invalid_target_configuration_fails_pytest_startup(
+    pytester: pytest.Pytester,
+    source: str,
+) -> None:
     root = Path(str(pytester.path))
-    (root / "pyproject.toml").write_text("[tool.kensa]\ntarget_command = []\n")
+    (root / "pyproject.toml").write_text(source)
     pytester.makepyfile("def test_never_runs():\n    pass\n")
 
     result = pytester.runpytest("-q")
 
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     result.stderr.fnmatch_lines(["*invalid Kensa configuration in*pyproject.toml*"])
+
+
+def test_unrelated_invalid_kensa_configuration_does_not_break_pytest_startup(
+    pytester: pytest.Pytester,
+) -> None:
+    root = Path(str(pytester.path))
+    (root / "pyproject.toml").write_text('[tool.kensa]\nevidence_source = "invalid"\n')
+    pytester.makepyfile("def test_runs():\n    pass\n")
+
+    result = pytester.runpytest("-q")
+
+    result.assert_outcomes(passed=1)
+
+
+def test_target_timeout_without_command_does_not_register_fixture(
+    pytester: pytest.Pytester,
+) -> None:
+    root = Path(str(pytester.path))
+    (root / "pyproject.toml").write_text("[tool.kensa]\ntarget_timeout_s = 1\n")
+    pytester.makepyfile("def test_runs():\n    pass\n")
+
+    result = pytester.runpytest("-q")
+
+    result.assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{",
+        'tool = "not-a-table"\n',
+        '[tool]\nkensa = "not-a-table"\n',
+        '[tool.kensa]\nevidence_source = "invalid"\n',
+    ],
+)
+def test_target_configuration_detection_ignores_unrelated_invalid_shapes(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(source)
+
+    assert pytest_plugin._declares_target_configuration(pyproject) is False
 
 
 def test_unconfigured_project_keeps_fixture_not_found_behavior(pytester: pytest.Pytester) -> None:

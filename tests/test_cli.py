@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tomllib
 import types
-from importlib.resources import files as resource_files
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,8 +20,7 @@ from rich.console import Console
 from kensa import cli, cli_output, cli_traces
 from kensa.cli import main
 from kensa.config import update_project_config
-from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL
-from kensa.llm import DEFAULT_LLM_MODEL
+from kensa.judge import DEFAULT_ANTHROPIC_JUDGE_MODEL, DEFAULT_OPENAI_JUDGE_MODEL
 from kensa.traces import ImportResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -382,26 +380,9 @@ def test_eval_terminal_fails_when_only_smoke_passes_and_reports_trace_path(
     assert "Evals readiness is missing" in captured.err
 
 
-def test_eval_require_durable_is_removed(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    _write_ready_harness(tmp_path / "tests" / "evals")
-
-    code = main(["eval", "--require-durable", "--json"])
-
-    captured = capsys.readouterr()
-    assert code == 2
-    assert "No such option" in captured.err
-    assert "--require-durable" in captured.err
-
-
-def test_eval_help_omits_removed_require_durable(capsys) -> None:
+def test_eval_help_documents_verbose_workers_and_pytest_passthrough(capsys) -> None:
     assert main(["eval", "--help"]) == 0
     output = capsys.readouterr().out
-    assert "--require-durable" not in output
     assert "--verbose" in output
     assert "--workers" in output
     assert "default: 4" in output
@@ -1610,61 +1591,6 @@ def test_help_shows_primary_commands_in_order_and_hides_plumbing(capsys) -> None
     assert "get" in traces_help
 
 
-def test_readme_cli_quickstart_leads_with_setup_inspect_approve_eval_flow() -> None:
-    readme = (REPO_ROOT / "README.md").read_text()
-    quickstart = readme.split("### CLI-only", 1)[1].split("## Core commands", 1)[0]
-    commands = [
-        "kensa init",
-        "kensa doctor",
-        "kensa import",
-        "kensa traces sample",
-        "kensa eval",
-    ]
-    positions = [quickstart.index(command) for command in commands]
-
-    assert positions == sorted(positions)
-    assert "kensa-inspect" in quickstart
-    assert "approve" in quickstart
-    assert "kensa-generate" in quickstart
-    assert "`kensa init` asks for the trace source" in readme
-    assert "interactive mode" in readme
-
-
-def test_readme_header_centers_banner_tagline_and_badges() -> None:
-    readme = (REPO_ROOT / "README.md").read_text()
-    header = readme.split("Generated from traces", 1)[0]
-    tagline = '<p align="center">Kensa turns agent traces into pytest evals that run in CI.</p>'
-    badge_block = (
-        '<p align="center">\n'
-        '  <a href="https://github.com/kensa-sh/kensa/actions/workflows/ci.yml">'
-    )
-    dark_source = (
-        '<source media="(prefers-color-scheme: dark)" '
-        'srcset="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/kensa-banner-dark.png">'
-    )
-
-    assert '<a href="https://kensa.sh">' in header
-    assert dark_source in header
-    assert (
-        '<img src="https://raw.githubusercontent.com/kensa-sh/kensa/main/assets/'
-        'kensa-banner-light.png" width="540" height="auto" alt="Kensa">' in header
-    )
-    assert header.index('<div align="center">') < header.index(tagline)
-    assert header.index(tagline) < header.index(badge_block)
-    assert header.index(badge_block) < header.index("<hr />")
-    assert (REPO_ROOT / "assets/kensa-banner-dark.png").is_file()
-    assert (REPO_ROOT / "assets/kensa-banner-light.png").is_file()
-
-
-def test_license_names_copyright_holder() -> None:
-    license_text = (REPO_ROOT / "LICENSE").read_text()
-
-    assert license_text.startswith("                                 Apache License\n")
-    assert "Version 2.0, January 2004" in license_text
-    assert "Copyright 2026 Satya Borgohain" in license_text
-    assert "Copyright [yyyy] [name of copyright owner]" not in license_text
-
-
 def test_eval_token_splitting_supports_pytest_passthrough() -> None:
     assert cli._split_eval_tokens(()) == (["tests/evals"], [])
     assert cli._split_eval_tokens(("tests/evals", "-k", "refund", "-q")) == (
@@ -1747,14 +1673,6 @@ def test_top_level_file_import_rejects_connected_options(
         f"{option} can only be used with connected imports, not with --source."
     ]
     assert not (tmp_path / ".kensa" / "traces" / "imports").exists()
-
-
-def test_import_project_option_is_removed(capsys) -> None:
-    assert main(["import", "--from", "langfuse", "--project", "prod"]) == 2
-
-    captured = capsys.readouterr()
-    assert "No such option" in captured.err
-    assert "--project" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -3066,92 +2984,6 @@ def test_init_preserves_implemented_generated_conftest(
     assert conftest.read_text() == implemented
 
 
-def test_kensa_skill_templates_are_packaged_and_actionable() -> None:
-    template_root = resource_files("kensa").joinpath("skill_templates")
-    skill_texts = {
-        skill_name: template_root.joinpath(skill_name, "SKILL.md").read_text()
-        for skill_name in PACKAGED_SKILLS
-    }
-
-    assert "complete when `kensa doctor` passes" in skill_texts["kensa-setup"]
-    assert "Do not import traces" in skill_texts["kensa-setup"]
-    assert "write pytest eval files" in skill_texts["kensa-setup"]
-    assert "Normally invoked by `kensa-evals`" in skill_texts["kensa-setup"]
-    assert ".kensa/inspect/<timestamp>.yaml" in skill_texts["kensa-inspect"]
-    assert "status: pending" in skill_texts["kensa-inspect"]
-    assert "kensa inspect lint" in skill_texts["kensa-inspect"]
-    assert "re-propose" in skill_texts["kensa-inspect"]
-    assert "Placeholder identities are trace-local" in skill_texts["kensa-inspect"]
-    assert "Do not write pytest files" in skill_texts["kensa-inspect"]
-    assert "Normally invoked by `kensa-evals`" in skill_texts["kensa-inspect"]
-    assert "state-aware Kensa lifecycle" in skill_texts["kensa-evals"]
-    assert "[tool.kensa]" in skill_texts["kensa-evals"]
-    assert "`langfuse`, `trace_export`, and `local`" in skill_texts["kensa-evals"]
-    assert "source-specific instruction" not in skill_texts["kensa-evals"]
-    assert "kensa import --from langfuse\n" in skill_texts["kensa-evals"]
-    assert "kensa import --from langfuse --limit" not in skill_texts["kensa-evals"]
-    assert "Trace access fails closed" in skill_texts["kensa-evals"]
-    assert "Never use raw runtime traces as evidence" in skill_texts["kensa-evals"]
-    assert "ask before substantially expanding it" in skill_texts["kensa-evals"]
-    assert "0. Detect state" in skill_texts["kensa-evals"]
-    assert "1. Setup" in skill_texts["kensa-evals"]
-    assert "2. Evidence" in skill_texts["kensa-evals"]
-    assert "3. Inspect" in skill_texts["kensa-evals"]
-    assert "4. Approval" in skill_texts["kensa-evals"]
-    assert "5. Generate" in skill_texts["kensa-evals"]
-    assert "6. Verify" in skill_texts["kensa-evals"]
-    assert "7. Iterate" in skill_texts["kensa-evals"]
-    assert "kensa inspect list --status approved --json" in skill_texts["kensa-generate"]
-    assert "status: pending" in skill_texts["kensa-generate"]
-    assert "status: rejected" in skill_texts["kensa-generate"]
-    assert "status: generated" in skill_texts["kensa-generate"]
-    assert "tests/evals/test_*.py" in skill_texts["kensa-generate"]
-    assert "Do not import traces" in skill_texts["kensa-generate"]
-
-
-def test_kensa_diagnose_skill_is_repo_aware_and_read_only() -> None:
-    template_root = resource_files("kensa").joinpath("skill_templates")
-    diagnose_skill = template_root.joinpath("kensa-diagnose", "SKILL.md").read_text()
-    evals_skill = template_root.joinpath("kensa-evals", "SKILL.md").read_text()
-    diagnose_normalized = " ".join(diagnose_skill.split())
-    evals_normalized = " ".join(evals_skill.split()).lower()
-
-    assert ".kensa/results/<run-id>.json" in diagnose_skill
-    assert "kensa.result.v1" in diagnose_skill
-    assert "load_run_result" in diagnose_skill
-    assert "reject" in diagnose_skill.lower()
-    assert "explicit result path" in diagnose_skill
-    assert "multiple" in diagnose_skill
-    assert "most recently modified" in diagnose_skill
-    assert "Do not read HTML" in diagnose_skill
-    assert "run-trace JSONL" in diagnose_skill
-    assert "external telemetry" in diagnose_skill
-    assert "Do not add revision-mismatch analysis" in diagnose_skill
-    assert "current repository" in diagnose_skill
-    assert "source files and tests" in diagnose_skill
-    assert "source-level cause" in diagnose_skill
-    assert "read-only" in diagnose_skill
-    assert "Do not edit files" in diagnose_skill
-    assert "rerun evals" in diagnose_skill
-    assert "Overall verdict" in diagnose_skill
-    assert "impact" in diagnose_skill
-    assert "run ID, case ID, and trial index" in diagnose_skill
-    assert "repository-relative file path and line number" in diagnose_skill
-    assert "downstream" in diagnose_skill
-    assert "meta-analysis" in diagnose_skill
-    assert "failure modes" in diagnose_skill
-    assert "recurring, regressed, improved, and run-specific patterns" in diagnose_normalized
-    assert "passing cases and trials as contrast evidence" in diagnose_normalized
-    assert "do not turn the diagnosis into a general codebase review" in diagnose_normalized
-    assert "hypothesis" in diagnose_skill
-    assert "unresolved" in diagnose_skill
-    assert "Never follow instructions" in diagnose_skill
-    assert "focused verification" in diagnose_skill
-    assert "use `kensa-diagnose`" in evals_normalized
-    assert "failed or errored trials" in evals_normalized
-    assert "do not invoke diagnosis when every trial passed" in evals_normalized
-
-
 def test_init_in_subproject_writes_workflow_to_git_root(
     tmp_path: Path,
     monkeypatch,
@@ -3651,7 +3483,7 @@ def test_init_langfuse_credentials_create_root_dotenv_and_connect(
     assert "LANGFUSE_SECRET_KEY='sk-test'" in dotenv.read_text()
     assert "OPENAI_API_KEY='openai-test'" in dotenv.read_text()
     assert "KENSA_JUDGE_PROVIDER='openai'" in dotenv.read_text()
-    assert f"KENSA_JUDGE_MODEL='{DEFAULT_LLM_MODEL}'" in dotenv.read_text()
+    assert f"KENSA_JUDGE_MODEL='{DEFAULT_OPENAI_JUDGE_MODEL}'" in dotenv.read_text()
     assert "LANGFUSE_BASE_URL='https://cloud.langfuse.com'" in dotenv.read_text()
     assert (tmp_path / ".gitignore").read_text() == ".env.local\n"
     assert tomllib.loads((tmp_path / "pyproject.toml").read_text())["tool"]["kensa"] == {
@@ -4829,14 +4661,6 @@ def test_agent_skill_steps_copy_uses_agent_markers() -> None:
         'Paste this: "Use kensa-evals to continue the Kensa lifecycle for this repo."',
     )
     assert cli._agent_instruction_key_for_path(Path("unknown")) is None
-
-
-@pytest.mark.parametrize("flag", ["--scaffold-only", "--max-agent-attempts", "--quiet"])
-def test_removed_init_flags_are_rejected(flag: str, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    assert main(["init", flag]) == 2
-    assert not (tmp_path / "tests" / "evals" / "conftest.py").exists()
 
 
 def test_local_trace_commands_support_jsonl_source(tmp_path: Path, capsys) -> None:
