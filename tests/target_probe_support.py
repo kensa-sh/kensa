@@ -52,13 +52,16 @@ def success_command(root: Path, mode: str, log: Path) -> tuple[str, ...]:
             log_path = Path(sys.argv[2])
 
 
-            def record(event, sentinel):
+            def record(event, sentinel, messages=None):
                 with log_path.open("a") as stream:
-                    stream.write(json.dumps({
+                    payload = {
                         "event": event,
                         "pid": os.getpid(),
                         "sentinel": sentinel,
-                    }) + "\\n")
+                    }
+                    if messages is not None:
+                        payload["messages"] = messages
+                    stream.write(json.dumps(payload) + "\\n")
 
 
             def turn_result(case, messages, sentinel):
@@ -108,7 +111,7 @@ def success_command(root: Path, mode: str, log: Path) -> tuple[str, ...]:
                     record("open", self.sentinel)
 
                 def respond(self, messages):
-                    record("turn", self.sentinel)
+                    record("turn", self.sentinel, messages)
                     return turn_result(self.case, messages, self.sentinel)
 
                 def close(self):
@@ -117,7 +120,7 @@ def success_command(root: Path, mode: str, log: Path) -> tuple[str, ...]:
 
             class AsyncSession(SyncSession):
                 async def respond(self, messages):
-                    record("turn", self.sentinel)
+                    record("turn", self.sentinel, messages)
                     return turn_result(self.case, messages, self.sentinel)
 
                 async def close(self):

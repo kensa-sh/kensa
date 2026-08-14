@@ -160,7 +160,8 @@ def verify_configured_target(
     try:
         session.open(case)
         result.observed_lifecycle.extend(("startup", "handshake", "session_open"))
-        response = session.respond(())
+        messages = tuple(case.messages) if "messages" in case.row else ()
+        response = session.respond(messages)
         turn_completed = True
         result.observed_lifecycle.extend(("turn", "response"))
         result.response_non_empty = _response_non_empty(response)

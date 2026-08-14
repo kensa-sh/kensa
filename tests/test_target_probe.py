@@ -295,6 +295,35 @@ def test_doctor_terminal_reports_config_lifecycle_and_target_attestation(
     assert "production constructor" not in rendered.lower()
 
 
+def test_doctor_forwards_complete_message_case_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "target.jsonl"
+    command = success_command(tmp_path, "sync", log)
+    configure_target(tmp_path, command)
+    messages = [
+        {"role": "system", "content": "verification policy"},
+        {"role": "user", "content": "verify readiness"},
+    ]
+    case_path = write_case(
+        tmp_path,
+        {"id": "messages-readiness", "messages": messages},
+    )
+
+    code = main(["doctor", "--target-case", str(case_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["data"]["target"]["ready"] is True
+    events = _events(log)
+    assert [event["event"] for event in events] == ["open", "turn", "close"]
+    assert events[1]["messages"] == messages
+    assert len({event["sentinel"] for event in events}) == 1
+
+
 def test_verified_target_runs_smoke_and_domain_eval_without_repository_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
