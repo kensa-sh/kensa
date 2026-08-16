@@ -436,17 +436,41 @@ def test_local_name_collision_drops_call_references_and_reports_a_gap(tmp_path: 
     assert document["gaps"][0]["path"] == "app.py"
 
 
-def test_first_party_module_shadowing_a_registry_import_root_is_not_reported(
+def test_first_party_module_shadowing_a_registry_import_root_is_reported_as_a_gap(
     tmp_path: Path,
 ) -> None:
     _write(tmp_path, "agents/__init__.py", "")
-    _write(tmp_path, "app.py", "from agents import Agent\n\nagent = Agent()\n")
+    _write(
+        tmp_path,
+        "app.py",
+        "from agents import Agent\nfrom agents import Runner\n\nagent = Agent()\n",
+    )
 
     document = _scan(tmp_path)
 
     assert document["detected"] == []
     assert document["imports"] == []
     assert document["call_references"] == []
+    assert document["gaps"] == [
+        {
+            "kind": "first_party_shadowed_import_root",
+            "path": "app.py",
+            "detail": (
+                "Import agents resolves to a repository-local module of the same name; "
+                "suppressed registry matches: openai-agents-sdk. Confirm this import by hand."
+            ),
+        }
+    ]
+
+
+def test_shadowed_import_gaps_name_every_suppressed_registry_entry(tmp_path: Path) -> None:
+    _write(tmp_path, "autogen/__init__.py", "")
+    _write(tmp_path, "app.py", "import autogen\n")
+
+    gaps = _scan(tmp_path)["gaps"]
+
+    assert len(gaps) == 1
+    assert "suppressed registry matches: ag2, autogen." in str(gaps[0]["detail"])
 
 
 def test_unknown_custom_agent_yields_no_framework_evidence(tmp_path: Path) -> None:
@@ -781,6 +805,7 @@ def test_first_party_roots_ignore_symlinks_and_plain_directories(tmp_path: Path)
     document = _scan(tmp_path)
 
     assert document["detected"] == []
+    assert {gap["kind"] for gap in document["gaps"]} == {"first_party_shadowed_import_root"}
 
 
 # --- Safety -----------------------------------------------------------------

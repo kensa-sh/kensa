@@ -132,6 +132,7 @@ class _Scan:
         self.registry = registry
         self.exclusions: list[dict[str, str]] = []
         self.gaps: list[dict[str, str | None]] = []
+        self._gap_keys: set[tuple[str, str | None, str]] = set()
         self.declarations: list[dict[str, Any]] = []
         self.imports: list[dict[str, Any]] = []
         self.call_references: list[dict[str, Any]] = []
@@ -143,6 +144,10 @@ class _Scan:
         self.exclusions.append({"kind": kind, "path": self.relative(path)})
 
     def gap(self, kind: str, detail: str, path: str | None = None) -> None:
+        key = (kind, path, detail)
+        if key in self._gap_keys:
+            return
+        self._gap_keys.add(key)
         self.gaps.append({"kind": kind, "path": path, "detail": detail})
 
 
@@ -431,13 +436,31 @@ def _call_reference(func: ast.expr) -> tuple[str, str] | None:
     return current.id, ".".join(attributes)
 
 
-def _matched_modules(scan: _Scan, module: str, first_party: set[str]) -> list[tuple[str, str]]:
+def _resolve_module(
+    scan: _Scan,
+    module: str,
+    first_party: set[str],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return registry matches for ``module``, or the matches a first-party module shadows."""
     matches = scan.registry.match_module(module)
-    if not matches:
-        return []
-    if module.split(".", 1)[0] in first_party:
-        return []
-    return matches
+    if matches and module.split(".", 1)[0] in first_party:
+        return [], matches
+    return matches, []
+
+
+def _record_shadow_gap(
+    scan: _Scan,
+    module: str,
+    suppressed: list[tuple[str, str]],
+    relative: str,
+) -> None:
+    entry_ids = ", ".join(sorted({entry_id for entry_id, _ in suppressed}))
+    scan.gap(
+        "first_party_shadowed_import_root",
+        f"Import {module} resolves to a repository-local module of the same name; "
+        f"suppressed registry matches: {entry_ids}. Confirm this import by hand.",
+        relative,
+    )
 
 
 def _collect_source(scan: _Scan, path: Path, first_party: set[str]) -> None:
@@ -454,18 +477,25 @@ def _collect_source(scan: _Scan, path: Path, first_party: set[str]) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                matches = _matched_modules(scan, alias.name, first_party)
+                matches, suppressed = _resolve_module(scan, alias.name, first_party)
+                if suppressed:
+                    _record_shadow_gap(scan, alias.name, suppressed, relative)
                 if not matches:
                     continue
                 binding = alias.asname or alias.name.split(".", 1)[0]
                 bindings.setdefault(binding, []).extend(matches)
                 _record_imports(scan, matches, alias.name, None, binding, relative, node.lineno)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
-            module_matches = _matched_modules(scan, node.module, first_party)
+            module_matches, module_suppressed = _resolve_module(scan, node.module, first_party)
             for alias in node.names:
-                matches = module_matches or _matched_modules(
-                    scan, f"{node.module}.{alias.name}", first_party
-                )
+                matches, suppressed = module_matches, module_suppressed
+                if not matches and not suppressed:
+                    matches, suppressed = _resolve_module(
+                        scan, f"{node.module}.{alias.name}", first_party
+                    )
+                if suppressed:
+                    _record_shadow_gap(scan, node.module, suppressed, relative)
+                    continue
                 if not matches:
                     continue
                 binding = alias.asname or alias.name

@@ -51,6 +51,10 @@ Read the result as evidence, never as a decision:
 - Multiple matches are all reported. Confirm each one against actual control flow.
 - A `replaced_by` entry names the maintained replacement for a legacy or superseded framework.
 - Gaps and exclusions are real blind spots. Inspect those paths by hand when they matter.
+- A `first_party_shadowed_import_root` gap means a repository-local module has the same name as a
+  registry import root, so the detector suppressed an uncertain match. Resolve that import by hand.
+- A `shadowed_import_binding` gap means an imported name is rebound in the same file, so its call
+  references were dropped.
 
 The detector never selects a production target and never reports readiness. An unlisted, private,
 new, or custom framework is normal: registry absence never blocks setup and never permits a guessed
