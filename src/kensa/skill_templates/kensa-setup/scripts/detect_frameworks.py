@@ -461,10 +461,13 @@ def _collect_source(scan: _Scan, path: Path, first_party: set[str]) -> None:
                 bindings.setdefault(binding, []).extend(matches)
                 _record_imports(scan, matches, alias.name, None, binding, relative, node.lineno)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
-            matches = _matched_modules(scan, node.module, first_party)
-            if not matches:
-                continue
+            module_matches = _matched_modules(scan, node.module, first_party)
             for alias in node.names:
+                matches = module_matches or _matched_modules(
+                    scan, f"{node.module}.{alias.name}", first_party
+                )
+                if not matches:
+                    continue
                 binding = alias.asname or alias.name
                 bindings.setdefault(binding, []).extend(matches)
                 _record_imports(

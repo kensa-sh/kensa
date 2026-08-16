@@ -313,6 +313,68 @@ def test_aliased_import_and_attribute_call_are_reported_as_call_references(
     assert bindings == {"lg", "Squad"}
 
 
+@pytest.mark.parametrize(
+    ("source", "entry_id", "expected_reference"),
+    [
+        ("from google import adk\n\nagent = adk.Agent()\n", "google-adk", "adk.Agent"),
+        ("from google import genai\n\nclient = genai.Client()\n", "google-genai", "genai.Client"),
+        (
+            "from livekit import agents\n\nsession = agents.AgentSession()\n",
+            "livekit-agents",
+            "agents.AgentSession",
+        ),
+        (
+            "from livekit import agents as lk\n\nsession = lk.AgentSession()\n",
+            "livekit-agents",
+            "lk.AgentSession",
+        ),
+        (
+            "from google.adk.agents import Agent\n\nagent = Agent()\n",
+            "google-adk",
+            "Agent",
+        ),
+        ("import google.adk\n\nagent = google.adk.Agent()\n", "google-adk", "google.adk.Agent"),
+        (
+            "from google.adk import agents\n\nagent = agents.Agent()\n",
+            "google-adk",
+            "agents.Agent",
+        ),
+    ],
+)
+def test_dotted_registry_roots_match_every_absolute_import_spelling(
+    tmp_path: Path,
+    source: str,
+    entry_id: str,
+    expected_reference: str,
+) -> None:
+    _write(tmp_path, "app.py", source)
+
+    document = _scan(tmp_path)
+
+    assert _detected(document)[entry_id]["state"] == "call_referenced"
+    assert [item["reference"] for item in document["call_references"]] == [expected_reference]
+
+
+def test_namespace_parent_import_alone_is_not_a_framework_match(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from google import protobuf\n\nvalue = protobuf.Message()\n")
+
+    document = _scan(tmp_path)
+
+    assert document["detected"] == []
+
+
+def test_star_import_of_a_framework_module_is_recorded_without_a_call_reference(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "app.py", "from google.adk import *\n")
+
+    document = _scan(tmp_path)
+
+    assert document["imports"][0]["symbol"] == "*"
+    assert document["call_references"] == []
+    assert _detected(document)["google-adk"]["state"] == "imported_only"
+
+
 def test_multiple_frameworks_and_clients_under_one_repository_are_all_reported(
     tmp_path: Path,
 ) -> None:
