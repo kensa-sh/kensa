@@ -19,6 +19,8 @@ uv add --dev kensa     # or: python -m pip install kensa
 ## Anatomy of an eval
 
 ```python
+from collections.abc import Iterator
+
 import pytest
 
 from kensa.pytest import judge, kensa_case
@@ -50,42 +52,44 @@ through `result.trace`.
 
 ## The harness fixture
 
-`kensa_run` is **yours**. You implement it once in `tests/evals/conftest.py` to bridge a case to your real agent, wrapping tool and model calls with the recording helpers so the trace is populated:
+`kensa_run` is **yours**. It bridges a case to a production-owned invocation seam discovered from
+your repository's real run path. The setup workflow cites the seam, construction path, state owner,
+lifecycle, and effects, then waits for your approval before writing the adapter:
 
 ```python
 import pytest
 
 from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
-from kensa.tracing import record_tool_call
+from support.agent import SupportConversation, create_support_conversation
 
 
-class RefundAgent:
-    def __init__(self, case: KensaCase) -> None:
-        self.case = case
+class KensaAdapter:
+    def __init__(self, conversation: SupportConversation) -> None:
+        self.conversation = conversation
 
     def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
-        with record_tool_call("lookup_customer"):
-            text = str(self.case.input).lower()
-            found_order = "order #" in text or "order id:" in text
-        if found_order:
-            with record_tool_call("issue_refund"):
-                return ConversationResponse(
-                    content="Refund issued.",
-                    output={"status": "refunded"},
-                )
-        return ConversationResponse(content="I need order history before issuing a refund.")
+        response = self.conversation.respond(messages)
+        return ConversationResponse(content=response.content, output=response.output)
 
 
 @pytest.fixture
-def kensa_run(case: KensaCase) -> RefundAgent:
-    return RefundAgent(case)
+def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
+    conversation = create_support_conversation(customer_id=case.row["customer_id"])
+    try:
+        yield KensaAdapter(conversation)
+    finally:
+        conversation.close()
 ```
 
-The fixture creates one case-aware agent instance per trial. `case.run(kensa_run)` invokes
-`respond(messages)` once in direct mode and returns `CaseResult`. Visible `content` becomes
-an assistant message; `output` is the separately evaluated value; `trace` is the read-only trial
-trace. `kensa doctor` inspects
-`conftest.py` and warns if the harness looks like a stub or mock rather than a real agent boundary.
+The repository factory still owns prompts, tools, routing, provider configuration, state, effects,
+and cleanup. The fixture creates one production-owned conversation instance per trial.
+`case.run(kensa_run)` invokes `respond(messages)` once in direct mode or reuses the same instance
+across simulated turns. Visible `content` becomes an assistant message; `output` is the separately
+evaluated value; `trace` is the read-only trial trace.
+
+When a faithful seam cannot be reached without copying behavior, bypassing construction, changing
+production code, or hiding an effect, setup returns `cannot wire` before editing. `kensa doctor`
+keeps the persistent smoke, LLM-span, and harness-authenticity gates on approved adapters.
 
 ## Fixtures and marker
 

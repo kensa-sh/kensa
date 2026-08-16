@@ -54,11 +54,17 @@ Use `kensa-setup`.
 
 That phase must only:
 
-1. Make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent`.
-2. Implement `respond(messages)` with `ConversationResponse` at the real local agent boundary.
-3. Mock only external side effects.
-4. Record at least one LLM span.
-5. Run `kensa doctor` until harness readiness passes.
+1. Run the fixed, source-backed discovery sequence and propose one production-owned invocation
+   boundary with exact source citations.
+2. Get explicit approval before editing the fixture or consuming real-model cost or live effects.
+3. Make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent` by
+   implementing only a thin adapter around the approved production seam, preserving one
+   production-owned conversation instance per trial.
+4. Mock only approved external side effects, record the required LLM span, and run `kensa doctor`
+   until the persistent smoke and harness-authenticity gates pass.
+
+If setup reports `cannot wire`, end the lifecycle with its exact reason and target-owned
+prerequisite, without importing evidence or claiming readiness.
 
 Do not import traces, inspect traces, or write evals during setup.
 

@@ -80,35 +80,50 @@ kensa eval
 
 `kensa import` minimizes provider payloads to Kensa's allowlisted TraceView, redacts retained values, and writes the evidence to `.kensa/traces/imports/`. Read it with `kensa traces list/sample/get`, then turn it into evals: the `kensa-inspect` skill proposes a YAML review queue you validate with `kensa inspect lint`, you approve ideas, and the `kensa-generate` skill materializes `tests/evals/test_<id>.py`. If you do not have traces yet, capture a local run with `kensa.instrument()` and import the JSONL, then run `kensa eval`.
 
-## What `kensa init` wires up
+## What `kensa init` sets up
 
-`kensa init` connects the harness so your eval can reach your real agent. You implement one fixture, `kensa_run`, in `tests/evals/conftest.py`:
+`kensa init` scaffolds the harness and installs the `kensa-evals` workflow. During setup, your
+coding agent inspects documented run paths, application entrypoints, tests and factories, agent
+construction, model and tool calls, and their callers. It proposes one source-backed production
+seam and waits for your approval before editing `tests/evals/conftest.py`.
+
+The resulting `kensa_run` fixture is a thin adapter around repository-owned production code:
 
 ```python
+from collections.abc import Iterator
+
 import pytest
 
 from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
-from kensa.tracing import record_tool_call
+from support.agent import SupportConversation, create_support_conversation
 
 
-class RepositoryAgent:
-    def __init__(self, case: KensaCase) -> None:
-        self.case = case
+class KensaAdapter:
+    def __init__(self, conversation: SupportConversation) -> None:
+        self.conversation = conversation
 
     def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
-        with record_tool_call("lookup_customer"):
-            ...
-        return ConversationResponse(content="I need order history before issuing a refund.")
+        response = self.conversation.respond(messages)
+        return ConversationResponse(content=response.content, output=response.output)
 
 
 @pytest.fixture
-def kensa_run(case: KensaCase) -> RepositoryAgent:
-    return RepositoryAgent(case)
+def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
+    conversation = create_support_conversation(customer_id=case.row["customer_id"])
+    try:
+        yield KensaAdapter(conversation)
+    finally:
+        conversation.close()
 ```
 
-The fixture owns case-aware construction and teardown. Kensa calls the returned instance's
-`respond(messages)` method and returns one `CaseResult` for both direct and simulated runs.
-`kensa doctor` verifies the harness is wired to a real agent boundary before you trust any verdict.
+Here, `support.agent` still owns prompts, tools, routing, provider configuration, state, effects,
+and cleanup. The adapter only maps Kensa messages and results. Each trial gets one production-owned
+conversation instance, which Kensa reuses across simulated turns.
+
+If no faithful seam exists, setup stops with `cannot wire`, the exact reason, and the repository
+change or decision required. It does not reconstruct the agent in the fixture. Approved setups run
+the existing persistent smoke and authenticity gates through `kensa doctor`; real model costs and
+live effects require explicit approval.
 
 ## Next
 

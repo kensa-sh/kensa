@@ -52,16 +52,25 @@ Cases take either a literal `input` or a `messages` conversation. They are param
 
 ## The harness
 
-Kensa never guesses how to call your agent. You connect it once in `tests/evals/conftest.py` by implementing the `kensa_run` fixture, then run a case through it:
+Kensa never guesses how to call your agent. During setup, the coding-agent workflow traces from a
+real application entrypoint and back from model and tool calls until both identify one
+production-owned invocation seam. It cites that source evidence, proposes a thin
+`tests/evals/conftest.py::kensa_run(case)` adapter, and waits for approval before editing. If no
+faithful seam exists, setup reports `cannot wire` instead of recreating the agent.
+
+The target repository owns agent construction, prompts, tools, routing, state, dependencies,
+effects, and cleanup. Kensa takes ownership only after fixture resolution, when a case runs through
+the approved adapter:
 
 ```python
 result = case.run(kensa_run)
 ```
 
-The fixture has already used the case to create one agent instance for the trial. `case.run(kensa_run)`
-invokes its `respond(messages)` method and returns a `CaseResult` containing canonical
-messages, evaluated output, one termination, and a read-only trace accessor. `kensa doctor` checks
-that this harness reaches a real agent boundary rather than a stub.
+The fixture has already used the case to create one production-owned conversation instance for the
+trial. `case.run(kensa_run)` reuses it across turns, invokes its `respond(messages)` method, and
+returns a `CaseResult` containing canonical messages, evaluated output, one termination, and a
+read-only trace accessor. `kensa doctor` runs the persistent smoke and checks that this harness
+reaches a real agent boundary rather than a stub.
 
 ## Traces
 
