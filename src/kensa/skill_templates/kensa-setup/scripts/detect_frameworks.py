@@ -87,6 +87,11 @@ class DetectorError(Exception):
     """Raised when the detector cannot produce evidence."""
 
 
+def _reason(error: OSError) -> str:
+    """Return a path-free failure reason so no absolute path can reach the output."""
+    return error.strerror or "read failed"
+
+
 def _normalize_distribution(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).strip().lower()
 
@@ -95,7 +100,7 @@ def _load_registry() -> dict[str, Any]:
     try:
         raw = REGISTRY_PATH.read_text(encoding="utf-8")
     except OSError as error:
-        raise DetectorError(f"Framework registry is unavailable: {error}") from error
+        raise DetectorError(f"Framework registry is unavailable: {_reason(error)}") from error
     registry: dict[str, Any] = json.loads(raw)
     return registry
 
@@ -202,8 +207,11 @@ def _read_text(scan: _Scan, path: Path) -> str | None:
             scan.gap("file_too_large", f"File exceeds {MAX_FILE_BYTES} bytes.", relative)
             return None
         return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as error:
-        scan.gap("unreadable_file", f"{type(error).__name__}: {error}", relative)
+    except UnicodeDecodeError as error:
+        scan.gap("unreadable_file", f"UnicodeDecodeError: {error.reason}", relative)
+        return None
+    except OSError as error:
+        scan.gap("unreadable_file", f"{type(error).__name__}: {_reason(error)}", relative)
         return None
 
 

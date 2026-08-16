@@ -1026,24 +1026,62 @@ def test_scan_limits_appear_as_gaps(
     assert "first 2 of 3" in str(gaps[2]["detail"])
 
 
-def test_unreadable_files_are_reported_as_gaps(
+def test_undecodable_files_are_reported_as_gaps(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write(tmp_path, "app.py", "value = 1\n")
+    _fail_read_text(monkeypatch, UnicodeDecodeError("utf-8", b"", 0, 1, "invalid start byte"))
+
+    gaps = _scan(tmp_path)["gaps"]
+
+    assert gaps == [
+        {
+            "kind": "unreadable_file",
+            "path": "app.py",
+            "detail": "UnicodeDecodeError: invalid start byte",
+        }
+    ]
+
+
+def test_filesystem_read_errors_never_leak_an_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _write(tmp_path, "app.py", "value = 1\n")
+    _fail_read_text(monkeypatch, PermissionError(13, "Permission denied", str(target)))
+
+    document = _scan(tmp_path)
+
+    assert document["gaps"] == [
+        {
+            "kind": "unreadable_file",
+            "path": "app.py",
+            "detail": "PermissionError: Permission denied",
+        }
+    ]
+    assert str(tmp_path) not in json.dumps(document)
+
+
+def test_read_errors_without_a_reason_still_produce_a_path_free_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path, "app.py", "value = 1\n")
+    _fail_read_text(monkeypatch, OSError())
+
+    assert _scan(tmp_path)["gaps"][0]["detail"] == "OSError: read failed"
+
+
+def _fail_read_text(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     original_read_text = Path.read_text
 
     def failing_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
         if self.name == "app.py":
-            raise UnicodeDecodeError("utf-8", b"", 0, 1, "invalid start byte")
+            raise error
         return original_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", failing_read_text)
-
-    gaps = _scan(tmp_path)["gaps"]
-
-    assert gaps[0]["kind"] == "unreadable_file"
-    assert gaps[0]["path"] == "app.py"
 
 
 # --- Command line -----------------------------------------------------------
