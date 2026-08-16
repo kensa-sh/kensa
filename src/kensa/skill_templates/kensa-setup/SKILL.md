@@ -24,11 +24,66 @@ Kensa owns execution after fixture resolution: simulated turns, trial isolation,
 tracing, judging, artifacts, reports, and readiness. Never reconstruct missing production behavior
 inside the fixture.
 
+## Framework discovery
+
+Run the bundled detector once from the target repository root before any manual source tracing:
+
+```bash
+python .claude/skills/kensa-setup/scripts/detect_frameworks.py --root .
+```
+
+Replace `.claude/skills` with the skills root this skill was installed under, such as
+`.agents/skills` or `.cursor/skills`.
+
+`scripts/detect_frameworks.py` and its identity registry `assets/frameworks.json` ship with this
+skill and must stay next to each other. The detector reads dependency metadata and Python source syntax only. It never imports,
+executes, or mutates the target, never reads dotenv files or credential stores, and never reaches
+the network. It prints one stably ordered JSON document with declared distributions and version
+evidence, imported framework modules and symbols with repository-relative paths and line numbers,
+call references through directly imported names, direct model-client evidence, registry aliases and
+replacements, scan exclusions, parse failures, and coverage gaps.
+
+Read the result as evidence, never as a decision:
+
+- A declared dependency without a source import is declared-only.
+- An import without a call reference is imported-only.
+- Call references are syntactic. They are not proof of production use.
+- Multiple matches are all reported. Confirm each one against actual control flow.
+- A `replaced_by` entry names the maintained replacement for a legacy or superseded framework.
+- Gaps and exclusions are real blind spots. Inspect those paths by hand when they matter.
+
+The detector never selects a production target and never reports readiness. An unlisted, private,
+new, or custom framework is normal: registry absence never blocks setup and never permits a guessed
+adapter. Continue with the generic two-direction source tracing below.
+
+## Current documentation
+
+For each detected framework that source inspection confirms is relevant, and only for those:
+
+1. Resolve the version this repository actually uses from lock files, then declared specifiers,
+   then the installed distribution metadata.
+2. Read the version-matched official documentation online, starting from the registry's
+   `documentation` or `repository` root for that entry.
+3. If version-matched documentation is unavailable, or the harness has no web access, inspect the
+   installed package source and type signatures read-only instead.
+4. Cite every source used in the proposal, including the exact documentation URL or installed
+   package path.
+5. When no exact project version resolves, current official documentation may be used only after
+   stating that version uncertainty explicitly in the proposal.
+
+The target repository's actual control flow is authoritative. Documentation explains an API; it
+never overrides what this repository does. Do not load documentation for undetected frameworks.
+No documentation index, MCP server, or third-party documentation proxy is required for this step.
+
+If neither documentation nor installed source is available, continue repository source tracing and
+end with a source-backed proposal or an actionable `cannot wire`.
+
 ## Workflow
 
-1. Inspect read-only, in order: documented run paths, application entrypoints, tests and factories,
-   agent constructors or orchestrators, model and tool call sites, then their callers. Inspect an
-   existing user-authored `tests/evals/conftest.py::kensa_run(case)` without overwriting it.
+1. Inspect read-only, in order: framework discovery evidence, documented run paths, application
+   entrypoints, tests and factories, agent constructors or orchestrators, model and tool call
+   sites, then their callers. Inspect an existing user-authored
+   `tests/evals/conftest.py::kensa_run(case)` without overwriting it.
 2. Trace forward from a real application entry point and backward from model and tool calls until
    both identify the same function or class that starts the production agent. Follow actual program
    control flow even for unfamiliar frameworks.

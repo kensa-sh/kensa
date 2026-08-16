@@ -33,6 +33,13 @@ PACKAGED_SKILLS = (
     "kensa-generate",
     "kensa-diagnose",
 )
+SKILL_TEMPLATE_ROOT = PROJECT_ROOT / "src" / "kensa" / "skill_templates"
+
+
+def _skill_summary(skill_root: str, skill_name: str) -> str:
+    count = sum(1 for path in (SKILL_TEMPLATE_ROOT / skill_name).rglob("*") if path.is_file())
+    label = "file" if count == 1 else "files"
+    return f"✓ {skill_root}/{skill_name}/ ({count} {label})"
 
 
 class _FakeLangfuseProviderError(ValueError):
@@ -2573,7 +2580,7 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "✓ pyproject.toml" not in output
     assert ".kensa/settings.json" not in output
     for skill_name in PACKAGED_SKILLS:
-        assert f"✓ .agents/skills/{skill_name}/ (1 file)" in output
+        assert _skill_summary(".agents/skills", skill_name) in output
     assert (tmp_path / ".github" / "workflows" / "kensa.yml").exists()
     assert not (tmp_path / "pyproject.toml").exists()
     assert not (tmp_path / ".kensa" / "settings.json").exists()
@@ -3250,11 +3257,11 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     assert "Which coding agent" in output
     assert "░███████" in output
     assert "┌  kensa init" in output
-    assert f"Kensa will install {len(cli._PACKAGED_SKILLS)} skill files" in output
+    assert f"Kensa will install {len(cli._PACKAGED_SKILLS)} skills" in output
     assert "installed Claude Code instructions" in output
     assert "◇  Created" in output
     for skill_name in PACKAGED_SKILLS:
-        assert f"✓ .claude/skills/{skill_name}/ (1 file)" in output
+        assert _skill_summary(".claude/skills", skill_name) in output
     assert "◇  Finish setup" in output
     assert "Where should Kensa get traces from?" in output
     assert "Note: traces will be auto redacted during import." in output
@@ -3455,7 +3462,7 @@ def test_select_interactive_choice_without_tty_uses_prompt(monkeypatch) -> None:
     assert prompt_calls
     assert prompt_calls[0][0] == "Which coding agent?"
     assert prompt_calls[0][1]["default"] == "codex"
-    assert f"Kensa will install {len(cli._PACKAGED_SKILLS)} skill files" in console.export_text()
+    assert f"Kensa will install {len(cli._PACKAGED_SKILLS)} skills" in console.export_text()
 
 
 def test_init_langfuse_credentials_create_root_dotenv_and_connect(

@@ -102,6 +102,7 @@ _CHOICE_ENTER_KEYS = ("\r", "\n")
 _CHOICE_UP_KEYS = ("\x1b[A", "\x1bOA", "k")
 _KENSA_WORKFLOW_FILENAMES = ("kensa.yml", "kensa.yaml")
 _SKILL_TEMPLATE_ROOT = ("skill_templates",)
+_SKILL_TEMPLATE_IGNORED_NAMES = frozenset({"__pycache__"})
 _PACKAGED_SKILLS = (
     "kensa-evals",
     "kensa-setup",
@@ -110,7 +111,7 @@ _PACKAGED_SKILLS = (
     "kensa-diagnose",
 )
 _AGENT_SKILL_HELP_TEXT = (
-    f"Kensa will install {len(_PACKAGED_SKILLS)} skill files for your local coding agent."
+    f"Kensa will install {len(_PACKAGED_SKILLS)} skills for your local coding agent."
 )
 _ENV_SAFETY_WARNING = (
     "Kensa evals execute the case-aware agent from "
@@ -2014,8 +2015,9 @@ def _count_agent_reference_paths(paths: list[Path]) -> dict[Path, int]:
 def _agent_reference_root(path: Path) -> Path | None:
     for instruction_path in _AGENT_INSTRUCTION_PATHS.values():
         skill_root = instruction_path.parent.parent
-        if path.parent.parent == skill_root and path.parent.name in _PACKAGED_SKILLS:
-            return path.parent
+        for parent in path.parents:
+            if parent.parent == skill_root and parent.name in _PACKAGED_SKILLS:
+                return parent
     return None
 
 
@@ -3308,6 +3310,8 @@ def _skill_template_root() -> Traversable:
 def _copy_skill_template_files(source: Traversable, destination: Path) -> list[Path]:
     written: list[Path] = []
     for item in sorted(source.iterdir(), key=lambda candidate: candidate.name):
+        if item.name in _SKILL_TEMPLATE_IGNORED_NAMES:
+            continue
         if item.is_dir():
             written.extend(_copy_skill_template_files(item, destination / item.name))
         elif item.is_file():
@@ -3326,7 +3330,11 @@ def _remove_stale_skill_template_paths(source: Traversable, destination: Path) -
 def _template_tree_has_files(source: Traversable) -> bool:
     if not source.is_dir():
         return False
-    return any(item.is_file() or _template_tree_has_files(item) for item in source.iterdir())
+    return any(
+        item.is_file() or _template_tree_has_files(item)
+        for item in source.iterdir()
+        if item.name not in _SKILL_TEMPLATE_IGNORED_NAMES
+    )
 
 
 def _write_text_if_changed(path: Path, text: str) -> bool:
