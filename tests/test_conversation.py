@@ -361,6 +361,58 @@ async def test_each_responder_receives_exact_isolated_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thin_adapter_reuses_one_production_conversation_across_turns() -> None:
+    class ProductionConversation:
+        def __init__(self) -> None:
+            self.turns = 0
+            self.histories: list[tuple[KensaMessage, ...]] = []
+
+        def invoke(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            self.turns += 1
+            self.histories.append(messages)
+            return ConversationResponse(content=f"production turn {self.turns}")
+
+    class ThinAdapter:
+        def __init__(self, production: ProductionConversation) -> None:
+            self.production = production
+
+        def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
+            return self.production.invoke(messages)
+
+    production = ProductionConversation()
+    adapter = ThinAdapter(production)
+    simulator = ScriptedResponder(
+        ConversationResponse(content="follow-up one"),
+        ConversationResponse(content="follow-up two"),
+    )
+
+    result = await kensa_case(
+        id="production",
+        messages=[{"role": "user", "content": "initial"}],
+    ).run(
+        adapter,
+        simulator=simulator,
+        max_turns=2,
+    )
+
+    assert adapter.production is production
+    assert production.turns == 2
+    assert production.histories == [
+        (
+            {"role": "user", "content": "initial"},
+            {"role": "user", "content": "follow-up one"},
+        ),
+        (
+            {"role": "user", "content": "initial"},
+            {"role": "user", "content": "follow-up one"},
+            {"role": "assistant", "content": "production turn 1"},
+            {"role": "user", "content": "follow-up two"},
+        ),
+    ]
+    assert result.output == "production turn 2"
+
+
+@pytest.mark.asyncio
 async def test_simulation_alternates_and_counts_only_agent_responses() -> None:
     agent = ScriptedResponder(
         ConversationResponse(content="a1"),

@@ -2590,7 +2590,7 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     setup_skill = (tmp_path / ".agents" / "skills" / "kensa-setup" / "SKILL.md").read_text()
     inspect_skill = (tmp_path / ".agents" / "skills" / "kensa-inspect" / "SKILL.md").read_text()
     generate_skill = (tmp_path / ".agents" / "skills" / "kensa-generate" / "SKILL.md").read_text()
-    assert "state-aware Kensa lifecycle" in evals_skill
+    assert "Run Kensa setup, evidence import" in evals_skill
     assert "setup -> evidence -> inspect -> approval -> generate -> verify" in evals_skill
     assert "Use `kensa-setup`" in evals_skill
     assert "Use `kensa-inspect`" in evals_skill
@@ -3105,7 +3105,7 @@ def test_init_overwrites_stale_agent_skill_tree(
 
     skill = (skill_root / "SKILL.md").read_text()
     assert "stale skill" not in skill
-    assert "state-aware Kensa lifecycle" in skill
+    assert "Run Kensa setup, evidence import" in skill
     assert not references.exists()
     assert (tmp_path / ".agents" / "skills" / "kensa-setup" / "SKILL.md").exists()
     assert (tmp_path / ".agents" / "skills" / "kensa-inspect" / "SKILL.md").exists()

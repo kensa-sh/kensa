@@ -1,8 +1,8 @@
 ---
 name: kensa-evals
 description: >
-  Orchestrate the state-aware Kensa lifecycle from setup through evidence, inspection, approval,
-  generation, verification, and iteration.
+  Run Kensa setup, evidence import, inspection, approval, eval generation, verification, and
+  iteration. Use when setting up or extending Kensa evals.
 ---
 
 # Kensa Evals
@@ -52,15 +52,9 @@ Route to the first incomplete or broken stage.
 
 Use `kensa-setup`.
 
-That phase must only:
-
-1. Make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent`.
-2. Implement `respond(messages)` with `ConversationResponse` at the real local agent boundary.
-3. Mock only external side effects.
-4. Record at least one LLM span.
-5. Run `kensa doctor` until harness readiness passes.
-
-Do not import traces, inspect traces, or write evals during setup.
+Use it for repository discovery, approval, adapter writing, and failure handling. Continue only
+after `kensa doctor` passes. On `cannot wire`, report its exact reason and required repository
+change, then stop without importing evidence or claiming readiness.
 
 ## 2. Evidence
 

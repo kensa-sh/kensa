@@ -80,35 +80,16 @@ kensa eval
 
 `kensa import` minimizes provider payloads to Kensa's allowlisted TraceView, redacts retained values, and writes the evidence to `.kensa/traces/imports/`. Read it with `kensa traces list/sample/get`, then turn it into evals: the `kensa-inspect` skill proposes a YAML review queue you validate with `kensa inspect lint`, you approve ideas, and the `kensa-generate` skill materializes `tests/evals/test_<id>.py`. If you do not have traces yet, capture a local run with `kensa.instrument()` and import the JSONL, then run `kensa eval`.
 
-## What `kensa init` wires up
+## What `kensa init` sets up
 
-`kensa init` connects the harness so your eval can reach your real agent. You implement one fixture, `kensa_run`, in `tests/evals/conftest.py`:
+`kensa init` scaffolds the harness and installs `kensa-evals`. Setup follows repository source to
+the production function or class that starts one conversation and waits for approval before writing
+a `kensa_run` adapter. If it cannot call production code without recreating agent behavior, it
+reports `cannot wire`.
 
-```python
-import pytest
-
-from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
-from kensa.tracing import record_tool_call
-
-
-class RepositoryAgent:
-    def __init__(self, case: KensaCase) -> None:
-        self.case = case
-
-    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
-        with record_tool_call("lookup_customer"):
-            ...
-        return ConversationResponse(content="I need order history before issuing a refund.")
-
-
-@pytest.fixture
-def kensa_run(case: KensaCase) -> RepositoryAgent:
-    return RepositoryAgent(case)
-```
-
-The fixture owns case-aware construction and teardown. Kensa calls the returned instance's
-`respond(messages)` method and returns one `CaseResult` for both direct and simulated runs.
-`kensa doctor` verifies the harness is wired to a real agent boundary before you trust any verdict.
+See [The harness fixture](/pytest#the-harness-fixture) for the adapter example and
+[Setup safety](/skills#setup-safety) for ownership and safety rules. `kensa doctor` verifies that the
+adapter calls the approved production code before evidence collection begins.
 
 ## Next
 
