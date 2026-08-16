@@ -50,8 +50,8 @@ through `result.trace`.
 
 ## The harness fixture
 
-`kensa_run` is **yours**. Setup discovers and cites a production-owned seam, then waits for your
-approval before writing this thin adapter:
+`kensa_run` is **yours**. Setup finds and cites the production function or class that starts one
+conversation, then waits for your approval before writing this adapter:
 
 ```python
 from collections.abc import Iterator
@@ -81,8 +81,9 @@ def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
 ```
 
 The repository factory keeps ownership of prompts, tools, routing, configuration, state, effects,
-and cleanup. Each trial gets one conversation instance, reused across simulated turns. If no
-faithful seam exists, setup reports `cannot wire` before editing. See [Skill guardrails](/skills#guardrails).
+and cleanup. Each trial gets one conversation instance, reused across simulated turns. If the
+repository exposes no production function or class that can run one conversation, setup reports
+`cannot wire` before editing. See [Setup safety](/skills#setup-safety).
 
 ## Fixtures and marker
 

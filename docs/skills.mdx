@@ -10,7 +10,7 @@ keywords:
   - cursor
 ---
 
-`kensa init` installs the Kensa skill set into your coding agent, led by the **`kensa-evals`** orchestrator. Ask the agent to set up or extend evals and `kensa-evals` walks the full lifecycle: discover and approve a production seam, wire the harness, confirm readiness, import evidence, inspect it into eval ideas, and generate and run evals.
+`kensa init` installs the Kensa skill set into your coding agent, led by the **`kensa-evals`** orchestrator. Ask the agent to set up or extend evals and `kensa-evals` walks the full lifecycle: find and approve the production function or class that starts a conversation, write the adapter, confirm readiness, import evidence, inspect it into eval ideas, and generate and run evals.
 
 ## Installation
 
@@ -38,7 +38,7 @@ setup  →  evidence  →  inspect  →  approval  →  generate  →  verify
 
 Its checklist:
 
-1. **Wire the harness** - inspect source in a fixed order, propose one production invocation seam with citations, wait for approval, then write a thin `kensa_run` adapter and run `kensa doctor`.
+1. **Connect the harness** - inspect source in a fixed order, propose the production function or class to call with source citations, wait for approval, then write a `kensa_run` adapter and run `kensa doctor`.
 2. **Import evidence** - `kensa import --from <provider>` to pull bounded trace evidence.
 3. **Inspect** - mine imports into a YAML eval-idea queue under `.kensa/inspect/`, read with `kensa inspect list`.
 4. **Approve** - mark the ideas worth keeping `status: approved`, then validate with `kensa inspect lint`.
@@ -52,13 +52,13 @@ Its checklist:
 | Skill | Role |
 |---|---|
 | `kensa-evals` | Orchestrator - detects state and routes the lifecycle from setup through verification |
-| `kensa-setup` | Discovers and proposes a production seam, then writes an approved thin adapter or reports `cannot wire` |
+| `kensa-setup` | Finds and proposes the production function or class to call, then writes the approved adapter or reports `cannot wire` |
 | `kensa-inspect` | Reads redacted TraceView evidence and writes a schema-validated YAML queue of eval ideas |
 | `kensa-generate` | Writes and maintains `tests/evals/test_*.py` files from approved ideas |
 
-## Guardrails
+## Setup safety
 
 Your repository owns agent construction, prompts, tools, routing, state, dependencies, effects, and
-cleanup. Setup writes only an approved thin adapter; it never recreates missing production behavior.
-If no faithful seam exists, it reports `cannot wire`. `kensa doctor` rejects stubs, constructor
-bypasses, swallowed exceptions, and hard-coded fallbacks.
+cleanup. Setup writes only the approved adapter; it never recreates missing production behavior.
+If setup cannot call production code without recreating agent behavior, it reports `cannot wire`.
+`kensa doctor` rejects stubs, constructor bypasses, swallowed exceptions, and hard-coded fallbacks.

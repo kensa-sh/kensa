@@ -73,7 +73,8 @@ Fetch https://kensa.sh/install and follow it.
 ```
 
 Your agent installs Kensa, runs `kensa init`, then follows the `kensa-evals` lifecycle. Setup writes
-a thin adapter only after you approve a production seam, or stops with `cannot wire`.
+an adapter only after you approve the production function or class it will call, or stops with
+`cannot wire`.
 
 <details>
 <summary>Agent can't fetch URLs? Paste this instead</summary>
@@ -131,7 +132,7 @@ with `kensa.instrument()` and import the JSONL.
 | Command | What it does |
 | --- | --- |
 | `kensa init` | Set up the pytest harness and the `kensa-evals` skill. Use `--redaction-model large` for higher-recall model. |
-| `kensa doctor` | Check that the harness reaches its approved production-owned agent boundary. |
+| `kensa doctor` | Check that the harness calls the approved production agent code. |
 | `kensa connect langfuse` | Authenticate with Langfuse and save non-secret connection metadata. |
 | `kensa import --from <provider>` | Import local or connected trace evidence. |
 | `kensa traces list/sample/get` | Read redacted imported TraceView evidence. |
@@ -177,7 +178,7 @@ LLM unless you override `KENSA_JUDGE_PROVIDER` or `KENSA_JUDGE_MODEL`.
 <summary>How does Kensa work?</summary>
 
 Kensa keeps the regression contract inside pytest. You define cases with `kensa_case(...)`, use the
-`kensa_run(case)` fixture as a thin adapter around one production-owned conversation, and call
+`kensa_run(case)` fixture as an adapter around one production-owned conversation, and call
 `case.run(kensa_run)`. Every successful run returns a `CaseResult` with messages, output,
 termination, and a read-only `result.trace` accessor. Reserve LLM-as-judge for semantic checks.
 

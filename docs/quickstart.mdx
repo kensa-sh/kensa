@@ -82,13 +82,14 @@ kensa eval
 
 ## What `kensa init` sets up
 
-`kensa init` scaffolds the harness and installs `kensa-evals`. Setup follows repository source to a
-production-owned seam and waits for approval before writing a thin `kensa_run` adapter. If no
-faithful seam exists, it reports `cannot wire` instead of reconstructing the agent.
+`kensa init` scaffolds the harness and installs `kensa-evals`. Setup follows repository source to
+the production function or class that starts one conversation and waits for approval before writing
+a `kensa_run` adapter. If it cannot call production code without recreating agent behavior, it
+reports `cannot wire`.
 
 See [The harness fixture](/pytest#the-harness-fixture) for the adapter example and
-[Skill guardrails](/skills#guardrails) for ownership and safety rules. `kensa doctor` verifies the
-approved boundary before evidence collection begins.
+[Setup safety](/skills#setup-safety) for ownership and safety rules. `kensa doctor` verifies that the
+adapter calls the approved production code before evidence collection begins.
 
 ## Next
 

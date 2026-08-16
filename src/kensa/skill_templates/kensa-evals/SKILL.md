@@ -1,8 +1,8 @@
 ---
 name: kensa-evals
 description: >
-  Use this skill to orchestrate the state-aware Kensa lifecycle from setup through evidence,
-  inspection, approval, generation, verification, and iteration.
+  Run Kensa setup, evidence import, inspection, approval, eval generation, verification, and
+  iteration. Use when setting up or extending Kensa evals.
 ---
 
 # Kensa Evals
@@ -52,9 +52,9 @@ Route to the first incomplete or broken stage.
 
 Use `kensa-setup`.
 
-Treat that skill as the source of truth for discovery, approval, adapter writing, and failure
-handling. Continue only after `kensa doctor` passes. On `cannot wire`, report its exact reason and
-target-owned prerequisite, then stop without importing evidence or claiming readiness.
+Use it for repository discovery, approval, adapter writing, and failure handling. Continue only
+after `kensa doctor` passes. On `cannot wire`, report its exact reason and required repository
+change, then stop without importing evidence or claiming readiness.
 
 ## 2. Evidence
 
