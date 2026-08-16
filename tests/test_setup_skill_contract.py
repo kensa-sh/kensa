@@ -84,7 +84,8 @@ def test_setup_skill_fails_closed_with_actionable_cannot_wire() -> None:
     skill = _skill_contract("kensa-setup")
 
     for blocker in (
-        "multiple plausible production boundaries",
+        "asking the user to select among plausible production boundaries",
+        "guessing an unresolved seam",
         "reproducing agent behavior",
         "bypassing production construction",
         "changing production code",

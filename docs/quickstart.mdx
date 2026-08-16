@@ -109,7 +109,7 @@ class KensaAdapter:
 
 @pytest.fixture
 def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
-    conversation = create_support_conversation(customer_id=case.row["customer_id"])
+    conversation = create_support_conversation(initial_input=case.input)
     try:
         yield KensaAdapter(conversation)
     finally:

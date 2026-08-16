@@ -77,10 +77,11 @@ After approval:
 
 ## Cannot wire
 
-Stop before editing and report `cannot wire` when multiple plausible production boundaries remain,
-or when wiring requires reproducing agent behavior, bypassing production construction, changing
-production code, or hiding an unsafe effect. Report the exact reason and the target-owned decision
-or seam required. State that there was no fixture edit and no readiness claim.
+Stop before editing and report `cannot wire` when the seam remains unresolved after asking the user
+to select among plausible production boundaries, or when wiring would require guessing an
+unresolved seam, reproducing agent behavior, bypassing production construction, changing production
+code, or hiding an unsafe effect. Report the exact reason and the target-owned decision or seam
+required. State that there was no fixture edit and no readiness claim.
 
 If production code must expose a new headless or injectable seam, report that required target-owned
 change and stop. Continue only if the user separately authorizes production changes.
