@@ -186,19 +186,19 @@ def test_legacy_traces_uses_sdk_pagination_and_returns_existing_shape(
         {
             "page": 1,
             "trace_id": "tr_1",
-            "limit": 1000,
+            "limit": 100,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
         {
             "page": 2,
             "trace_id": "tr_1",
-            "limit": 1000,
+            "limit": 100,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
         {
             "page": 1,
             "trace_id": "tr_2",
-            "limit": 1000,
+            "limit": 100,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         },
     ]
@@ -500,7 +500,7 @@ def test_auto_falls_back_only_on_trace_list_404(monkeypatch: pytest.MonkeyPatch)
         {
             "page": 1,
             "trace_id": "tr_1",
-            "limit": 1000,
+            "limit": 100,
             "request_options": {"timeout_in_seconds": 30, "max_retries": 3},
         }
     ]

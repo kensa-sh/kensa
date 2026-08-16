@@ -19,6 +19,7 @@ LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
 _CLIENT_TIMEOUT_SECONDS = 30
 _SDK_MAX_RETRIES = 3
 _TRACE_PAGE_LIMIT = 100
+_LEGACY_OBSERVATION_PAGE_LIMIT = 100
 _OBSERVATION_PAGE_LIMIT = 1000
 _LEGACY_TRACE_FIELDS = "core,io"
 _OBSERVATIONS_V2_DISCOVERY_FIELDS = "core"
@@ -294,7 +295,7 @@ def _fetch_legacy_observation_rows(
             _call_sdk(
                 lambda current_page=current_page: client.api.legacy.observations_v1.get_many(
                     page=current_page,
-                    limit=_OBSERVATION_PAGE_LIMIT,
+                    limit=_LEGACY_OBSERVATION_PAGE_LIMIT,
                     trace_id=trace_id,
                     request_options=_request_options(),
                 ),
