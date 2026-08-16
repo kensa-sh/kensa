@@ -661,7 +661,6 @@ def test_requirements_options_comments_and_direct_references_are_handled(tmp_pat
             [
                 "# comment only",
                 "",
-                "-r other.txt",
                 "--index-url https://example.invalid/simple",
                 "==1.0",
                 "camel-ai==0.2.90  # pinned",
@@ -670,10 +669,62 @@ def test_requirements_options_comments_and_direct_references_are_handled(tmp_pat
         ),
     )
 
-    detected = _detected(_scan(tmp_path))
+    document = _scan(tmp_path)
+    detected = _detected(document)
 
     assert detected["camel"]["specifiers"] == ["==0.2.90"]
     assert detected["swarms"]["specifiers"] == []
+    assert document["gaps"] == []
+
+
+def test_unfollowed_requirement_includes_are_reported_as_gaps(tmp_path: Path) -> None:
+    _write(tmp_path, "requirements-base.txt", "crewai==1.0.0\n")
+    _write(
+        tmp_path,
+        "requirements.txt",
+        "\n".join(
+            [
+                "-r requirements-base.txt",
+                "-r base/common.txt",
+                "--requirement=base/common.txt",
+                "-c ../outside/constraints.txt",
+                "--constraint",
+                "-c",
+            ]
+        ),
+    )
+
+    document = _scan(tmp_path)
+
+    assert _detected(document)["crewai"]["specifiers"] == ["==1.0.0"]
+    assert [(gap["kind"], gap["detail"]) for gap in document["gaps"]] == [
+        (
+            "unsupported_requirement_include",
+            "Includes --constraint an unnamed file, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+        (
+            "unsupported_requirement_include",
+            "Includes --requirement base/common.txt, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+        (
+            "unsupported_requirement_include",
+            "Includes -c a file outside the repository, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+        (
+            "unsupported_requirement_include",
+            "Includes -c an unnamed file, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+        (
+            "unsupported_requirement_include",
+            "Includes -r base/common.txt, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+    ]
+    assert all(gap["path"] == "requirements.txt" for gap in document["gaps"])
 
 
 def test_malformed_manifests_are_reported_as_gaps(tmp_path: Path) -> None:

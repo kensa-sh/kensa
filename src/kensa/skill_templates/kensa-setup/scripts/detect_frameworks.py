@@ -32,6 +32,7 @@ MANIFEST_FILENAMES = (
 REQUIREMENTS_PATTERN = re.compile(r"^requirements.*\.txt$")
 REQUIREMENT_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$")
 TOML_LOCK_FILENAMES = ("uv.lock", "poetry.lock", "pdm.lock")
+REQUIREMENT_INCLUDE_OPTIONS = ("-r", "--requirement", "-c", "--constraint")
 
 IGNORED_DIRECTORY_NAMES = (
     ".git",
@@ -133,6 +134,7 @@ class _Scan:
         self.exclusions: list[dict[str, str]] = []
         self.gaps: list[dict[str, str | None]] = []
         self._gap_keys: set[tuple[str, str | None, str]] = set()
+        self.manifest_paths: frozenset[str] = frozenset()
         self.declarations: list[dict[str, Any]] = []
         self.imports: list[dict[str, Any]] = []
         self.call_references: list[dict[str, Any]] = []
@@ -234,9 +236,48 @@ def _parse_requirement(line: str) -> tuple[str, str | None] | None:
     return match.group(1), match.group(2).strip() or None
 
 
+def _requirement_include(text: str) -> tuple[str, str] | None:
+    for option in REQUIREMENT_INCLUDE_OPTIONS:
+        if text == option:
+            return option, ""
+        for separator in (" ", "="):
+            if text.startswith(f"{option}{separator}"):
+                return option, text[len(option) + 1 :].strip()
+    return None
+
+
+def _record_requirement_include(
+    scan: _Scan,
+    path: Path,
+    source: str,
+    option: str,
+    ref: str,
+) -> None:
+    target = "an unnamed file"
+    if ref:
+        resolved = (path.parent / ref).resolve()
+        if _is_inside(resolved, scan.root):
+            relative = resolved.relative_to(scan.root).as_posix()
+            if relative in scan.manifest_paths:
+                return
+            target = relative
+        else:
+            target = "a file outside the repository"
+    scan.gap(
+        "unsupported_requirement_include",
+        f"Includes {option} {target}, which this scan does not follow. "
+        "Declarations in that file are missing from this evidence.",
+        source,
+    )
+
+
 def _collect_requirements(scan: _Scan, path: Path, text: str) -> None:
     source = scan.relative(path)
     for line in text.splitlines():
+        include = _requirement_include(line.split("#", 1)[0].strip())
+        if include is not None:
+            _record_requirement_include(scan, path, source, include[0], include[1])
+            continue
         requirement = _parse_requirement(line)
         if requirement is None:
             continue
@@ -623,6 +664,7 @@ def scan_repository(root: Path) -> dict[str, Any]:
     registry = _Registry(_load_registry())
     scan = _Scan(root, registry)
     manifests, sources = _collect_paths(scan)
+    scan.manifest_paths = frozenset(scan.relative(manifest) for manifest in manifests)
     for manifest in manifests:
         _collect_manifest(scan, manifest)
     first_party = _first_party_roots(root)
