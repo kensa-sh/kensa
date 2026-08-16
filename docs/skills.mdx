@@ -58,12 +58,7 @@ Its checklist:
 
 ## Guardrails
 
-The skill is built to keep evals honest. The target repository retains ownership of agent
-construction, prompts, tools, routing, state, dependencies, effects, and cleanup. Kensa owns eval
-execution only after fixture resolution. Setup never fills a missing seam by rebuilding that
-behavior in `conftest.py`, and it never edits before seam and effect approval.
-
-If discovery remains ambiguous or requires a production change, setup returns `cannot wire` with
-the exact target-owned prerequisite. For approved adapters, `kensa doctor` flags patterns that fake
-a passing run, including stub or mock agent classes, constructor bypasses, swallowed exceptions,
-and hard-coded output fallbacks.
+Your repository owns agent construction, prompts, tools, routing, state, dependencies, effects, and
+cleanup. Setup writes only an approved thin adapter; it never recreates missing production behavior.
+If no faithful seam exists, it reports `cannot wire`. `kensa doctor` rejects stubs, constructor
+bypasses, swallowed exceptions, and hard-coded fallbacks.

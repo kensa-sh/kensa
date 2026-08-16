@@ -82,48 +82,13 @@ kensa eval
 
 ## What `kensa init` sets up
 
-`kensa init` scaffolds the harness and installs the `kensa-evals` workflow. During setup, your
-coding agent inspects documented run paths, application entrypoints, tests and factories, agent
-construction, model and tool calls, and their callers. It proposes one source-backed production
-seam and waits for your approval before editing `tests/evals/conftest.py`.
+`kensa init` scaffolds the harness and installs `kensa-evals`. Setup follows repository source to a
+production-owned seam and waits for approval before writing a thin `kensa_run` adapter. If no
+faithful seam exists, it reports `cannot wire` instead of reconstructing the agent.
 
-The resulting `kensa_run` fixture is a thin adapter around repository-owned production code:
-
-```python
-from collections.abc import Iterator
-
-import pytest
-
-from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
-from support.agent import SupportConversation, create_support_conversation
-
-
-class KensaAdapter:
-    def __init__(self, conversation: SupportConversation) -> None:
-        self.conversation = conversation
-
-    def respond(self, messages: tuple[KensaMessage, ...]) -> ConversationResponse:
-        response = self.conversation.respond(messages)
-        return ConversationResponse(content=response.content, output=response.output)
-
-
-@pytest.fixture
-def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
-    conversation = create_support_conversation(initial_input=case.input)
-    try:
-        yield KensaAdapter(conversation)
-    finally:
-        conversation.close()
-```
-
-Here, `support.agent` still owns prompts, tools, routing, provider configuration, state, effects,
-and cleanup. The adapter only maps Kensa messages and results. Each trial gets one production-owned
-conversation instance, which Kensa reuses across simulated turns.
-
-If no faithful seam exists, setup stops with `cannot wire`, the exact reason, and the repository
-change or decision required. It does not reconstruct the agent in the fixture. Approved setups run
-the existing persistent smoke and authenticity gates through `kensa doctor`; real model costs and
-live effects require explicit approval.
+See [The harness fixture](/pytest#the-harness-fixture) for the adapter example and
+[Skill guardrails](/skills#guardrails) for ownership and safety rules. `kensa doctor` verifies the
+approved boundary before evidence collection begins.
 
 ## Next
 

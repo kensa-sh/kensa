@@ -1,8 +1,8 @@
 ---
 name: kensa-evals
 description: >
-  Orchestrate the state-aware Kensa lifecycle from setup through evidence, inspection, approval,
-  generation, verification, and iteration.
+  Use this skill to orchestrate the state-aware Kensa lifecycle from setup through evidence,
+  inspection, approval, generation, verification, and iteration.
 ---
 
 # Kensa Evals
@@ -52,21 +52,9 @@ Route to the first incomplete or broken stage.
 
 Use `kensa-setup`.
 
-That phase must only:
-
-1. Run the fixed, source-backed discovery sequence and propose one production-owned invocation
-   boundary with exact source citations.
-2. Get explicit approval before editing the fixture or consuming real-model cost or live effects.
-3. Make `tests/evals/conftest.py::kensa_run(case)` return one case-aware `ConversationAgent` by
-   implementing only a thin adapter around the approved production seam, preserving one
-   production-owned conversation instance per trial.
-4. Mock only approved external side effects, record the required LLM span, and run `kensa doctor`
-   until the persistent smoke and harness-authenticity gates pass.
-
-If setup reports `cannot wire`, end the lifecycle with its exact reason and target-owned
-prerequisite, without importing evidence or claiming readiness.
-
-Do not import traces, inspect traces, or write evals during setup.
+Treat that skill as the source of truth for discovery, approval, adapter writing, and failure
+handling. Continue only after `kensa doctor` passes. On `cannot wire`, report its exact reason and
+target-owned prerequisite, then stop without importing evidence or claiming readiness.
 
 ## 2. Evidence
 

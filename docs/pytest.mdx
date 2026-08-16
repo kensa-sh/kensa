@@ -19,8 +19,6 @@ uv add --dev kensa     # or: python -m pip install kensa
 ## Anatomy of an eval
 
 ```python
-from collections.abc import Iterator
-
 import pytest
 
 from kensa.pytest import judge, kensa_case
@@ -52,11 +50,12 @@ through `result.trace`.
 
 ## The harness fixture
 
-`kensa_run` is **yours**. It bridges a case to a production-owned invocation seam discovered from
-your repository's real run path. The setup workflow cites the seam, construction path, state owner,
-lifecycle, and effects, then waits for your approval before writing the adapter:
+`kensa_run` is **yours**. Setup discovers and cites a production-owned seam, then waits for your
+approval before writing this thin adapter:
 
 ```python
+from collections.abc import Iterator
+
 import pytest
 
 from kensa.pytest import ConversationResponse, KensaCase, KensaMessage
@@ -81,15 +80,9 @@ def kensa_run(case: KensaCase) -> Iterator[KensaAdapter]:
         conversation.close()
 ```
 
-The repository factory still owns prompts, tools, routing, provider configuration, state, effects,
-and cleanup. The fixture creates one production-owned conversation instance per trial.
-`case.run(kensa_run)` invokes `respond(messages)` once in direct mode or reuses the same instance
-across simulated turns. Visible `content` becomes an assistant message; `output` is the separately
-evaluated value; `trace` is the read-only trial trace.
-
-When a faithful seam cannot be reached without copying behavior, bypassing construction, changing
-production code, or hiding an effect, setup returns `cannot wire` before editing. `kensa doctor`
-keeps the persistent smoke, LLM-span, and harness-authenticity gates on approved adapters.
+The repository factory keeps ownership of prompts, tools, routing, configuration, state, effects,
+and cleanup. Each trial gets one conversation instance, reused across simulated turns. If no
+faithful seam exists, setup reports `cannot wire` before editing. See [Skill guardrails](/skills#guardrails).
 
 ## Fixtures and marker
 

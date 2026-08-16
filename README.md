@@ -72,11 +72,8 @@ Paste this into your coding agent (Claude Code, Codex, Cursor):
 Fetch https://kensa.sh/install and follow it.
 ```
 
-Your agent installs Kensa, runs `kensa init`, then follows the `kensa-evals` lifecycle skill. Setup
-traces repository control flow to one production invocation seam, asks you to approve it, and writes
-only a thin repository-owned adapter. If that cannot be done faithfully, setup stops with an
-actionable `cannot wire` result. Evidence import, inspection, eval approval, generation, and
-verification follow only after harness readiness.
+Your agent installs Kensa, runs `kensa init`, then follows the `kensa-evals` lifecycle. Setup writes
+a thin adapter only after you approve a production seam, or stops with `cannot wire`.
 
 <details>
 <summary>Agent can't fetch URLs? Paste this instead</summary>

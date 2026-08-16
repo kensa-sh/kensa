@@ -1,94 +1,63 @@
 ---
 name: kensa-setup
 description: >
-  Connect a repository's Kensa pytest harness to an approved production-owned invocation boundary
-  and finish when `kensa doctor` passes.
+  Use this skill to connect a repository's Kensa pytest harness to an approved production-owned
+  invocation boundary and finish when `kensa doctor` passes.
 ---
 
 # Kensa Setup
 
 Normally invoked by `kensa-evals`.
 
-Use this skill only for harness readiness. It ends in one of two states: an approved production
-adapter passes `kensa doctor`, or discovery reports an actionable `cannot wire` result before
-editing.
+Use this skill only for harness readiness. Setup is complete when `kensa doctor` passes; otherwise
+finish with an actionable `cannot wire` result before editing.
 
-## Ownership boundary
+## Boundary
 
-The target repository owns its production agent, reusable invocation seam, prompts, tools,
-routing, provider configuration, conversation state, dependencies, effects, and resource
-lifecycle. The setup agent may author only a thin repository-owned `kensa_run` adapter after the
-user approves the discovered seam.
+The target repository owns its production agent, invocation seam, prompts, tools, routing,
+configuration, conversation state, dependencies, effects, and lifecycle. The setup agent may
+author only a thin repository-owned `kensa_run` adapter after the user approves the seam.
 
 Kensa owns execution after fixture resolution: simulated turns, trial isolation, timeouts,
-tracing, judging, artifacts, reports, and readiness verification. Do not fill a missing production
-seam by reconstructing agent behavior inside the fixture.
+tracing, judging, artifacts, reports, and readiness. Never reconstruct missing production behavior
+inside the fixture.
 
-## Discovery and proposal
+## Workflow
 
-1. Inspect the repository read-only in this fixed order:
-   1. documented run paths
-   2. application entrypoints
-   3. tests and factories
-   4. agent constructors or orchestrators
-   5. model and tool call sites
-   6. their callers
-2. During the tests and factories stage, if `tests/evals/conftest.py::kensa_run(case)` already
-   contains user-authored behavior, inspect and verify it, never silently overwrite it.
-3. Trace inward from a real application entrypoint and outward from model and tool call sites until
-   both paths identify the same production-owned invocation boundary. An unfamiliar framework is
-   not a blocker. Follow source control flow instead of selecting from a framework allowlist.
-4. Record source-backed evidence with exact source locations, construction path, input and output
-   mapping, conversation-state owner, resource lifecycle, external effects, and unresolved gaps.
-   Cite the source facts behind every proposed seam.
-5. Before editing, present one proposed seam and minimal adapter. Include the production symbol and
-   source location, construction and invocation path, input and output mapping, conversation state
-   and resource lifecycle, external effects and their proposed safe dependencies, minimal fixture
-   adapter, and unresolved gaps.
-6. Wait for explicit user approval of the seam and adapter, plus any real-model cost or live effects.
-   If multiple boundaries remain plausible, ask the user to select one. Do not create or edit the
-   fixture before approval.
-
-## Approved adapter
-
-After approval:
-
-1. Make `tests/evals/conftest.py::kensa_run(case)` construct one case-aware adapter per trial around
-   the approved production seam. Preserve one production-owned conversation instance per trial,
-   including across simulated turns, and preserve production setup and teardown ownership.
-2. Map Kensa cases and messages into the production input and map the production result into
-   `ConversationResponse`. The adapter must not reproduce prompts, tools, routing, state, configuration, or lifecycle.
-3. Mock or inject only external side effects approved in the proposal. Do not replace the agent
-   with a fake implementation. The model call is part of the agent, not an external side effect.
-   Replacing or stubbing the model client requires explicit user approval and must state that the
-   evals then cover plumbing and guardrails, not model behavior.
-4. Guard construction and `respond` against silent fallbacks. Raise a clear error when a required
-   credential, client, module, or production seam is unavailable.
-5. Before the first approved run that consumes real model credentials, ask one session-scoped cost
-   question with three options: approve real model calls for this session, approve this run only,
-   or stop. Cite that approval for later runs instead of re-asking.
-6. Wrap model calls with Kensa tracing helpers when needed. Run `kensa doctor` and resolve harness
-   blockers without replacing production behavior. The persistent smoke and harness-authenticity
-   checks remain mandatory. The smoke must record at least one LLM span, and that span must come
-   from the real model call unless model stubbing was explicitly approved.
-7. If redaction is not ready, rerun `kensa init`; do not create or edit readiness files manually.
-   When blocked on a missing credential, name the exact variable and dotenv file options in one ask,
-   then wait.
+1. Inspect read-only, in order: documented run paths, application entrypoints, tests and factories,
+   agent constructors or orchestrators, model and tool call sites, then their callers. Inspect an
+   existing user-authored `tests/evals/conftest.py::kensa_run(case)` without overwriting it.
+2. Trace inward from a real entrypoint and outward from model and tool calls until both reach the
+   same production-owned invocation seam. Follow source control flow even for unfamiliar frameworks.
+3. Record exact source locations, construction path, input and output mapping, conversation-state
+   owner, resource lifecycle, external effects, and unresolved gaps. Cite every proposed seam.
+4. Before editing, present one seam and minimal adapter with the production symbol and source
+   location, construction and invocation path, mappings, state and lifecycle ownership, effects,
+   safe dependencies, and unresolved gaps. Wait for explicit approval of the seam, adapter,
+   real-model cost, and live effects. Do not edit first.
+5. After approval, make `kensa_run(case)` return one case-aware `ConversationAgent` around the seam.
+   Preserve one production-owned conversation instance per trial and across simulated turns. Map
+   Kensa messages and results through `ConversationResponse`; do not reproduce prompts, tools,
+   routing, state, configuration, or lifecycle.
+6. Inject only approved external effects. The model call is part of the agent, so stubbing it needs
+   explicit approval and must be reported as covering plumbing and guardrails, not model behavior.
+7. Fail clearly when construction, credentials, clients, modules, or the seam are unavailable.
+   Add Kensa tracing where needed, then run `kensa doctor` without replacing production behavior.
+   Its persistent smoke, real LLM span unless stubbing was approved, and authenticity checks remain
+   mandatory.
 
 ## Cannot wire
 
-Stop before editing and report `cannot wire` when the seam remains unresolved after asking the user
-to select among plausible production boundaries, or when wiring would require guessing an
-unresolved seam, reproducing agent behavior, bypassing production construction, changing production
-code, or hiding an unsafe effect. Report the exact reason and the target-owned decision or seam
-required. State that there was no fixture edit and no readiness claim.
+Ask the user to select among plausible seams before giving up. Stop before editing and report
+`cannot wire` when wiring would still require guessing, reproducing agent behavior, bypassing
+production construction, changing production code, or hiding an unsafe effect. Include the exact
+reason, the target-owned decision or seam required, and state that there was no fixture edit or
+readiness claim.
 
 If production code must expose a new headless or injectable seam, report that required target-owned
 change and stop. Continue only if the user separately authorizes production changes.
 
-Successful setup is complete when `kensa doctor` passes. Hand back to `kensa-evals` for evidence
-collection. A `cannot wire` result ends setup. Do not import traces, inspect traces, propose eval
-ideas, or write pytest eval files in this skill.
+## Credentials
 
 Credential rule: detect credential presence by name only. Never read, print, copy, transform,
 validate, export, create, edit, or weaken API keys, `.env` files, shell profiles, or credential
@@ -98,3 +67,12 @@ already declares or imports a local/staging dotenv path, you may persist only
 that path in `pyproject.toml` as `[tool.kensa] dotenv = "<path>"` so future Kensa commands use the
 same credential source. Do not read or edit the dotenv file. If a run will consume already
 configured local or staging model credentials, explicit user approval is required.
+
+Before the first approved real-model run, ask once whether approval covers the session, this run,
+or neither. If blocked, name the exact variable and dotenv options, then wait. If redaction is not
+ready, rerun `kensa init`; never edit readiness files manually.
+
+## Handoff
+
+On `kensa doctor` success, return to `kensa-evals`. Do not import traces, inspect traces, propose
+eval ideas, or write pytest eval files here. A `cannot wire` result ends setup.
