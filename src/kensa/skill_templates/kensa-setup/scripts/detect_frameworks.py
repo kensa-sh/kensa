@@ -32,7 +32,10 @@ MANIFEST_FILENAMES = (
 REQUIREMENTS_PATTERN = re.compile(r"^requirements.*\.txt$")
 REQUIREMENT_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$")
 TOML_LOCK_FILENAMES = ("uv.lock", "poetry.lock", "pdm.lock")
-REQUIREMENT_INCLUDE_OPTIONS = ("-r", "--requirement", "-c", "--constraint")
+REQUIREMENT_INCLUDE_PATTERNS = (
+    re.compile(r"^(--requirement|--constraint)(?:[=\s]+(.*))?$"),
+    re.compile(r"^(-r|-c)[=\s]*(.*)$"),
+)
 
 IGNORED_DIRECTORY_NAMES = (
     ".git",
@@ -237,12 +240,10 @@ def _parse_requirement(line: str) -> tuple[str, str | None] | None:
 
 
 def _requirement_include(text: str) -> tuple[str, str] | None:
-    for option in REQUIREMENT_INCLUDE_OPTIONS:
-        if text == option:
-            return option, ""
-        for separator in (" ", "="):
-            if text.startswith(f"{option}{separator}"):
-                return option, text[len(option) + 1 :].strip()
+    for pattern in REQUIREMENT_INCLUDE_PATTERNS:
+        match = pattern.match(text)
+        if match is not None:
+            return match.group(1), (match.group(2) or "").strip()
     return None
 
 
@@ -311,8 +312,16 @@ def _collect_poetry_table(scan: _Scan, source: str, value: Any) -> None:
     for name, constraint in value.items():
         if name == "python":
             continue
-        specifier = constraint if isinstance(constraint, str) else None
-        _record_declaration(scan, name, source, specifier, None)
+        _record_declaration(scan, name, source, _poetry_specifier(constraint), None)
+
+
+def _poetry_specifier(constraint: Any) -> str | None:
+    if isinstance(constraint, str):
+        return constraint
+    if isinstance(constraint, dict):
+        version = constraint.get("version")
+        return version if isinstance(version, str) else None
+    return None
 
 
 def _collect_pyproject(scan: _Scan, path: Path, text: str) -> None:

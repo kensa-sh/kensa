@@ -523,6 +523,8 @@ dev = ["smolagents", { include-group = "test" }]
 python = "^3.11"
 crewai = "^1.0"
 dspy = { version = "^3.0" }
+langgraph = { git = "https://github.com/langchain-ai/langgraph" }
+pipecat-ai = [{ version = "^1.0", python = "^3.11" }]
 
 [tool.poetry.group.dev.dependencies]
 marvin = "^3.0"
@@ -551,8 +553,10 @@ lint = ["mirascope"]
         "pipecat",
         "smolagents",
     }
-    assert _detected(document)["dspy"]["specifiers"] == []
+    assert _detected(document)["dspy"]["specifiers"] == ["^3.0"]
     assert _detected(document)["crewai"]["specifiers"] == ["^1.0"]
+    assert _detected(document)["langgraph"]["specifiers"] == [">=0.2"]
+    assert _detected(document)["pipecat"]["specifiers"] == []
 
 
 def test_pyproject_with_unexpected_shapes_is_tolerated(tmp_path: Path) -> None:
@@ -686,7 +690,10 @@ def test_unfollowed_requirement_includes_are_reported_as_gaps(tmp_path: Path) ->
             [
                 "-r requirements-base.txt",
                 "-r base/common.txt",
+                "-rbase/common.txt",
+                "-r\tbase/common.txt",
                 "--requirement=base/common.txt",
+                "--constraint\tbase/common.txt",
                 "-c ../outside/constraints.txt",
                 "--constraint",
                 "-c",
@@ -701,6 +708,11 @@ def test_unfollowed_requirement_includes_are_reported_as_gaps(tmp_path: Path) ->
         (
             "unsupported_requirement_include",
             "Includes --constraint an unnamed file, which this scan does not follow. "
+            "Declarations in that file are missing from this evidence.",
+        ),
+        (
+            "unsupported_requirement_include",
+            "Includes --constraint base/common.txt, which this scan does not follow. "
             "Declarations in that file are missing from this evidence.",
         ),
         (
