@@ -858,6 +858,35 @@ def test_unparseable_source_is_reported_as_a_gap(tmp_path: Path) -> None:
     assert "SyntaxError" in str(gaps[0]["detail"])
 
 
+@pytest.mark.parametrize(
+    "local_module",
+    ["google/adk.py", "google/adk/client.py", "src/google/adk.py"],
+)
+def test_local_namespace_packages_without_init_files_shadow_registry_roots(
+    tmp_path: Path,
+    local_module: str,
+) -> None:
+    _write(tmp_path, local_module, "value = 1\n")
+    _write(tmp_path, "app.py", "from google import adk\n\nagent = adk.Agent()\n")
+
+    document = _scan(tmp_path)
+
+    assert document["detected"] == []
+    assert document["call_references"] == []
+    assert [gap["kind"] for gap in document["gaps"]] == ["first_party_shadowed_import_root"]
+
+
+def test_directories_without_python_files_are_not_first_party_roots(tmp_path: Path) -> None:
+    (tmp_path / "google").mkdir()
+    (tmp_path / "google" / "notes.md").write_text("text", encoding="utf-8")
+    _write(tmp_path, "app.py", "from google import adk\n\nagent = adk.Agent()\n")
+
+    document = _scan(tmp_path)
+
+    assert _detected(document)["google-adk"]["state"] == "call_referenced"
+    assert document["gaps"] == []
+
+
 def test_first_party_roots_ignore_symlinks_and_plain_directories(tmp_path: Path) -> None:
     _write(tmp_path, "src/agents/__init__.py", "")
     _write(tmp_path, "notes/readme.md", "text")

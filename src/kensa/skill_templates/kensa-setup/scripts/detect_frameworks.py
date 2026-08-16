@@ -425,18 +425,18 @@ def _collect_manifest(scan: _Scan, path: Path) -> None:
         _collect_requirements(scan, path, text)
 
 
-def _first_party_roots(root: Path) -> set[str]:
+def _first_party_roots(scan: _Scan, sources: list[Path]) -> set[str]:
+    """Return top-level names this repository can import, derived from the scanned sources.
+
+    A directory counts whether or not it has ``__init__.py`` because PEP 420 makes any
+    directory holding Python files an importable namespace package.
+    """
     roots: set[str] = set()
-    for parent in (root, root / "src"):
-        if not parent.is_dir():
-            continue
-        for entry in parent.iterdir():
-            if entry.is_symlink():
-                continue
-            if entry.is_dir() and (entry / "__init__.py").is_file():
-                roots.add(entry.name)
-            elif entry.suffix == ".py":
-                roots.add(entry.stem)
+    for source in sources:
+        parts = scan.relative(source).split("/")
+        if parts[0] == "src" and len(parts) > 1:
+            parts = parts[1:]
+        roots.add(parts[0].removesuffix(".py") if len(parts) == 1 else parts[0])
     return roots
 
 
@@ -684,7 +684,7 @@ def scan_repository(root: Path) -> dict[str, Any]:
     scan.manifest_paths = frozenset(scan.relative(manifest) for manifest in manifests)
     for manifest in manifests:
         _collect_manifest(scan, manifest)
-    first_party = _first_party_roots(root)
+    first_party = _first_party_roots(scan, sources)
     for source in sources:
         _collect_source(scan, source, first_party)
     scan.declarations.sort(
