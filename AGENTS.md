@@ -37,6 +37,7 @@ process-level tracing should use `kensa.instrument()`.
 
 Prefer existing local patterns over new abstractions. Keep eval files constrained to
 `tests/evals/test_*.py`.
+Follow https://agentskills.io for Kensa skill changes under `src/kensa/skill_templates/`.
 
 ## Testing Guidelines
 
