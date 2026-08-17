@@ -1,15 +1,6 @@
----
-title: Changelog
-description: What's new in Kensa.
-sidebarTitle: Changelog
-keywords:
-  - changelog
-  - releases
-  - version history
-  - release notes
----
+# Changelog
 
-<Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
+Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
 ## 0.20.0
 ### Features

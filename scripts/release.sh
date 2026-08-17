@@ -16,7 +16,7 @@ usage:
 
 Release flow:
   1. Run patch/minor/major to open a version-bump PR.
-  2. Update docs/changelog.mdx in the PR.
+  2. Review the generated changelog and complete release notes in the PR.
   3. Merge the PR manually after CI passes.
   4. The merge workflow publishes to PyPI and creates the GitHub Release.
 
@@ -155,14 +155,31 @@ run_local_checks() {
   uv run pytest -q -m "not live"
 }
 
+generate_release_notes() {
+  local tag="$1"
+  local previous_tag="$2"
+  local target_commitish="$3"
+
+  gh api \
+    --method POST \
+    "repos/{owner}/{repo}/releases/generate-notes" \
+    --raw-field "tag_name=$tag" \
+    --raw-field "previous_tag_name=$previous_tag" \
+    --raw-field "target_commitish=$target_commitish" \
+    --jq .body
+}
+
 release_pr_body() {
   local version="$1"
+  local release_notes="$2"
   cat <<EOF
 Release PR for v$version.
 
+${release_notes%$'\n'}
+
 ## Release checklist
 
-- [ ] Update \`docs/changelog.mdx\` for v$version.
+- [ ] Review the generated changelog for completeness.
 
 Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
 the GitHub Release for \`v$version\`.
@@ -173,7 +190,7 @@ prepare_release_pr() {
   local bump="$1"
   local dry_run="$2"
   local run_tests="$3"
-  local current version tag branch title
+  local current version tag previous_tag branch title target_commitish release_notes
 
   require_command git
   require_command uv
@@ -190,7 +207,8 @@ prepare_release_pr() {
     echo "would require clean main branch matching origin/main"
     echo "would require available branch: $branch"
     echo "would require available tag: $tag"
-    echo "would update pyproject.toml and uv.lock"
+    echo "would update pyproject.toml, uv.lock, CHANGELOG.md, and docs/changelog.mdx"
+    echo "would generate complete release notes from $tag's explicit previous-tag range"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else
@@ -212,9 +230,15 @@ prepare_release_pr() {
   assert_tag_available "$tag"
   ensure_label "ignore-for-release" "Exclude from generated release notes" "ededed"
 
+  previous_tag="v$current"
+  target_commitish="$(git -C "$ROOT" rev-parse HEAD)"
+  release_notes="$(generate_release_notes "$tag" "$previous_tag" "$target_commitish")"
+
   git -C "$ROOT" switch -c "$branch"
   uv version "$version" --no-sync >/dev/null
   assert_version_files "$version"
+  printf '%s\n' "$release_notes" | uv run python "$ROOT/scripts/changelog.py" add "$version"
+  release_notes="$(uv run python "$ROOT/scripts/changelog.py" notes "$version")"
 
   if [ "$run_tests" = true ]; then
     run_local_checks
@@ -222,13 +246,13 @@ prepare_release_pr() {
     echo "skip local checks; PR CI remains authoritative"
   fi
 
-  git -C "$ROOT" add pyproject.toml uv.lock
+  git -C "$ROOT" add pyproject.toml uv.lock CHANGELOG.md docs/changelog.mdx
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
-  release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
+  release_pr_body "$version" "$release_notes" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
-  echo "update docs/changelog.mdx, wait for CI, then merge manually to publish"
+  echo "review the changelog, wait for CI, then merge manually to publish"
 }
 
 main() {

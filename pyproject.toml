@@ -65,6 +65,7 @@ packages = ["src/kensa"]
 only-include = [
   "src/kensa",
   "tests",
+  "CHANGELOG.md",
   "README.md",
   "LICENSE",
   "pyproject.toml",
@@ -85,6 +86,7 @@ all = "error"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_default_fixture_loop_scope = "function"
 markers = [
   "anthropic: live Anthropic provider integration tests",

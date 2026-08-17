@@ -98,6 +98,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check
+      - run: uv run python scripts/changelog.py sync --check
 
   redaction:
     needs: prepare
@@ -205,6 +206,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/download-artifact@v8
         with:
           name: dist
@@ -214,4 +218,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python scripts/changelog.py notes "$VERSION" | gh release create "$TAG" dist/* --title "$TAG" --notes-file - --verify-tag

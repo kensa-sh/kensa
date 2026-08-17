@@ -3,12 +3,16 @@ name: Docs
 on:
   pull_request:
     paths:
+      - "CHANGELOG.md"
       - "docs/**"
+      - "scripts/changelog.py"
       - ".github/workflows/docs.yml"
   push:
     branches: [main]
     paths:
+      - "CHANGELOG.md"
       - "docs/**"
+      - "scripts/changelog.py"
       - ".github/workflows/docs.yml"
 
 permissions:
@@ -27,6 +31,7 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - run: npm install --global mint@4.2.693
+      - run: python ../scripts/changelog.py sync --check
       - run: mint validate
       - run: mint broken-links
       - run: mint a11y
