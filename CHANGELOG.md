@@ -4,6 +4,24 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.21.0
+### Features
+* feat: add interoperable tooling contracts ([be943de](https://github.com/kensa-sh/kensa/commit/be943de7e0ff9436f6fe37ef489d4c51b70a3dc1))
+### Bug Fixes
+* fix: cover changelog failure gates ([cdf3560](https://github.com/kensa-sh/kensa/commit/cdf3560a8750ec727fcac227bc822f020d90e4c9))
+* fix: bind release notes to base commit ([279e410](https://github.com/kensa-sh/kensa/commit/279e41078d23426103a896559dc71300ac8ed70f))
+* fix: separate product release notes ([29f224b](https://github.com/kensa-sh/kensa/commit/29f224bc8aef0ba25afb2728f55b4bb35b50a507))
+* fix: rebuild changelog from git history ([7f61f81](https://github.com/kensa-sh/kensa/commit/7f61f81ded62265dc9a5b0b5adf125eb4b3779f7))
+* fix: isolate lifecycle test environment ([83b427f](https://github.com/kensa-sh/kensa/commit/83b427f1d5119fd409e2294c31c4adc866c109c8))
+* fix: generate changelog with git-cliff ([d959358](https://github.com/kensa-sh/kensa/commit/d95935883d65b7987dc195674738bfa734011967))
+* fix: require explicit opt-in for OTLP HTTP export ([af0211b](https://github.com/kensa-sh/kensa/commit/af0211bebb704b7bb2cf151635d942a4e12caf5b))
+* fix: key OTLP export on a Kensa-owned endpoint and scope credentials ([2da1b6e](https://github.com/kensa-sh/kensa/commit/2da1b6ebb4166c3e7fc92895a2cfe3078c0329de))
+### Chores
+* chore: synchronize release changelogs ([a180806](https://github.com/kensa-sh/kensa/commit/a180806512b3b4cd6c3ae80e5927e77e812f64f9))
+* chore: tighten instrument docstring and OTLP documentation prose ([4346ff1](https://github.com/kensa-sh/kensa/commit/4346ff10fc1a2ea07b4746904c0f11e5f4a54072))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.20.0...v0.21.0
+
 ## 0.20.0
 ### Features
 * feat: update default judge models ([17d4a33](https://github.com/kensa-sh/kensa/commit/17d4a331d30fda1a8e772958eeea9efc41a418b7))

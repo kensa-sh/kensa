@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.21.0
+
+Traces can now dual-export to any OTLP HTTP collector, and setup, inspect, and doctor output carry versioned contracts for other tooling to consume.
+
+- `instrument()` dual-exports spans to a standard OTLP HTTP endpoint via `otlp_endpoint` or `KENSA_OTLP_ENDPOINT`, while keeping local JSONL capture and isolating export failures from the traced process; standard `OTEL_EXPORTER_OTLP_*` variables never enable export on their own. [#117](https://github.com/kensa-sh/kensa/pull/117)
+- `kensa.behavior_candidate.v1` publishes an inspect idea as a strict public model with a deterministic `semantic_fingerprint` over its normalized failure and outcome semantics. [#117](https://github.com/kensa-sh/kensa/pull/117)
+- `kensa init --non-interactive --json --project-root ...` emits a versioned `kensa.init_manifest.v1` changed-file manifest, and `kensa doctor --json` emits versioned `kensa.doctor_diagnostics.v1` codes. [#117](https://github.com/kensa-sh/kensa/pull/117)
+
+[View the 0.21.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.21.0).
+
 ## 0.20.0
 
 Judge defaults, agent setup, and Langfuse imports now track the production systems they run against.
