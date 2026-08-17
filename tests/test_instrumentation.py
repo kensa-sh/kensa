@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
+import socket
+import subprocess
+import sys
+import threading
+import weakref
 from contextlib import nullcontext
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from opentelemetry.trace import SpanKind
@@ -18,13 +25,436 @@ from kensa.tracing import record_llm_call, record_span, record_tool_call
 
 def test_instrument_noops_without_trace_dir(monkeypatch) -> None:
     monkeypatch.delenv("KENSA_TRACE_DIR", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.setattr(
         tracing,
-        "_add_jsonl_processor",
+        "_add_span_processors_once",
         lambda *args, **kwargs: pytest.fail("instrument should no-op"),
     )
 
     kensa.instrument()
+
+
+def test_instrument_dual_exports_to_otlp_http_and_jsonl(tmp_path: Path) -> None:
+    requests: list[tuple[str, bytes, str | None, str | None]] = []
+
+    class Collector(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            requests.append(
+                (
+                    self.path,
+                    self.rfile.read(length),
+                    self.headers.get("Content-Type"),
+                    self.headers.get("x-test"),
+                )
+            )
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            del format, args
+
+    server = HTTPServer(("127.0.0.1", 0), Collector)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/traces"
+        script = f"""from pathlib import Path
+from opentelemetry import trace
+from kensa import instrument, record_span
+
+instrument(
+    Path({str(tmp_path)!r}),
+    otlp_endpoint={endpoint!r},
+    otlp_headers={{"x-test": "dual-export"}},
+)
+with record_span("dual-export"):
+    pass
+assert trace.get_tracer_provider().force_flush(1_000)
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert completed.returncode == 0, completed.stderr
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    assert rows[-1]["name"] == "dual-export"
+    assert requests
+    assert requests[-1][0] == "/v1/traces"
+    assert requests[-1][1]
+    assert requests[-1][2] == "application/x-protobuf"
+    assert requests[-1][3] == "dual-export"
+
+
+def test_unreachable_otlp_endpoint_reports_failure_without_losing_local_span(
+    tmp_path: Path,
+) -> None:
+    closed_socket = socket.socket()
+    closed_socket.bind(("127.0.0.1", 0))
+    port = int(closed_socket.getsockname()[1])
+    closed_socket.close()
+    endpoint = f"http://127.0.0.1:{port}/v1/traces"
+    script = f"""from pathlib import Path
+from kensa import instrument, record_span
+
+instrument(Path({str(tmp_path)!r}), otlp_endpoint={endpoint!r})
+with record_span("local-survives"):
+    pass
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    assert rows[-1]["name"] == "local-survives"
+    assert "OTLP HTTP span export failed" in completed.stderr
+
+
+def test_otlp_environment_enables_export_and_default_local_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported: list[str] = []
+
+    class Exporter:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["endpoint"] is None
+            assert kwargs["timeout"] == tracing._DEFAULT_OTLP_TIMEOUT_S
+
+        def export(self, spans: Any) -> Any:
+            exported.extend(span.name for span in spans)
+            return tracing.SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            del timeout_millis
+            return True
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.example")
+    monkeypatch.setattr(tracing, "_otlp_span_exporter_class", lambda: Exporter)
+
+    kensa.instrument()
+    with record_span("environment-export"):
+        pass
+    assert cast(Any, tracing.trace.get_tracer_provider()).force_flush(1_000)
+
+    assert exported[-1] == "environment-export"
+    assert (tmp_path / ".kensa" / "traces" / "spans.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("exporter_selection", "explicit_endpoint", "expected_processor_count"),
+    [
+        ("none", None, 1),
+        ("console", None, 1),
+        ("otlp,console", None, 2),
+        ("none", "http://explicit.example/v1/traces", 2),
+    ],
+)
+def test_standard_trace_exporter_opt_out_yields_to_explicit_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exporter_selection: str,
+    explicit_endpoint: str | None,
+    expected_processor_count: int,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    provider = Provider()
+    remote_processor = object()
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setattr(
+        tracing,
+        "_build_otlp_http_processor",
+        lambda **kwargs: cast(Any, remote_processor),
+    )
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://injected.example")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", exporter_selection)
+
+    kensa.instrument(tmp_path, otlp_endpoint=explicit_endpoint)
+
+    assert len(provider.processors) == expected_processor_count
+    expected_remote = explicit_endpoint is not None or any(
+        entry.strip().lower() == "otlp" for entry in exporter_selection.split(",")
+    )
+    assert (remote_processor in provider.processors) is expected_remote
+
+
+def test_unavailable_local_capture_does_not_disable_otlp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    provider = Provider()
+    remote_processor = object()
+    blocked_parent = tmp_path / "blocked"
+    blocked_parent.write_text("not a directory")
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setattr(
+        tracing,
+        "_build_otlp_http_processor",
+        lambda **kwargs: cast(Any, remote_processor),
+    )
+
+    with caplog.at_level("ERROR", logger="kensa.tracing"):
+        kensa.instrument(
+            blocked_parent / "traces",
+            otlp_endpoint="http://127.0.0.1:4318/v1/traces",
+        )
+
+    assert provider.processors == [remote_processor]
+    assert "local capture disabled" in caplog.text
+
+
+def test_reporting_otlp_exporter_contains_export_flush_and_shutdown_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class WorkingExporter(tracing.SpanExporter):
+        def export(self, spans: Any) -> Any:
+            del spans
+            return tracing.SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            return timeout_millis == 123
+
+    class FailingExporter(tracing.SpanExporter):
+        def export(self, spans: Any) -> Any:
+            del spans
+            raise RuntimeError("export")
+
+        def shutdown(self) -> None:
+            raise RuntimeError("shutdown")
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            del timeout_millis
+            raise RuntimeError("flush")
+
+    class FailureResultExporter(WorkingExporter):
+        def export(self, spans: Any) -> Any:
+            del spans
+            return tracing.SpanExportResult.FAILURE
+
+    working = tracing._ReportingSpanExporter(WorkingExporter())
+    working.shutdown()
+    assert working.force_flush(123) is True
+
+    failing = tracing._ReportingSpanExporter(FailingExporter())
+    with caplog.at_level("ERROR", logger="kensa.tracing"):
+        assert (
+            tracing._ReportingSpanExporter(FailureResultExporter()).export([])
+            is tracing.SpanExportResult.FAILURE
+        )
+        assert failing.export([]) is tracing.SpanExportResult.FAILURE
+        failing.shutdown()
+        assert failing.force_flush() is False
+    assert "OTLP HTTP span export failed" in caplog.text
+    assert "OTLP HTTP exporter shutdown failed" in caplog.text
+    assert "OTLP HTTP exporter flush failed" in caplog.text
+
+
+def test_instrument_registers_local_and_batched_otlp_processors_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    class Exporter(tracing.SpanExporter):
+        def export(self, spans: Any) -> Any:
+            del spans
+            return tracing.SpanExportResult.SUCCESS
+
+    provider = Provider()
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setattr(
+        tracing,
+        "_otlp_span_exporter_class",
+        lambda: lambda **kwargs: Exporter(),
+    )
+    for _ in range(2):
+        kensa.instrument(
+            tmp_path,
+            otlp_endpoint="http://127.0.0.1:4318/v1/traces",
+            otlp_headers={"x-test": "idempotent"},
+            otlp_timeout_s=1,
+        )
+
+    assert len(provider.processors) == 2
+    assert isinstance(provider.processors[0], tracing.SimpleSpanProcessor)
+    assert isinstance(provider.processors[1], tracing.BatchSpanProcessor)
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "environment_value"),
+    [
+        ("OTEL_EXPORTER_OTLP_TIMEOUT", "10s"),
+        ("OTEL_BSP_MAX_QUEUE_SIZE", "0"),
+    ],
+)
+def test_invalid_otlp_configuration_preserves_local_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    environment_name: str,
+    environment_value: str,
+) -> None:
+    provider = tracing.TracerProvider()
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setenv(environment_name, environment_value)
+
+    with caplog.at_level("ERROR", logger="kensa.tracing"):
+        kensa.instrument(
+            tmp_path,
+            otlp_endpoint="http://127.0.0.1:4318/v1/traces",
+        )
+        with provider.get_tracer("test").start_as_current_span("local-after-invalid-otlp"):
+            pass
+    provider.shutdown()
+
+    rows = [json.loads(line) for line in (tmp_path / "spans.jsonl").read_text().splitlines()]
+    assert rows[-1]["name"] == "local-after-invalid-otlp"
+    assert "OTLP HTTP exporter configuration is invalid" in caplog.text
+
+
+def test_span_processor_registration_can_retry_after_factory_failure() -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    provider = Provider()
+
+    def fail() -> Any:
+        raise RuntimeError("factory failed")
+
+    with pytest.raises(RuntimeError, match="factory failed"):
+        tracing._add_span_processors_once(provider, [("test", "retry", fail)])
+
+    processor = object()
+    assert tracing._add_span_processors_once(
+        provider,
+        [("test", "retry", lambda: cast(Any, processor))],
+    )
+    assert provider.processors == [processor]
+
+
+def test_span_processor_registration_does_not_retain_provider() -> None:
+    class Provider:
+        def add_span_processor(self, processor: Any) -> None:
+            del processor
+
+    provider = Provider()
+    reference = weakref.ref(provider)
+    assert tracing._add_span_processors_once(
+        provider,
+        [("test", "weak", lambda: cast(Any, object()))],
+    )
+
+    del provider
+    gc.collect()
+
+    assert reference() is None
+
+
+def test_instrument_attaches_to_active_provider_when_set_silently_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProviderWithoutProcessor:
+        pass
+
+    class ActiveProvider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    active = ActiveProvider()
+    providers = iter([ProviderWithoutProcessor(), active])
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: next(providers))
+    monkeypatch.setattr(tracing.trace, "set_tracer_provider", lambda provider: None)
+
+    kensa.instrument(tmp_path)
+
+    assert len(active.processors) == 1
+
+
+def test_instrument_reports_when_no_provider_accepts_processors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ProviderWithoutProcessor:
+        pass
+
+    provider = ProviderWithoutProcessor()
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setattr(tracing.trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(
+        tracing,
+        "_otlp_span_exporter_class",
+        lambda: pytest.fail("unused OTLP exporter must not be constructed"),
+    )
+
+    with caplog.at_level("ERROR", logger="kensa.tracing"):
+        kensa.instrument(
+            tmp_path,
+            otlp_endpoint="http://127.0.0.1:4318/v1/traces",
+        )
+
+    assert "exporters were not installed" in caplog.text
+    assert not (tmp_path / "spans.jsonl").exists()
+
+
+def test_otlp_timeout_honors_explicit_and_standard_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert tracing._resolved_otlp_timeout(4.0) == 4.0
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "7")
+    assert tracing._resolved_otlp_timeout(None) is None
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TIMEOUT")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "8")
+    assert tracing._resolved_otlp_timeout(None) is None
 
 
 def test_instrument_exports_finished_otel_spans_to_jsonl(tmp_path: Path) -> None:

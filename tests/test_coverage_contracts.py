@@ -1003,7 +1003,7 @@ def test_tracing_exporter_edge_paths(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     from kensa import tracing
 
-    assert not tracing._add_jsonl_processor(Provider(), tmp_path / "x.jsonl")
+    assert not tracing._add_span_processors_once(Provider(), [])
     assert tracing.jsonable({1, 2}).startswith("{")
 
     class NoContextSpan:
@@ -1032,9 +1032,6 @@ def test_tracing_exporter_edge_paths(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("kensa.tracing.trace.get_tracer_provider", lambda: provider)
     instrument(tmp_path / "instrument")
     assert provider.processors
-    provider_path = ProviderWithProcessor()
-    assert tracing._add_jsonl_processor(provider_path, tmp_path / "path.jsonl")
-    assert provider_path.processors
 
     class LinkContextSpan:
         name = "with_link"

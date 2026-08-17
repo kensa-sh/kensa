@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, nullcontext
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
+from weakref import WeakKeyDictionary
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+    SpanProcessor,
+)
 from opentelemetry.trace import Span, SpanKind
 from pydantic import ConfigDict, JsonValue, TypeAdapter
 
@@ -21,7 +29,11 @@ from kensa.runtime import OperationKind, current_runtime
 from kensa.traces import write_trace_manifest
 
 GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_completion"]
+_LOGGER = logging.getLogger(__name__)
 _MISSING_TOOL_PAYLOAD = object()
+_DEFAULT_OTLP_TIMEOUT_S = 2.0
+_REGISTERED_PROCESSORS: WeakKeyDictionary[Any, set[tuple[str, str]]] = WeakKeyDictionary()
+_REGISTERED_PROCESSORS_LOCK = Lock()
 _JSON_VALUE_ADAPTER = TypeAdapter(
     JsonValue,
     config=ConfigDict(strict=True, allow_inf_nan=False),
@@ -111,22 +123,58 @@ class JSONLSpanExporter(SpanExporter):
         )
 
 
+class _ReportingSpanExporter(SpanExporter):
+    def __init__(self, exporter: SpanExporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        try:
+            result = self._exporter.export(spans)
+        except Exception:
+            _LOGGER.exception("OTLP HTTP span export failed")
+            return SpanExportResult.FAILURE
+        if result is not SpanExportResult.SUCCESS:
+            _LOGGER.error("OTLP HTTP span export failed")
+        return result
+
+    def shutdown(self) -> None:
+        try:
+            self._exporter.shutdown()
+        except Exception:
+            _LOGGER.exception("OTLP HTTP exporter shutdown failed")
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        try:
+            return self._exporter.force_flush(timeout_millis)
+        except Exception:
+            _LOGGER.exception("OTLP HTTP exporter flush failed")
+            return False
+
+
 def instrument(
     trace_dir: str | Path | None = None,
     *,
     run_id: str | None = None,
     service_name: str | None = None,
+    otlp_endpoint: str | None = None,
+    otlp_headers: Mapping[str, str] | None = None,
+    otlp_timeout_s: float | None = None,
 ) -> None:
-    """Attach a JSONL OTel exporter for the current process.
+    """Attach local JSONL and optional OTLP HTTP exporters for this process.
 
-    The function is intentionally explicit and process-scoped. It no-ops unless
-    ``trace_dir`` or ``KENSA_TRACE_DIR`` is set, so users can leave it in app
-    startup without affecting normal runs.
+    OTLP export is enabled by ``otlp_endpoint`` or standard OpenTelemetry OTLP
+    endpoint environment variables. When OTLP is enabled without an explicit
+    local directory, JSONL spans are retained under ``.kensa/traces``. The
+    default OTLP request timeout is two seconds unless a standard OpenTelemetry
+    timeout environment variable or ``otlp_timeout_s`` supplies another value;
+    the Python OTLP exporter interprets each timeout in seconds.
     """
 
     configured = trace_dir if trace_dir is not None else os.environ.get("KENSA_TRACE_DIR")
-    if not configured:
+    otlp_enabled = _otlp_http_enabled(otlp_endpoint)
+    if not configured and not otlp_enabled:
         return
+    configured = configured or Path(".kensa/traces")
     configured_run_id = run_id or os.environ.get("KENSA_TRACE_RUN_ID")
     configured_service_name = service_name or os.environ.get("KENSA_SERVICE_NAME")
     resolved = Path(configured)
@@ -134,19 +182,47 @@ def instrument(
         resolved = resolved / "runs" / configured_run_id
     output_path = resolved / "spans.jsonl"
     provider = trace.get_tracer_provider()
-    exporter = JSONLSpanExporter(
-        output_path,
-        run_id=configured_run_id,
-        service_name=configured_service_name,
-    )
-    if _add_jsonl_processor(provider, exporter):
+    processor_factories: list[tuple[str, str, Callable[[], SpanProcessor | None]]] = [
+        (
+            "jsonl",
+            str(output_path.resolve()),
+            lambda: _build_jsonl_span_processor(
+                output_path,
+                run_id=configured_run_id,
+                service_name=configured_service_name,
+            ),
+        )
+    ]
+    if otlp_enabled:
+        resolved_otlp_timeout = _resolved_otlp_timeout(otlp_timeout_s)
+        otlp_key = _otlp_registration_key(
+            endpoint=otlp_endpoint,
+            headers=otlp_headers,
+            timeout_s=resolved_otlp_timeout,
+        )
+        processor_factories.append(
+            (
+                "otlp-http",
+                otlp_key,
+                lambda: _build_otlp_http_processor(
+                    endpoint=otlp_endpoint,
+                    headers=otlp_headers,
+                    timeout_s=resolved_otlp_timeout,
+                ),
+            )
+        )
+    if _add_span_processors_once(provider, processor_factories):
         return
     new_provider = TracerProvider()
-    new_provider.add_span_processor(SimpleSpanProcessor(exporter))
-    try:
+    with suppress(Exception):
         trace.set_tracer_provider(new_provider)
-    except Exception:
-        _add_jsonl_processor(trace.get_tracer_provider(), exporter)
+    active_provider = trace.get_tracer_provider()
+    if _add_span_processors_once(active_provider, processor_factories):
+        return
+    _LOGGER.error(
+        "OpenTelemetry tracer provider does not support span processors; "
+        "local JSONL and OTLP HTTP exporters were not installed"
+    )
 
 
 def span_to_dict(span: ReadableSpan) -> dict[str, Any]:
@@ -180,14 +256,124 @@ def span_to_dict(span: ReadableSpan) -> dict[str, Any]:
     }
 
 
-def _add_jsonl_processor(provider: Any, exporter: JSONLSpanExporter | Path) -> bool:
+def _add_span_processors_once(
+    provider: Any,
+    processor_factories: Sequence[tuple[str, str, Callable[[], SpanProcessor | None]]],
+) -> bool:
     add_span_processor = getattr(provider, "add_span_processor", None)
     if not callable(add_span_processor):
         return False
-    if isinstance(exporter, Path):
-        exporter = JSONLSpanExporter(exporter)
-    add_span_processor(SimpleSpanProcessor(exporter))
+    for kind, configuration, factory in processor_factories:
+        key = (kind, configuration)
+        with _REGISTERED_PROCESSORS_LOCK:
+            registered = _REGISTERED_PROCESSORS.setdefault(provider, set())
+            if key in registered:
+                continue
+            registered.add(key)
+        try:
+            processor = factory()
+            if processor is None:
+                with _REGISTERED_PROCESSORS_LOCK:
+                    registered.discard(key)
+                continue
+            add_span_processor(processor)
+        except Exception:
+            with _REGISTERED_PROCESSORS_LOCK:
+                registered.discard(key)
+            raise
     return True
+
+
+def _build_jsonl_span_processor(
+    output_path: Path,
+    *,
+    run_id: str | None,
+    service_name: str | None,
+) -> SpanProcessor | None:
+    try:
+        exporter = JSONLSpanExporter(
+            output_path,
+            run_id=run_id,
+            service_name=service_name,
+        )
+    except OSError:
+        _LOGGER.exception(
+            "Local JSONL span exporter could not be initialized; local capture disabled"
+        )
+        return None
+    return SimpleSpanProcessor(exporter)
+
+
+def _build_otlp_http_processor(
+    *,
+    endpoint: str | None,
+    headers: Mapping[str, str] | None,
+    timeout_s: float | None,
+) -> SpanProcessor | None:
+    exporter: SpanExporter | None = None
+    try:
+        exporter = _otlp_span_exporter_class()(
+            endpoint=endpoint,
+            headers=dict(headers) if headers is not None else None,
+            timeout=timeout_s,
+        )
+        return BatchSpanProcessor(_ReportingSpanExporter(exporter))
+    except Exception:
+        if exporter is not None:
+            with suppress(Exception):
+                exporter.shutdown()
+        _LOGGER.exception("OTLP HTTP exporter configuration is invalid; OTLP export disabled")
+        return None
+
+
+def _otlp_span_exporter_class() -> Callable[..., SpanExporter]:
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+    return OTLPSpanExporter
+
+
+def _otlp_http_enabled(endpoint: str | None) -> bool:
+    if endpoint:
+        return True
+    exporter_selection = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
+    selected_exporters = {
+        entry.strip().lower() for entry in exporter_selection.split(",") if entry.strip()
+    }
+    if selected_exporters and "otlp" not in selected_exporters:
+        return False
+    return bool(
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+
+
+def _otlp_registration_key(
+    *,
+    endpoint: str | None,
+    headers: Mapping[str, str] | None,
+    timeout_s: float | None,
+) -> str:
+    payload = {
+        "endpoint": endpoint,
+        "environment": sorted(
+            (name, value)
+            for name, value in os.environ.items()
+            if name.startswith("OTEL_EXPORTER_OTLP")
+        ),
+        "headers": sorted((headers or {}).items()),
+        "timeout_s": timeout_s,
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def _resolved_otlp_timeout(timeout_s: float | None) -> float | None:
+    if timeout_s is not None:
+        return timeout_s
+    if os.environ.get("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_TIMEOUT"
+    ):
+        return None
+    return _DEFAULT_OTLP_TIMEOUT_S
 
 
 def _resource_attributes(span: ReadableSpan) -> dict[str, Any]:

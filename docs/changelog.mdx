@@ -11,6 +11,15 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## Unreleased
+
+- `instrument()` can dual-export spans to a standard OTLP HTTP endpoint while preserving local
+  JSONL capture and isolating export failures from the traced process.
+- `kensa.behavior_candidate.v1` provides a strict public candidate model and a deterministic
+  cross-run fingerprint of normalized behavior semantics.
+- `kensa init --non-interactive --json --project-root ...` emits a versioned changed-file
+  manifest, and `kensa doctor --json` emits versioned stable diagnostic codes.
+
 ## 0.19.1
 
 Tool-call traces now expose structured evidence for precise assertions over arguments, results, ordering, and execution status.

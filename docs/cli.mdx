@@ -25,6 +25,7 @@ kensa <command> --help
 kensa init
 kensa init --agent codex --trace-source langfuse
 kensa init --redaction-model large
+kensa init --non-interactive --json --project-root /path/to/project
 ```
 
 | Flag | Default | Description |
@@ -32,6 +33,12 @@ kensa init --redaction-model large
 | `--agent` | interactive detection | Install instructions for `auto`, `claude`, `codex`, `cursor`, `other`, or `all` |
 | `--trace-source` | interactive selection | Persist `langfuse`, `trace_export`, or `local` |
 | `--redaction-model` | `small` | Prepare the `small` model, or use `large` for higher recall |
+| `--project-root` | current directory | Explicit project directory to set up |
+| `--non-interactive` | off | Disable prompts; requires `--project-root` |
+| `--json` | off | Emit `kensa.cli.v1` with a `kensa.init_manifest.v1` changed-file manifest |
+
+The init manifest lists every file changed by init and the reason for the change. With `--json`,
+missing non-interactive inputs produce the same JSON envelope with a non-zero exit code.
 
 ## kensa doctor
 
@@ -47,6 +54,12 @@ kensa doctor --json
 |---|---|
 | `--json` | Emit a machine-readable envelope |
 | `--allow-suspicious-harness` | Warn instead of failing when the harness looks like a stub or mock |
+
+JSON output includes `kensa.doctor_diagnostics.v1` codes. The initial stable codes are `ready`,
+`not_ready`, `incomplete_fixture`, `missing_ci`, and `invalid_execution_seam`. New codes may be
+added within the same major contract version, but existing codes do not change meaning. Exactly one
+of `ready` or `not_ready` is always the first code and mirrors the command exit status. The remaining
+codes are independent diagnostics that may accompany either verdict.
 
 ## kensa connect
 
@@ -167,6 +180,9 @@ Each subcommand takes `--source` (defaults to the latest import) and `--json`.
 | `KENSA_LLM_MODEL` | Fallback model for judging |
 | `KENSA_LLM_PROVIDER` | Fallback provider for judging |
 | `KENSA_TRACE_DIR` | Directory for local span capture |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTLP HTTP base endpoint; enables dual export |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OTLP HTTP traces endpoint; enables dual export |
+| `OTEL_TRACES_EXPORTER` | Exclude `otlp` to disable endpoint-driven OTLP export |
 | `KENSA_DOTENV` | Path to a dotenv file loaded at CLI startup |
 | `KENSA_MODELS_DIR` | Override the local redaction-model directory |
 | `KENSA_SERVICE_NAME` | Service name attached to local trace metadata |

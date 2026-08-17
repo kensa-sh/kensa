@@ -127,6 +127,11 @@ Use `kensa-inspect` to create a YAML review queue, approve ideas by changing `st
 `status: approved`, then run `kensa-generate`. If you do not have traces yet, capture a local run
 with `kensa.instrument()` and import the JSONL.
 
+`kensa.instrument()` can also dual-export spans over standard OTLP HTTP while retaining local
+JSONL. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or pass `otlp_endpoint=` explicitly. Export failures are
+reported without terminating the traced program or removing its local trace. OTLP sends raw
+telemetry before import-time redaction, so use a trusted endpoint and TLS off-machine.
+
 ## Core commands
 
 | Command | What it does |
