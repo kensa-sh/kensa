@@ -180,9 +180,9 @@ Each subcommand takes `--source` (defaults to the latest import) and `--json`.
 | `KENSA_LLM_MODEL` | Fallback model for judging |
 | `KENSA_LLM_PROVIDER` | Fallback provider for judging |
 | `KENSA_TRACE_DIR` | Directory for local span capture |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTLP HTTP base endpoint; enables dual export |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OTLP HTTP traces endpoint; enables dual export |
-| `OTEL_TRACES_EXPORTER` | Exclude `otlp` to disable endpoint-driven OTLP export |
+| `KENSA_OTLP_EXPORT` | Opt in to OTLP HTTP dual export (`1`, `true`, `yes`, `on`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTLP HTTP base endpoint used once export is enabled |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OTLP HTTP traces endpoint used once export is enabled |
 | `KENSA_DOTENV` | Path to a dotenv file loaded at CLI startup |
 | `KENSA_MODELS_DIR` | Override the local redaction-model directory |
 | `KENSA_SERVICE_NAME` | Service name attached to local trace metadata |

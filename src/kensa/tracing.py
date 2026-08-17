@@ -32,6 +32,8 @@ GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_com
 _LOGGER = logging.getLogger(__name__)
 _MISSING_TOOL_PAYLOAD = object()
 _DEFAULT_OTLP_TIMEOUT_S = 2.0
+_OTLP_EXPORT_ENV = "KENSA_OTLP_EXPORT"
+_OTLP_EXPORT_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _REGISTERED_PROCESSORS: WeakKeyDictionary[Any, set[tuple[str, str]]] = WeakKeyDictionary()
 _REGISTERED_PROCESSORS_LOCK = Lock()
 _JSON_VALUE_ADAPTER = TypeAdapter(
@@ -162,12 +164,15 @@ def instrument(
 ) -> None:
     """Attach local JSONL and optional OTLP HTTP exporters for this process.
 
-    OTLP export is enabled by ``otlp_endpoint`` or standard OpenTelemetry OTLP
-    endpoint environment variables. When OTLP is enabled without an explicit
-    local directory, JSONL spans are retained under ``.kensa/traces``. The
-    default OTLP request timeout is two seconds unless a standard OpenTelemetry
-    timeout environment variable or ``otlp_timeout_s`` supplies another value;
-    the Python OTLP exporter interprets each timeout in seconds.
+    OTLP export is opt-in: pass ``otlp_endpoint`` or set ``KENSA_OTLP_EXPORT``.
+    Standard OpenTelemetry ``OTEL_EXPORTER_OTLP_*`` variables still supply the
+    endpoint, headers, and timeout, but never enable export on their own, so
+    this function stays a no-op in processes that only configure OpenTelemetry
+    for their own exporter. When OTLP is enabled without an explicit local
+    directory, JSONL spans are retained under ``.kensa/traces``. The default
+    OTLP request timeout is two seconds unless a standard OpenTelemetry timeout
+    environment variable or ``otlp_timeout_s`` supplies another value; the
+    Python OTLP exporter interprets each timeout in seconds.
     """
 
     configured = trace_dir if trace_dir is not None else os.environ.get("KENSA_TRACE_DIR")
@@ -335,16 +340,7 @@ def _otlp_span_exporter_class() -> Callable[..., SpanExporter]:
 def _otlp_http_enabled(endpoint: str | None) -> bool:
     if endpoint:
         return True
-    exporter_selection = os.environ.get("OTEL_TRACES_EXPORTER", "").strip()
-    selected_exporters = {
-        entry.strip().lower() for entry in exporter_selection.split(",") if entry.strip()
-    }
-    if selected_exporters and "otlp" not in selected_exporters:
-        return False
-    return bool(
-        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    )
+    return os.environ.get(_OTLP_EXPORT_ENV, "").strip().lower() in _OTLP_EXPORT_TRUTHY
 
 
 def _otlp_registration_key(

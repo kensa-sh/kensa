@@ -138,15 +138,17 @@ instrument(
 )
 ```
 
-You can use standard OpenTelemetry environment variables instead:
+To configure it from the environment instead, opt in with `KENSA_OTLP_EXPORT` and let the standard
+OpenTelemetry variables supply the endpoint:
 
 ```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python my_agent.py
+KENSA_OTLP_EXPORT=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python my_agent.py
 ```
 
-Set `OTEL_TRACES_EXPORTER` to a selection that excludes `otlp`, such as `none` or `console`, to
-disable export enabled by either endpoint environment variable. An explicit `otlp_endpoint=`
-argument takes precedence over that environment selection.
+`KENSA_OTLP_EXPORT` accepts `1`, `true`, `yes`, or `on`. The standard `OTEL_EXPORTER_OTLP_*`
+variables never enable export on their own, so `instrument()` stays a no-op in a process that only
+configures OpenTelemetry for its own exporter. Opt in only where you want Kensa to export in
+addition to whatever your application already sends, since both exporters ship the same spans.
 
 When no local directory is supplied, enabling OTLP writes the local copy to
 `.kensa/traces/spans.jsonl`. An unreachable endpoint is logged as an export failure; it does not

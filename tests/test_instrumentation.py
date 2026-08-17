@@ -125,7 +125,7 @@ with record_span("local-survives"):
     assert "OTLP HTTP span export failed" in completed.stderr
 
 
-def test_otlp_environment_enables_export_and_default_local_capture(
+def test_otlp_opt_in_environment_enables_export_and_default_local_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -148,6 +148,7 @@ def test_otlp_environment_enables_export_and_default_local_capture(
             return True
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KENSA_OTLP_EXPORT", "1")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.example")
     monkeypatch.setattr(tracing, "_otlp_span_exporter_class", lambda: Exporter)
 
@@ -161,18 +162,20 @@ def test_otlp_environment_enables_export_and_default_local_capture(
 
 
 @pytest.mark.parametrize(
-    ("exporter_selection", "explicit_endpoint", "expected_processor_count"),
+    ("opt_in", "explicit_endpoint", "expected_processor_count"),
     [
-        ("none", None, 1),
-        ("console", None, 1),
-        ("otlp,console", None, 2),
-        ("none", "http://explicit.example/v1/traces", 2),
+        (None, None, 1),
+        ("0", None, 1),
+        ("false", None, 1),
+        ("1", None, 2),
+        ("Yes", None, 2),
+        (None, "http://explicit.example/v1/traces", 2),
     ],
 )
-def test_standard_trace_exporter_opt_out_yields_to_explicit_endpoint(
+def test_otlp_export_requires_kensa_opt_in_or_explicit_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    exporter_selection: str,
+    opt_in: str | None,
     explicit_endpoint: str | None,
     expected_processor_count: int,
 ) -> None:
@@ -192,15 +195,39 @@ def test_standard_trace_exporter_opt_out_yields_to_explicit_endpoint(
         lambda **kwargs: cast(Any, remote_processor),
     )
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://injected.example")
-    monkeypatch.setenv("OTEL_TRACES_EXPORTER", exporter_selection)
+    if opt_in is not None:
+        monkeypatch.setenv("KENSA_OTLP_EXPORT", opt_in)
 
     kensa.instrument(tmp_path, otlp_endpoint=explicit_endpoint)
 
     assert len(provider.processors) == expected_processor_count
-    expected_remote = explicit_endpoint is not None or any(
-        entry.strip().lower() == "otlp" for entry in exporter_selection.split(",")
+    assert (remote_processor in provider.processors) is (expected_processor_count == 2)
+
+
+def test_standard_otel_environment_alone_does_not_instrument(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    provider = Provider()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.example")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "http://collector.example/v1/traces",
     )
-    assert (remote_processor in provider.processors) is expected_remote
+
+    kensa.instrument()
+
+    assert provider.processors == []
+    assert not (tmp_path / ".kensa").exists()
 
 
 def test_unavailable_local_capture_does_not_disable_otlp(
