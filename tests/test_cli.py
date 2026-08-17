@@ -2775,6 +2775,8 @@ def test_full_local_lifecycle_runs_without_provider_credentials(
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     ):
         monkeypatch.delenv(name, raising=False)
+    for name in cli._non_local_endpoint_markers():
+        monkeypatch.delenv(name)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
 
     assert (
