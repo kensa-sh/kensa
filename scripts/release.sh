@@ -155,51 +155,15 @@ run_local_checks() {
   uv run pytest -q -m "not live"
 }
 
-generate_release_notes() {
-  local tag="$1"
-  local previous_tag="$2"
-  local target_commitish="$3"
-  local -a fields
-
-  fields=(
-    --raw-field "tag_name=$tag"
-  )
-  if [ -n "$previous_tag" ]; then
-    fields+=(--raw-field "previous_tag_name=$previous_tag")
-  fi
-  fields+=(--raw-field "target_commitish=$target_commitish")
-
-  gh api \
-    --method POST \
-    "repos/{owner}/{repo}/releases/generate-notes" \
-    "${fields[@]}" \
-    --jq .body
-}
-
-rebuild_changelog() (
+generate_changelog() {
   local version="$1"
-  local pending_release_notes="$2"
-  local historical_tags previous_tag historical_tag historical_version historical_notes
 
-  notes_directory="$(mktemp -d)"
-  trap 'rm -R "$notes_directory"' EXIT
-  historical_tags="$(git -C "$ROOT" tag --list 'v[0-9]*' --sort=version:refname)" ||
-    die "failed to list release tags"
-  previous_tag=""
-
-  while IFS= read -r historical_tag; do
-    historical_version="${historical_tag#v}"
-    version_valid "$historical_version" || continue
-    historical_notes="$(
-      generate_release_notes "$historical_tag" "$previous_tag" "$historical_tag"
-    )"
-    printf '%s\n' "$historical_notes" >"$notes_directory/$historical_version.md"
-    previous_tag="$historical_tag"
-  done <<<"$historical_tags"
-
-  printf '%s\n' "$pending_release_notes" >"$notes_directory/$version.md"
-  uv run python "$ROOT/scripts/changelog.py" rebuild "$notes_directory"
-)
+  uv run git-cliff \
+    --config "$ROOT/cliff.toml" \
+    --repository "$ROOT" \
+    --tag "v$version" \
+    --output "$ROOT/CHANGELOG.md"
+}
 
 assert_release_notes_base() {
   local pr_body="$1"
@@ -237,7 +201,7 @@ prepare_release_pr() {
   local bump="$1"
   local dry_run="$2"
   local run_tests="$3"
-  local current version tag previous_tag branch title target_commitish release_notes
+  local current version tag branch title target_commitish release_notes
 
   require_command git
   require_command uv
@@ -256,7 +220,7 @@ prepare_release_pr() {
     echo "would require available tag: $tag"
     echo "would update pyproject.toml, uv.lock, and CHANGELOG.md"
     echo "would require user-facing notes in docs/changelog.mdx before merge"
-    echo "would rebuild CHANGELOG.md from every tagged Git range plus $tag"
+    echo "would rebuild CHANGELOG.md from Git history with git-cliff through $tag"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else
@@ -278,14 +242,12 @@ prepare_release_pr() {
   assert_tag_available "$tag"
   ensure_label "ignore-for-release" "Exclude from generated release notes" "ededed"
 
-  previous_tag="v$current"
   target_commitish="$(git -C "$ROOT" rev-parse HEAD)"
-  release_notes="$(generate_release_notes "$tag" "$previous_tag" "$target_commitish")"
 
   git -C "$ROOT" switch -c "$branch"
   uv version "$version" --no-sync >/dev/null
   assert_version_files "$version"
-  rebuild_changelog "$version" "$release_notes"
+  generate_changelog "$version"
   release_notes="$(uv run python "$ROOT/scripts/changelog.py" notes "$version")"
 
   if [ "$run_tests" = true ]; then
