@@ -450,7 +450,7 @@ def test_detector_source_has_only_read_only_stdlib_capabilities() -> None:
 def test_setup_skill_requires_confirmation_before_lookup_and_preserves_fallback() -> None:
     skill = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
 
-    assert "skills/kensa-setup/scripts/detect_frameworks.py --root ." in skill
+    assert "scripts/detect_frameworks.py --root ." in skill
     assert "Every detector match is an unconfirmed candidate" in skill
     assert "Confirm candidates against actual application control flow before" in skill
     assert "Resolve versions only for confirmed candidates" in skill
