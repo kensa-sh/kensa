@@ -11,11 +11,14 @@ DOCS_CHANGELOG_PATH = ROOT / "docs" / "changelog.mdx"
 
 CHANGELOG_PREAMBLE = """# Changelog
 
+<!-- Generated from Git history by scripts/release.sh. Do not edit manually. -->
+
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
 """
 
 VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+RELEASE_HEADING_PATTERN = re.compile(r"^## (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
 def _validate_version(version: str) -> None:
@@ -48,12 +51,21 @@ def build_release_section(version: str, generated_notes: str) -> str:
     return f"{section}\n"
 
 
-def prepend_release(changelog: str, version: str, generated_notes: str) -> str:
-    history = _release_history(changelog).rstrip()
-    if f"## {version}" in history.splitlines():
-        raise ValueError(f"release {version} already exists in CHANGELOG.md")
-    section = build_release_section(version, generated_notes)
-    return f"{CHANGELOG_PREAMBLE}{section}\n{history}\n"
+def build_changelog(releases: list[tuple[str, str]]) -> str:
+    generated_sections: dict[tuple[int, int, int], str] = {}
+    for version, generated_notes in releases:
+        _validate_version(version)
+        major, minor, patch = (int(part) for part in version.split("."))
+        version_key = (major, minor, patch)
+        if version_key in generated_sections:
+            raise ValueError(f"duplicate generated release: {version}")
+        generated_sections[version_key] = build_release_section(version, generated_notes).rstrip()
+    if not generated_sections:
+        raise ValueError("no generated releases found")
+    history = "\n\n".join(
+        generated_sections[version_key] for version_key in sorted(generated_sections, reverse=True)
+    )
+    return f"{CHANGELOG_PREAMBLE}{history}\n"
 
 
 def extract_release_notes(changelog: str, version: str) -> str:
@@ -65,7 +77,11 @@ def extract_release_notes(changelog: str, version: str) -> str:
     except ValueError as error:
         raise ValueError(f"release {version} is missing from CHANGELOG.md") from error
     end = next(
-        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if RELEASE_HEADING_PATTERN.fullmatch(lines[index]) is not None
+        ),
         len(lines),
     )
     release_lines = lines[start:end]
@@ -84,8 +100,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage Kensa changelog files.")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    add = commands.add_parser("add", help="prepend generated notes for a release")
-    add.add_argument("version")
+    rebuild = commands.add_parser(
+        "rebuild", help="rebuild CHANGELOG.md from generated release-note files"
+    )
+    rebuild.add_argument("notes_directory", type=Path)
 
     check_docs = commands.add_parser(
         "check-docs", help="verify product release notes exist for a version"
@@ -103,13 +121,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check-docs":
             check_docs_release(args.version, DOCS_CHANGELOG_PATH.read_text())
             return 0
+        if args.command == "rebuild":
+            releases = [(path.stem, path.read_text()) for path in args.notes_directory.glob("*.md")]
+            CHANGELOG_PATH.write_text(build_changelog(releases))
+            return 0
 
         changelog = CHANGELOG_PATH.read_text()
-        if args.command == "add":
-            updated = prepend_release(changelog, args.version, sys.stdin.read())
-            CHANGELOG_PATH.write_text(updated)
-        else:
-            print(extract_release_notes(changelog, args.version), end="")
+        print(extract_release_notes(changelog, args.version), end="")
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

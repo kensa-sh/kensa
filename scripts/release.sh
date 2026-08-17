@@ -103,7 +103,7 @@ assert_main_branch() {
 
 assert_head_matches_origin_main() {
   local local_head origin_head
-  git -C "$ROOT" fetch --quiet origin main || die "failed to fetch origin/main"
+  git -C "$ROOT" fetch --quiet --tags origin main || die "failed to fetch origin/main and tags"
   local_head="$(git -C "$ROOT" rev-parse HEAD)"
   origin_head="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
   [ "$local_head" = "$origin_head" ] || die "local HEAD must match origin/main before release"
@@ -159,15 +159,47 @@ generate_release_notes() {
   local tag="$1"
   local previous_tag="$2"
   local target_commitish="$3"
+  local -a fields
+
+  fields=(
+    --raw-field "tag_name=$tag"
+  )
+  if [ -n "$previous_tag" ]; then
+    fields+=(--raw-field "previous_tag_name=$previous_tag")
+  fi
+  fields+=(--raw-field "target_commitish=$target_commitish")
 
   gh api \
     --method POST \
     "repos/{owner}/{repo}/releases/generate-notes" \
-    --raw-field "tag_name=$tag" \
-    --raw-field "previous_tag_name=$previous_tag" \
-    --raw-field "target_commitish=$target_commitish" \
+    "${fields[@]}" \
     --jq .body
 }
+
+rebuild_changelog() (
+  local version="$1"
+  local pending_release_notes="$2"
+  local historical_tags previous_tag historical_tag historical_version historical_notes
+
+  notes_directory="$(mktemp -d)"
+  trap 'rm -R "$notes_directory"' EXIT
+  historical_tags="$(git -C "$ROOT" tag --list 'v[0-9]*' --sort=version:refname)" ||
+    die "failed to list release tags"
+  previous_tag=""
+
+  while IFS= read -r historical_tag; do
+    historical_version="${historical_tag#v}"
+    version_valid "$historical_version" || continue
+    historical_notes="$(
+      generate_release_notes "$historical_tag" "$previous_tag" "$historical_tag"
+    )"
+    printf '%s\n' "$historical_notes" >"$notes_directory/$historical_version.md"
+    previous_tag="$historical_tag"
+  done <<<"$historical_tags"
+
+  printf '%s\n' "$pending_release_notes" >"$notes_directory/$version.md"
+  uv run python "$ROOT/scripts/changelog.py" rebuild "$notes_directory"
+)
 
 assert_release_notes_base() {
   local pr_body="$1"
@@ -224,7 +256,7 @@ prepare_release_pr() {
     echo "would require available tag: $tag"
     echo "would update pyproject.toml, uv.lock, and CHANGELOG.md"
     echo "would require user-facing notes in docs/changelog.mdx before merge"
-    echo "would generate complete release notes from $tag's explicit previous-tag range"
+    echo "would rebuild CHANGELOG.md from every tagged Git range plus $tag"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else
@@ -253,7 +285,7 @@ prepare_release_pr() {
   git -C "$ROOT" switch -c "$branch"
   uv version "$version" --no-sync >/dev/null
   assert_version_files "$version"
-  printf '%s\n' "$release_notes" | uv run python "$ROOT/scripts/changelog.py" add "$version"
+  rebuild_changelog "$version" "$release_notes"
   release_notes="$(uv run python "$ROOT/scripts/changelog.py" notes "$version")"
 
   if [ "$run_tests" = true ]; then

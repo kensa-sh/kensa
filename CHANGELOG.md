@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- Generated from Git history by scripts/release.sh. Do not edit manually. -->
+
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
 ## 0.20.0
@@ -16,185 +18,185 @@ Release notes for Kensa. Full notes are available on [GitHub Releases](https://g
 **Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.19.1...v0.20.0
 
 ## 0.19.1
+### Features
+* feat: structured-tool-evidence by @satyaborg in https://github.com/kensa-sh/kensa/pull/81
 
-Tool-call traces now expose structured evidence for precise assertions over arguments, results, ordering, and execution status.
 
-- `ToolCallEvidence` provides immutable normalized records with sequence, name, arguments, result, capture-presence flags, status, span ID, and duration.
-- `result.trace.tools.matching(...)` and `.called(...)` filter calls by recursive argument and result subsets plus status, while existing name assertions remain available.
-- `record_tool_call()` accepts strict JSON arguments and results, supports capturing a result inside the tool context, and persists normalized `tool_calls` alongside the existing `tools` list.
-
-[View the 0.19.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.19.1).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.19.0...v0.19.1
 
 ## 0.19.0
+### Breaking Changes
+* feat!: versioned run results by @satyaborg in https://github.com/kensa-sh/kensa/pull/79
 
-Run-result artifacts now have a strict, versioned public contract for reliable downstream tooling.
 
-- **Breaking:** every initial, incremental, interrupted, and completed result artifact now uses `schema_version: "kensa.result.v1"`; unversioned, unsupported, legacy, or internally inconsistent artifacts are rejected.
-- `kensa.results` exposes immutable typed models plus `load_run_result()` for loading complete, interrupted, and initial snapshots with path-specific validation errors.
-- Writes normalize and deterministically order trials, derive aggregates and summaries from the same v1 data, validate before atomic replacement, and preserve full evidence during watchdog recovery.
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.18.1...v0.19.0
 
-[View the 0.19.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.19.0).
+## 0.18.1
+### Chores
+* chore: publish releases after manual merge by @satyaborg in https://github.com/kensa-sh/kensa/pull/77
+
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.18.0...v0.18.1
 
 ## 0.18.0
+### Breaking Changes
+* feat!: trial-failure-provenance by @satyaborg in https://github.com/kensa-sh/kensa/pull/75
 
-Trials now carry structured failure provenance so agent behavior is separated from eval-system failures.
 
-- **Breaking:** trial artifacts replace the legacy `error` and `error_kind` fields with one validated `failure` object containing a category, kind, message, and JSON evidence.
-- Reliability, latency, and cost metrics include only passes, assertion failures, and errors attributed to the agent; excluded errors still fail the eval gate and are reported by category.
-- `KensaEvalError`, `TrialFailure`, and `FailureCategory` support explicit attribution, while `JudgeResult.require()` distinguishes negative verdicts from judge execution and contract errors.
-
-[View the 0.18.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.18.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.17.0...v0.18.0
 
 ## 0.17.0
+### Features
+* feat: external-run-evidence by @satyaborg in https://github.com/kensa-sh/kensa/pull/72
+### Chores
+* chore: update changelog for 0.16 releases by @satyaborg in https://github.com/kensa-sh/kensa/pull/73
 
-Eval adapters can now attach structured evidence from target-owned agents without Kensa importing, invoking, or connecting to them.
 
-- `AgentRunEvidence` records execution attestation, ordered trajectory events, provider trace references, observed state, and independent trajectory and state completeness.
-- `attach_agent_run()` snapshots evidence during the active case operation and preserves it across result, trace, failure, and timeout artifacts.
-- External tool and LLM events feed the existing trace, turn, and cost accessors; target state remains separate under `result.trace.agent_runs`.
-
-[View the 0.17.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.17.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.16.1...v0.17.0
 
 ## 0.16.1
+### Features
+* feat: add reliability scoring by @satyaborg in https://github.com/kensa-sh/kensa/pull/70
+### Chores
+* chore: auto-merge release pull requests by @satyaborg in https://github.com/kensa-sh/kensa/pull/69
 
-Eval reports now quantify reliability and make incomplete cost data explicit.
 
-- Terminal, Markdown, and JSON reports include `pass^k` reliability with cohort counts, latency percentiles, mean LLM turns, and cost per pass.
-- Trace cost is `None` when any billable span is unpriced, while `known_cost_usd` preserves the sum of priced spans.
-- Timeouts distinguish setup, agent call, and teardown failures while preserving the active instrumented GenAI operation.
-
-[View the 0.16.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.16.1).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.16.0...v0.16.1
 
 ## 0.16.0
+### Breaking Changes
+* feat!: add conversational evals by @satyaborg in https://github.com/kensa-sh/kensa/pull/66
+### Features
+* feat: expose trace on case results by @satyaborg in https://github.com/kensa-sh/kensa/pull/67
+### Chores
+* chore: update changelog for 0.15.0 by @satyaborg in https://github.com/kensa-sh/kensa/pull/64
 
-Conversational evals now model multi-turn agent interactions and return structured run evidence.
 
-- **Breaking:** the `kensa_run` fixture now returns a case-aware agent with `respond(messages)`, and `case.run(kensa_run)` returns a `CaseResult` instead of the raw agent output.
-- Cases can start from message history, and optional simulators can drive bounded conversations with explicit termination metadata.
-- Successful results expose messages, output, termination, and a read-only trace; pass `trace=result.trace` to `judge(...)` when a criterion needs trajectory evidence.
-
-[View the 0.16.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.16.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.15.0...v0.16.0
 
 ## 0.15.0
+### Breaking Changes
+* feat!: move project config to pyproject.toml by @satyaborg in https://github.com/kensa-sh/kensa/pull/60
+### Features
+* feat: add repo-aware run diagnosis by @satyaborg in https://github.com/kensa-sh/kensa/pull/61
+### Bug Fixes
+* fix: streamline eval console output by @satyaborg in https://github.com/kensa-sh/kensa/pull/62
+### Chores
+* chore: update changelog for 0.13.0 and 0.14.0 by @satyaborg in https://github.com/kensa-sh/kensa/pull/59
 
-Project configuration is now explicit in `pyproject.toml`, failed eval runs can be diagnosed against repository evidence, and console output is easier to scan.
 
-- **Breaking:** Kensa no longer reads `.kensa/settings.json`; trace source and redaction model settings now live under `[tool.kensa]` in the nearest `pyproject.toml`, and readiness is computed live.
-- `kensa init` installs a read-only `kensa-diagnose` skill that analyzes failed or errored result JSON against the current repository's source and tests.
-- `kensa eval` keeps periodic heartbeat details behind `--verbose` and prints a compact aggregate and per-trial summary.
-
-[View the 0.15.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.15.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.14.0...v0.15.0
 
 ## 0.14.0
+### Breaking Changes
+* feat!: parallelize Kensa trials by default by @satyaborg in https://github.com/kensa-sh/kensa/pull/57
 
-Kensa trials now run in parallel across four local pytest workers by default.
 
-- Use `kensa eval --workers N` to tune concurrency or `--workers 1` for sequential execution.
-- Timeout handling preserves completed results and the latest evidence from a timed-out trial.
-- **Breaking:** worker processes do not share process globals or session-scoped fixtures, and provider concurrency increases.
-
-[View the 0.14.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.14.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.13.0...v0.14.0
 
 ## 0.13.0
+### Features
+* feat: add hard eval timeouts by @satyaborg in https://github.com/kensa-sh/kensa/pull/55
+### Chores
+* chore: migrate docs by @satyaborg in https://github.com/kensa-sh/kensa/pull/53
+* chore: restore docs changelog by @satyaborg in https://github.com/kensa-sh/kensa/pull/54
 
-Eval runs now have hard per-trial timeouts and bounded judge calls.
 
-- Trials stop after 300 seconds by default. Use `--trial-timeout` or `@pytest.mark.kensa(timeout_s=...)` to change the limit.
-- Timeout artifacts preserve completed results, set `complete` to `false`, and include a structured interruption.
-- Judge calls time out after 30 seconds by default.
-
-[View the 0.13.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.13.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.12.0...v0.13.0
 
 ## 0.12.0
+### Breaking Changes
+* feat!: minimize imported trace evidence by @satyaborg in https://github.com/kensa-sh/kensa/pull/47
 
-Imported trace evidence is now minimized to a versioned, allowlisted TraceView before mandatory redaction.
 
-- Only eval-required fields are retained, and trace and span identifiers use import-local aliases.
-- **Breaking:** persisted TraceView artifacts use the v2 evidence contract.
-
-[View the 0.12.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.12.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.11.1...v0.12.0
 
 ## 0.11.1
+### Bug Fixes
+* fix: streamline redaction setup by @satyaborg in https://github.com/kensa-sh/kensa/pull/45
 
-Redaction setup is now automatic and fails clearly when incomplete.
 
-- Selecting a trace source installs missing redaction dependencies as a development dependency.
-- Setup output reports one protection status and preserves actionable diagnostics on failure.
-
-[View the 0.11.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.11.1).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.11.0...v0.11.1
 
 ## 0.11.0
+### Breaking Changes
+* feat: mandatory trace redaction before every evidence boundary by @satyaborg in https://github.com/kensa-sh/kensa/pull/43
 
-Trace redaction is now mandatory and fails closed across import, inspection, trace access, and eval generation.
 
-- Redaction happens in memory before connected Langfuse payloads reach disk.
-- Safe import manifests are bound to the exact artifact with SHA-256. Missing or mismatched manifests block access.
-- `kensa doctor` reports missing redaction readiness and unsafe or modified artifacts.
-- **Breaking:** `kensa import` no longer accepts `--redact`. Redaction cannot be disabled or bypassed.
-
-[View the 0.11.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.11.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.10.3...v0.11.0
 
 ## 0.10.3
+### Bug Fixes
+* fix: avoid trace reads during langfuse connection by @satyaborg in https://github.com/kensa-sh/kensa/pull/41
+### Chores
+* chore: defer langfuse import scope to cli by @satyaborg in https://github.com/kensa-sh/kensa/pull/40
 
-- `kensa connect langfuse` now validates the endpoint and credentials without reading trace data.
-- Langfuse imports use the CLI's default scope unless you explicitly request a different one.
 
-[View the 0.10.3 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.3).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.10.2...v0.10.3
 
 ## 0.10.2
+### Chores
+* chore: migrate langfuse imports to sdk by @satyaborg in https://github.com/kensa-sh/kensa/pull/38
 
-Connected Langfuse imports now use the official Langfuse SDK while preserving legacy trace and observations v2 import formats.
 
-[View the 0.10.2 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.2).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.10.1...v0.10.2
 
 ## 0.10.1
+### Bug Fixes
+* fix: align Langfuse init with eval setup by @satyaborg in https://github.com/kensa-sh/kensa/pull/35
+* fix: align langfuse setup parity by @satyaborg in https://github.com/kensa-sh/kensa/pull/36
 
-- Langfuse observation input and output are parsed locally instead of sent as unsupported request parameters.
-- `kensa init` can connect Langfuse before judge credentials are configured and now surfaces clearer setup errors.
 
-[View the 0.10.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.1).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.10.0...v0.10.1
 
 ## 0.10.0
+### Features
+* feat: support langfuse events-only imports by @satyaborg in https://github.com/kensa-sh/kensa/pull/33
 
-Langfuse imports now support events-only deployments by reconstructing traces from observations v2 when the legacy traces API is unavailable.
 
-[View the 0.10.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.10.0).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.9.4...v0.10.0
 
 ## 0.9.4
+### Features
+* feat: verify langfuse import readiness by @satyaborg in https://github.com/kensa-sh/kensa/pull/31
+### Bug Fixes
+* fix: respect langfuse endpoint env by @satyaborg in https://github.com/kensa-sh/kensa/pull/30
 
-- `kensa connect langfuse` reports endpoint, authentication, and import-readiness checks separately.
-- Omitted endpoints now resolve from `LANGFUSE_BASE_URL` before using the cloud default.
 
-[View the 0.9.4 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.4).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.9.3...v0.9.4
 
 ## 0.9.3
+### Bug Fixes
+* fix: use absolute URLs for banner and license link in README by @satyaborg in https://github.com/kensa-sh/kensa/pull/27
+* fix: simplify tty agent picker by @satyaborg in https://github.com/kensa-sh/kensa/pull/28
 
-- The interactive agent picker starts on Claude Code and offers one agent at a time. `kensa init --agent all` remains available for non-interactive setup.
-- README assets and the license link now render correctly on PyPI.
 
-[View the 0.9.3 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.3).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.9.2...v0.9.3
 
 ## 0.9.2
+### Features
+* feat: add init agent onboarding choices by @satyaborg in https://github.com/kensa-sh/kensa/pull/25
+### Chores
+* chore: automate release note labels by @satyaborg in https://github.com/kensa-sh/kensa/pull/22
+* chore: lead README install with single agent fetch line by @satyaborg in https://github.com/kensa-sh/kensa/pull/23
+* chore: add legacy version callout and modify README by @satyaborg in https://github.com/kensa-sh/kensa/pull/24
 
-`kensa init --agent` now supports explicit agent choices and `all`, persists the selection in `.kensa/settings.json`, and fails clearly when automatic detection finds no supported agent.
 
-[View the 0.9.2 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.2).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.9.1...v0.9.2
 
 ## 0.9.1
+### Other Changes
+* chore: remove examples by @satyaborg in https://github.com/kensa-sh/kensa/pull/15
+* fix: relax package dependency bounds by @satyaborg in https://github.com/kensa-sh/kensa/pull/16
+* chore: align release labels with commit prefixes by @satyaborg in https://github.com/kensa-sh/kensa/pull/20
+* chore: release 0.9.1 by @satyaborg in https://github.com/kensa-sh/kensa/pull/21
 
-Relaxed lower dependency bounds improve compatibility with existing Python environments while retaining Python 3.11+ support.
 
-[View the 0.9.1 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.1).
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.9.0...v0.9.1
 
 ## 0.9.0
 
-Added Kensa's pytest-native eval workflow for turning agent traces into plain pytest tests with deterministic assertions, repeated trials, optional LLM judges, and CI reporting.
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/kensa-sh/kensa/pull/6
 
-[View the 0.9.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.9.0).
-
-## Legacy releases
-
-> [!WARNING]
-> Versions 0.1.0 through 0.8.0 are part of Kensa's legacy implementation and have been yanked from PyPI. Kensa 0.9.0 is a complete rewrite with a new API. These release notes are preserved for historical reference.
-
-[View the legacy changelog](https://github.com/satyaborg/kensa/blob/main/docs/changelog.mdx).
+**Full Changelog**: https://github.com/kensa-sh/kensa/commits/v0.9.0
