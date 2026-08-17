@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.20.0
+
+Judge defaults, agent setup, and Langfuse imports now track the production systems they run against.
+
+- OpenAI judges now default to `gpt-5.6-luna`, while Anthropic judges default to `claude-sonnet-5`; older model IDs remain available as explicit overrides. [#108](https://github.com/kensa-sh/kensa/pull/108)
+- The `kensa-setup` skill now connects `kensa_run` to approved production agent code, preserves one conversation across turns, and asks before changing the harness or allowing model spend and live side effects. [#111](https://github.com/kensa-sh/kensa/pull/111)
+- Legacy Langfuse imports now respect the v1 observation limit of 100, while v2 imports retain their 1,000-item page size. [#114](https://github.com/kensa-sh/kensa/pull/114)
+
+[View the 0.20.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.20.0).
+
 ## 0.19.1
 
 Tool-call traces now expose structured evidence for precise assertions over arguments, results, ordering, and execution status.
@@ -190,8 +200,7 @@ Added Kensa's pytest-native eval workflow for turning agent traces into plain py
 
 ## Legacy releases
 
-<Warning>
-Versions 0.1.0 through 0.8.0 are part of Kensa's legacy implementation and have been yanked from PyPI. Kensa 0.9.0 is a complete rewrite with a new API. These release notes are preserved for historical reference.
-</Warning>
+> [!WARNING]
+> Versions 0.1.0 through 0.8.0 are part of Kensa's legacy implementation and have been yanked from PyPI. Kensa 0.9.0 is a complete rewrite with a new API. These release notes are preserved for historical reference.
 
 [View the legacy changelog](https://github.com/satyaborg/kensa/blob/main/docs/changelog.mdx).
