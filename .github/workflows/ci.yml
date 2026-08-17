@@ -38,13 +38,14 @@ jobs:
         run: |
           source scripts/release.sh
           assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"
+          version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          python scripts/changelog.py check-docs "$version"
       - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check
-      - run: uv run python scripts/changelog.py sync --check
 
   build:
     runs-on: ubuntu-latest

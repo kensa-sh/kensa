@@ -12,17 +12,14 @@ keywords:
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
 ## 0.20.0
-### Features
-* feat(judge): update default models by @satyaborg in https://github.com/kensa-sh/kensa/pull/108
-### Bug Fixes
-* fix(setup): keep setup production-backed by @satyaborg in https://github.com/kensa-sh/kensa/pull/111
-* fix(providers): clamp legacy observation page limit by @satyaborg in https://github.com/kensa-sh/kensa/pull/114
-### Chores
-* chore(tests): remove tests that assert on documentation prose by @satyaborg in https://github.com/kensa-sh/kensa/pull/107
-* chore(agents): follow Agent Skills guidance by @satyaborg in https://github.com/kensa-sh/kensa/pull/112
 
+Judge defaults, agent setup, and Langfuse imports now track the production systems they run against.
 
-**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.19.1...v0.20.0
+- OpenAI judges now default to `gpt-5.6-luna`, while Anthropic judges default to `claude-sonnet-5`; older model IDs remain available as explicit overrides. [#108](https://github.com/kensa-sh/kensa/pull/108)
+- The `kensa-setup` skill now connects `kensa_run` to approved production agent code, preserves one conversation across turns, and asks before changing the harness or allowing model spend and live side effects. [#111](https://github.com/kensa-sh/kensa/pull/111)
+- Legacy Langfuse imports now respect the v1 observation limit of 100, while v2 imports retain their 1,000-item page size. [#114](https://github.com/kensa-sh/kensa/pull/114)
+
+[View the 0.20.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.20.0).
 
 ## 0.19.1
 

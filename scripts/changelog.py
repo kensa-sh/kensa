@@ -15,21 +15,6 @@ Release notes for Kensa. Full notes are available on [GitHub Releases](https://g
 
 """
 
-DOCS_PREAMBLE = """---
-title: Changelog
-description: What's new in Kensa.
-sidebarTitle: Changelog
-keywords:
-  - changelog
-  - releases
-  - version history
-  - release notes
----
-
-<Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
-
-"""
-
 VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
@@ -89,14 +74,10 @@ def extract_release_notes(changelog: str, version: str) -> str:
     return f"{release_notes}\n"
 
 
-def render_docs_changelog(changelog: str) -> str:
-    history = _release_history(changelog).rstrip()
-    return f"{DOCS_PREAMBLE}{history}\n"
-
-
-def _sync_changelogs(changelog: str) -> None:
-    CHANGELOG_PATH.write_text(changelog)
-    DOCS_CHANGELOG_PATH.write_text(render_docs_changelog(changelog))
+def check_docs_release(version: str, docs_changelog: str) -> None:
+    _validate_version(version)
+    if f"## {version}" not in docs_changelog.splitlines():
+        raise ValueError(f"docs/changelog.mdx is missing release {version}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -106,8 +87,10 @@ def _build_parser() -> argparse.ArgumentParser:
     add = commands.add_parser("add", help="prepend generated notes for a release")
     add.add_argument("version")
 
-    sync = commands.add_parser("sync", help="generate docs/changelog.mdx from CHANGELOG.md")
-    sync.add_argument("--check", action="store_true")
+    check_docs = commands.add_parser(
+        "check-docs", help="verify product release notes exist for a version"
+    )
+    check_docs.add_argument("version")
 
     notes = commands.add_parser("notes", help="print release notes for a version")
     notes.add_argument("version")
@@ -117,17 +100,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        if args.command == "check-docs":
+            check_docs_release(args.version, DOCS_CHANGELOG_PATH.read_text())
+            return 0
+
         changelog = CHANGELOG_PATH.read_text()
         if args.command == "add":
-            _sync_changelogs(prepend_release(changelog, args.version, sys.stdin.read()))
-        elif args.command == "sync":
-            rendered = render_docs_changelog(changelog)
-            if args.check and DOCS_CHANGELOG_PATH.read_text() != rendered:
-                message = "error: docs/changelog.mdx is not synchronized with CHANGELOG.md"
-                print(message, file=sys.stderr)
-                return 1
-            if not args.check:
-                DOCS_CHANGELOG_PATH.write_text(rendered)
+            updated = prepend_release(changelog, args.version, sys.stdin.read())
+            CHANGELOG_PATH.write_text(updated)
         else:
             print(extract_release_notes(changelog, args.version), end="")
     except (OSError, ValueError) as error:

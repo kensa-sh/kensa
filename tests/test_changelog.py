@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 from pathlib import Path
 
@@ -8,12 +9,10 @@ import pytest
 import scripts.changelog as changelog_module
 from scripts.changelog import (
     build_release_section,
+    check_docs_release,
     extract_release_notes,
     prepend_release,
-    render_docs_changelog,
 )
-
-ROOT = Path(__file__).parents[1]
 
 CHANGELOG_PREAMBLE = """# Changelog
 
@@ -117,37 +116,45 @@ def test_extract_release_notes_rejects_missing_version() -> None:
         extract_release_notes(f"{CHANGELOG_PREAMBLE}## 1.2.2\n", "1.2.3")
 
 
-def test_render_docs_changelog_uses_canonical_release_history() -> None:
-    history = "## 1.2.3\n\nRelease notes.\n"
+def test_check_docs_release_accepts_independent_product_notes() -> None:
+    docs_changelog = "---\ntitle: Changelog\n---\n\n## 1.2.3\n\nProduct release notes.\n"
 
-    rendered = render_docs_changelog(f"{CHANGELOG_PREAMBLE}{history}")
-
-    assert rendered.startswith("---\ntitle: Changelog\n")
-    assert "<Note>Release notes for Kensa." in rendered
-    assert rendered.endswith(history)
+    check_docs_release("1.2.3", docs_changelog)
 
 
-def test_render_docs_changelog_rejects_unexpected_canonical_preamble() -> None:
-    with pytest.raises(ValueError, match=r"CHANGELOG\.md has an unexpected preamble"):
-        render_docs_changelog("# Releases\n\n## 1.2.3\n")
+def test_check_docs_release_rejects_missing_version() -> None:
+    docs_changelog = "---\ntitle: Changelog\n---\n\n## 1.2.2\n\nOlder notes.\n"
+
+    with pytest.raises(ValueError, match=r"docs/changelog\.mdx is missing release 1\.2\.3"):
+        check_docs_release("1.2.3", docs_changelog)
 
 
-def test_main_sync_check_rejects_stale_docs_changelog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_main_add_updates_only_generated_changelog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     changelog_path = tmp_path / "CHANGELOG.md"
     docs_changelog_path = tmp_path / "docs" / "changelog.mdx"
     docs_changelog_path.parent.mkdir()
-    changelog_path.write_text(f"{CHANGELOG_PREAMBLE}## 1.2.3\n\nRelease notes.\n")
-    docs_changelog_path.write_text("stale\n")
+    changelog_path.write_text(f"{CHANGELOG_PREAMBLE}## 1.2.2\n\nOlder release.\n")
+    docs_changelog_path.write_text("independent product notes\n")
     monkeypatch.setattr(changelog_module, "CHANGELOG_PATH", changelog_path)
     monkeypatch.setattr(changelog_module, "DOCS_CHANGELOG_PATH", docs_changelog_path)
+    monkeypatch.setattr(changelog_module.sys, "stdin", io.StringIO(GENERATED_NOTES))
 
-    assert changelog_module.main(["sync", "--check"]) == 1
-    assert (
-        capsys.readouterr().err
-        == "error: docs/changelog.mdx is not synchronized with CHANGELOG.md\n"
-    )
+    assert changelog_module.main(["add", "1.2.3"]) == 0
+    assert "## 1.2.3" in changelog_path.read_text()
+    assert docs_changelog_path.read_text() == "independent product notes\n"
+
+
+def test_main_check_docs_reports_missing_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    docs_changelog_path = tmp_path / "changelog.mdx"
+    docs_changelog_path.write_text("## 1.2.2\n")
+    monkeypatch.setattr(changelog_module, "DOCS_CHANGELOG_PATH", docs_changelog_path)
+
+    assert changelog_module.main(["check-docs", "1.2.3"]) == 1
+    assert capsys.readouterr().err == "error: docs/changelog.mdx is missing release 1.2.3\n"
 
 
 def test_main_reports_changelog_validation_errors(
@@ -167,12 +174,5 @@ def test_main_reports_changelog_read_errors(
     missing_changelog = tmp_path / "CHANGELOG.md"
     monkeypatch.setattr(changelog_module, "CHANGELOG_PATH", missing_changelog)
 
-    assert changelog_module.main(["sync", "--check"]) == 1
+    assert changelog_module.main(["notes", "1.2.3"]) == 1
     assert capsys.readouterr().err.startswith("error: [Errno 2] No such file or directory:")
-
-
-def test_committed_docs_changelog_matches_canonical_changelog() -> None:
-    changelog = (ROOT / "CHANGELOG.md").read_text()
-    docs_changelog = (ROOT / "docs/changelog.mdx").read_text()
-
-    assert docs_changelog == render_docs_changelog(changelog)

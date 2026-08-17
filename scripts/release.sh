@@ -16,7 +16,7 @@ usage:
 
 Release flow:
   1. Run patch/minor/major to open a version-bump PR.
-  2. Review the generated changelog and complete release notes in the PR.
+  2. Review generated CHANGELOG.md and write product notes in docs/changelog.mdx.
   3. Merge the PR manually after CI passes.
   4. The merge workflow publishes to PyPI and creates the GitHub Release.
 
@@ -191,7 +191,8 @@ ${release_notes%$'\n'}
 
 ## Release checklist
 
-- [ ] Review the generated changelog for completeness.
+- [ ] Review generated \`CHANGELOG.md\` for completeness.
+- [ ] Write user-facing v$version notes in \`docs/changelog.mdx\`.
 
 Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
 the GitHub Release for \`v$version\`.
@@ -221,7 +222,8 @@ prepare_release_pr() {
     echo "would require clean main branch matching origin/main"
     echo "would require available branch: $branch"
     echo "would require available tag: $tag"
-    echo "would update pyproject.toml, uv.lock, CHANGELOG.md, and docs/changelog.mdx"
+    echo "would update pyproject.toml, uv.lock, and CHANGELOG.md"
+    echo "would require user-facing notes in docs/changelog.mdx before merge"
     echo "would generate complete release notes from $tag's explicit previous-tag range"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
@@ -260,13 +262,13 @@ prepare_release_pr() {
     echo "skip local checks; PR CI remains authoritative"
   fi
 
-  git -C "$ROOT" add pyproject.toml uv.lock CHANGELOG.md docs/changelog.mdx
+  git -C "$ROOT" add pyproject.toml uv.lock CHANGELOG.md
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
   release_pr_body "$version" "$release_notes" "$target_commitish" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
-  echo "review the changelog, wait for CI, then merge manually to publish"
+  echo "write docs/changelog.mdx product notes, wait for CI, then merge manually to publish"
 }
 
 main() {

@@ -33,6 +33,9 @@ def test_release_pr_body_includes_complete_changelog_and_manual_merge() -> None:
     assert "## What's Changed" in result.stdout
     assert "* feat: include the complete changelog" in result.stdout
     assert f"<!-- release-notes-base: {'a' * 40} -->" in result.stdout
+    assert "Review generated `CHANGELOG.md` for completeness." in result.stdout
+    assert "Write user-facing v1.2.3 notes in `docs/changelog.mdx`." in result.stdout
+    assert "scripts/changelog.py sync" not in result.stdout
     assert "Merge this PR manually after CI passes." in result.stdout
     assert "Merging publishes `kensa==1.2.3` to PyPI" in result.stdout
 
@@ -140,8 +143,10 @@ def test_release_workflow_publishes_reviewed_changelog_notes() -> None:
     workflow = RELEASE_WORKFLOW.read_text()
 
     assert 'scripts/changelog.py notes "$VERSION"' in workflow
+    assert 'scripts/changelog.py check-docs "$version"' in workflow
     assert "--notes-file -" in workflow
     assert "--generate-notes" not in workflow
+    assert "scripts/changelog.py sync" not in workflow
     assert 'assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"' in workflow
 
 
@@ -150,4 +155,6 @@ def test_required_lint_check_rejects_stale_release_notes() -> None:
 
     assert "Verify release notes match pull request base" in workflow
     assert "github.event.pull_request.base.sha" in workflow
+    assert 'scripts/changelog.py check-docs "$version"' in workflow
+    assert "scripts/changelog.py sync" not in workflow
     assert 'assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"' in workflow
