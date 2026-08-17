@@ -37,8 +37,8 @@ kensa init --non-interactive --json --project-root /path/to/project
 | `--non-interactive` | off | Disable prompts; requires `--project-root` |
 | `--json` | off | Emit `kensa.cli.v1` with a `kensa.init_manifest.v1` changed-file manifest |
 
-The init manifest lists every file changed by init and the reason for the change. With `--json`,
-missing non-interactive inputs produce the same JSON envelope with a non-zero exit code.
+The init manifest lists every file init changed and why. With `--json`, missing non-interactive
+inputs produce the same envelope with a non-zero exit code.
 
 ## kensa doctor
 
@@ -55,11 +55,10 @@ kensa doctor --json
 | `--json` | Emit a machine-readable envelope |
 | `--allow-suspicious-harness` | Warn instead of failing when the harness looks like a stub or mock |
 
-JSON output includes `kensa.doctor_diagnostics.v1` codes. The initial stable codes are `ready`,
-`not_ready`, `incomplete_fixture`, `missing_ci`, and `invalid_execution_seam`. New codes may be
-added within the same major contract version, but existing codes do not change meaning. Exactly one
-of `ready` or `not_ready` is always the first code and mirrors the command exit status. The remaining
-codes are independent diagnostics that may accompany either verdict.
+JSON output includes `kensa.doctor_diagnostics.v1` codes: `ready`, `not_ready`,
+`incomplete_fixture`, `missing_ci`, and `invalid_execution_seam`. Exactly one of `ready` or
+`not_ready` comes first and mirrors the exit status; the rest are independent diagnostics. New codes
+may be added within the major version, but existing codes keep their meaning.
 
 ## kensa connect
 

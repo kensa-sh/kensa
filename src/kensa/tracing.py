@@ -168,16 +168,9 @@ def instrument(
 ) -> None:
     """Attach local JSONL and optional OTLP HTTP exporters for this process.
 
-    OTLP export is enabled only by ``otlp_endpoint`` or ``KENSA_OTLP_ENDPOINT``,
-    so this function stays a no-op in processes that merely configure standard
-    OpenTelemetry variables for their own exporter. Credentials come from
-    ``otlp_headers`` or ``KENSA_OTLP_HEADERS``; application
-    ``OTEL_EXPORTER_OTLP_HEADERS`` values are never forwarded to a Kensa
-    endpoint. When OTLP is enabled without an explicit local directory, JSONL
-    spans are retained under ``.kensa/traces``. The default OTLP request timeout
-    is two seconds unless a standard OpenTelemetry timeout environment variable
-    or ``otlp_timeout_s`` supplies another value; the Python OTLP exporter
-    interprets each timeout in seconds.
+    No-ops unless a trace directory or an OTLP endpoint is configured. OTLP
+    needs ``otlp_endpoint`` or ``KENSA_OTLP_ENDPOINT``; standard OpenTelemetry
+    variables never enable it, and their headers are never reused.
     """
 
     configured = trace_dir if trace_dir is not None else os.environ.get("KENSA_TRACE_DIR")

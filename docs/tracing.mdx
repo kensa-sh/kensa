@@ -125,8 +125,8 @@ kensa import --from jsonl --source .kensa/traces/spans.jsonl
 
 ### OTLP HTTP export
 
-OTLP export is opt-in and uses the standard OpenTelemetry HTTP/protobuf exporter. Local JSONL
-capture stays enabled, so one span is available both locally and at the configured endpoint:
+Opt in with `otlp_endpoint=` or `KENSA_OTLP_ENDPOINT`. Local JSONL capture stays on, so each span
+lands both locally and at the endpoint:
 
 ```python
 from kensa import instrument
@@ -138,7 +138,7 @@ instrument(
 )
 ```
 
-To configure it from the environment instead, set a Kensa-owned endpoint:
+Or from the environment:
 
 ```bash
 KENSA_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
@@ -146,22 +146,17 @@ KENSA_OTLP_HEADERS=authorization=Bearer\ local-token \
 python my_agent.py
 ```
 
-The standard `OTEL_EXPORTER_OTLP_*` variables never enable export on their own, so `instrument()`
-stays a no-op in a process that only configures OpenTelemetry for its own exporter. Set the Kensa
-endpoint only where you want Kensa to export in addition to whatever your application already
-sends, since both exporters ship the same spans.
+Standard `OTEL_EXPORTER_OTLP_*` variables never enable export, so `instrument()` stays a no-op in a
+process that only configures OpenTelemetry for its own exporter. Credentials come from
+`otlp_headers=` or `KENSA_OTLP_HEADERS` only; your application's `OTEL_EXPORTER_OTLP_HEADERS` is
+never sent to a Kensa endpoint. Timeout, compression, and certificate settings still read the
+standard variables.
 
-Credentials come from `otlp_headers=` or `KENSA_OTLP_HEADERS` only. Kensa never forwards your
-application's `OTEL_EXPORTER_OTLP_HEADERS` to a Kensa endpoint, so a collector API key set for your
-own exporter is not sent to a different host. Transport settings that carry no credentials
-(`OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, certificate paths) are still read
-from the standard variables.
-
-When no local directory is supplied, enabling OTLP writes the local copy to
-`.kensa/traces/spans.jsonl`. An unreachable endpoint is logged as an export failure; it does not
-discard the JSONL span or raise through the traced application. HTTP requests default to a
-two-second timeout. Override it with `otlp_timeout_s`, `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, or
-`OTEL_EXPORTER_OTLP_TIMEOUT`; the Python OTLP exporter interprets each value in seconds.
+Without a local directory, spans also go to `.kensa/traces/spans.jsonl`. An unreachable endpoint is
+logged and does not discard the local span or raise. Requests default to a two-second timeout,
+overridable with `otlp_timeout_s` or the standard timeout variables, which the Python exporter reads
+in seconds. Both exporters ship the same spans, so expect duplicates if your application already
+exports to the same collector.
 
 <Warning>OTLP export sends raw telemetry before Kensa's import-time redaction. Treat the endpoint as sensitive, use TLS for non-local collectors, and configure authentication through OTLP headers.</Warning>
 
