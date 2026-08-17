@@ -54,10 +54,10 @@ breaking changes, for example `feat!:`. Keep messages concise, for example:
 git commit -m "fix: cover trace imports"
 ```
 
-PR labels mirror commit prefixes for release notes: prefer `feat`, `fix`, or `chore`. Add
-`breaking` when a PR changes user-facing behavior or install/API compatibility. Release notes also
-accept common aliases such as `feature`, `enhancement`, `bug`, `documentation`, `dependencies`, and
-`breaking-change`. PRs should include a short summary, motivation, implementation notes, and a test
+`git-cliff` groups the canonical changelog from conventional commit messages, so use `feat`, `fix`,
+or `chore` consistently and append `!` for breaking changes. PR labels mirror those prefixes for
+repository triage; add `breaking` when a PR changes user-facing behavior or install/API
+compatibility. PRs should include a short summary, motivation, implementation notes, and a test
 plan. Link issues when applicable.
 
 ## Security & Configuration Tips

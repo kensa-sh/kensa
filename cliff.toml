@@ -1,0 +1,48 @@
+[changelog]
+header = """
+# Changelog
+
+<!-- Generated from Git history by git-cliff. Do not edit manually. -->
+
+Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases)."""
+body = """
+
+## {{ version | trim_start_matches(pat="v") }}
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") -%}
+### {{ group | striptags | trim }}
+{% for commit in commits -%}
+* {{ commit.raw_message | split(pat="\n") | first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/kensa-sh/kensa/commit/{{ commit.id }}))
+{% endfor -%}
+{% endfor %}
+{% if previous.version %}
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/{{ previous.version }}...{{ version }}
+{% else %}
+**Full Changelog**: https://github.com/kensa-sh/kensa/commits/{{ version }}
+{% endif %}"""
+trim = false
+render_always = true
+postprocessors = [
+  { pattern = '\n{3,}(\*\*Full Changelog\*\*)', replace = "\n\n${1}" },
+]
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+require_conventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = true
+fail_on_unmatched_commit = true
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+topo_order = false
+topo_order_commits = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = '^Merge ', skip = true },
+  { message = '^chore(?:\([^)]*\))?: release', skip = true },
+  { message = '^[a-z]+(?:\([^)]*\))?!:', group = '<!-- 0 -->Breaking Changes' },
+  { message = '^feat', group = '<!-- 1 -->Features' },
+  { message = '^fix', group = '<!-- 2 -->Bug Fixes' },
+  { message = '^chore', group = '<!-- 3 -->Chores' },
+  { message = '.*', group = '<!-- 4 -->Other Changes' },
+]

@@ -143,10 +143,11 @@ Maintainers release from a clean, CI-green `main` checkout:
 ./scripts/release.sh patch
 ```
 
-Use `minor` or `major` when appropriate. The bump command opens a version-bump PR with a checklist
-to update `docs/changelog.mdx`. Update the changelog in that PR, wait for CI to pass, then merge the
-PR manually. Merging runs the release workflow, which creates the release tag, publishes to PyPI,
-and creates the GitHub Release with generated notes.
+Use `minor` or `major` when appropriate. The bump command uses `git-cliff` to rebuild
+`CHANGELOG.md` from conventional commits and opens a version-bump PR with a checklist for the
+independently authored product notes in `docs/changelog.mdx`. Review both files, wait for CI to
+pass, then merge the PR manually. Merging creates the release tag, publishes to PyPI, and creates
+the GitHub Release from the reviewed `CHANGELOG.md` section.
 
 ## Code Conventions
 
@@ -167,9 +168,9 @@ and creates the GitHub Release with generated notes.
 ## Pull Requests
 
 - Use a branch named `feat/...`, `fix/...`, or `chore/...`.
-- Use conventional commit prefixes: `feat:`, `fix:`, `test:`, `docs:`, or `chore:`.
-- GitHub release notes are grouped by PR labels; the PR Labels workflow applies those labels from
-  conventional PR titles.
+- Use conventional commit prefixes: `feat:`, `fix:`, or `chore:`. Append `!` for breaking changes.
+- `git-cliff` groups the canonical changelog from conventional commit messages; the PR Labels
+  workflow separately applies labels from conventional PR titles for repository triage.
 - Keep eval files constrained to `tests/evals/test_*.py`.
 - Include matching `docs/` updates for user-facing behavior changes.
 - Include a short test plan in the PR.

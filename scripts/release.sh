@@ -16,7 +16,7 @@ usage:
 
 Release flow:
   1. Run patch/minor/major to open a version-bump PR.
-  2. Update docs/changelog.mdx in the PR.
+  2. Review generated CHANGELOG.md and write product notes in docs/changelog.mdx.
   3. Merge the PR manually after CI passes.
   4. The merge workflow publishes to PyPI and creates the GitHub Release.
 
@@ -103,7 +103,7 @@ assert_main_branch() {
 
 assert_head_matches_origin_main() {
   local local_head origin_head
-  git -C "$ROOT" fetch --quiet origin main || die "failed to fetch origin/main"
+  git -C "$ROOT" fetch --quiet --tags origin main || die "failed to fetch origin/main and tags"
   local_head="$(git -C "$ROOT" rev-parse HEAD)"
   origin_head="$(git -C "$ROOT" rev-parse FETCH_HEAD)"
   [ "$local_head" = "$origin_head" ] || die "local HEAD must match origin/main before release"
@@ -155,17 +155,45 @@ run_local_checks() {
   uv run pytest -q -m "not live"
 }
 
+generate_changelog() {
+  local version="$1"
+
+  uv run git-cliff \
+    --config "$ROOT/cliff.toml" \
+    --repository "$ROOT" \
+    --tag "v$version" \
+    --output "$ROOT/CHANGELOG.md"
+}
+
+assert_release_notes_base() {
+  local pr_body="$1"
+  local current_base="$2"
+  local generated_base
+
+  generated_base="$(printf '%s\n' "$pr_body" | sed -nE 's/^<!-- release-notes-base: ([0-9a-f]{40}) -->$/\1/p')"
+  if [ "$generated_base" != "$current_base" ]; then
+    die "release notes must be regenerated from the current PR base ($current_base)"
+  fi
+}
+
 release_pr_body() {
   local version="$1"
+  local release_notes="$2"
+  local target_commitish="$3"
   cat <<EOF
 Release PR for v$version.
 
+${release_notes%$'\n'}
+
 ## Release checklist
 
-- [ ] Update \`docs/changelog.mdx\` for v$version.
+- [ ] Review generated \`CHANGELOG.md\` for completeness.
+- [ ] Write user-facing v$version notes in \`docs/changelog.mdx\`.
 
 Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
 the GitHub Release for \`v$version\`.
+
+<!-- release-notes-base: $target_commitish -->
 EOF
 }
 
@@ -173,7 +201,7 @@ prepare_release_pr() {
   local bump="$1"
   local dry_run="$2"
   local run_tests="$3"
-  local current version tag branch title
+  local current version tag branch title target_commitish release_notes
 
   require_command git
   require_command uv
@@ -190,7 +218,9 @@ prepare_release_pr() {
     echo "would require clean main branch matching origin/main"
     echo "would require available branch: $branch"
     echo "would require available tag: $tag"
-    echo "would update pyproject.toml and uv.lock"
+    echo "would update pyproject.toml, uv.lock, and CHANGELOG.md"
+    echo "would require user-facing notes in docs/changelog.mdx before merge"
+    echo "would rebuild CHANGELOG.md from Git history with git-cliff through $tag"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else
@@ -212,9 +242,13 @@ prepare_release_pr() {
   assert_tag_available "$tag"
   ensure_label "ignore-for-release" "Exclude from generated release notes" "ededed"
 
+  target_commitish="$(git -C "$ROOT" rev-parse HEAD)"
+
   git -C "$ROOT" switch -c "$branch"
   uv version "$version" --no-sync >/dev/null
   assert_version_files "$version"
+  generate_changelog "$version"
+  release_notes="$(uv run python "$ROOT/scripts/changelog.py" notes "$version")"
 
   if [ "$run_tests" = true ]; then
     run_local_checks
@@ -222,13 +256,13 @@ prepare_release_pr() {
     echo "skip local checks; PR CI remains authoritative"
   fi
 
-  git -C "$ROOT" add pyproject.toml uv.lock
+  git -C "$ROOT" add pyproject.toml uv.lock CHANGELOG.md
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
-  release_pr_body "$version" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
+  release_pr_body "$version" "$release_notes" "$target_commitish" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
-  echo "update docs/changelog.mdx, wait for CI, then merge manually to publish"
+  echo "write docs/changelog.mdx product notes, wait for CI, then merge manually to publish"
 }
 
 main() {
