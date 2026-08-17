@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -15,6 +17,7 @@ from typing import Any, cast
 
 import click
 import pytest
+import yaml
 from rich.console import Console
 
 from kensa import cli, cli_output, cli_traces
@@ -57,7 +60,15 @@ def _git_status(root: Path) -> str:
     ).stdout
 
 
-def test_cli_import_does_not_load_langfuse_sdk() -> None:
+def _file_hash_snapshot(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_cli_import_does_not_load_remote_exporter_stacks() -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -66,7 +77,10 @@ def test_cli_import_does_not_load_langfuse_sdk() -> None:
                 "import sys; "
                 "import kensa.cli; "
                 "print('kensa.providers.langfuse' in sys.modules); "
-                "print('langfuse' in sys.modules)"
+                "print('langfuse' in sys.modules); "
+                "print('opentelemetry.exporter.otlp.proto.http.trace_exporter' in sys.modules); "
+                "print('requests' in sys.modules); "
+                "print('google.protobuf' in sys.modules)"
             ),
         ],
         cwd=PROJECT_ROOT,
@@ -75,7 +89,7 @@ def test_cli_import_does_not_load_langfuse_sdk() -> None:
         text=True,
     )
 
-    assert result.stdout.splitlines() == ["False", "False"]
+    assert result.stdout.splitlines() == ["False", "False", "False", "False", "False"]
 
 
 def test_lazy_langfuse_wrappers_delegate_to_provider_module(
@@ -977,6 +991,7 @@ def kensa_run(case):
     payload = json.loads(capsys.readouterr().out)
     assert code == 1
     assert payload["data"]["smoke"]["returncode"] == 1
+    assert "incomplete_fixture" in payload["data"]["diagnostics"]["codes"]
     assert payload["data"]["smoke"]["stdout"] == ""
     assert "tests/evals/test_kensa_smoke.py" in payload["errors"][0]
     assert payload["next_steps"] == [
@@ -1038,6 +1053,54 @@ def test_doctor_json_emits_agent_envelope(
     assert "stdout" in payload["data"]["smoke"]
     assert "stderr" in payload["data"]["smoke"]
     assert payload["data"]["harness_authenticity_warnings"] == []
+    assert payload["data"]["diagnostics"] == {
+        "schema_version": "kensa.doctor_diagnostics.v1",
+        "codes": ["ready", "missing_ci"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("smoke_returncode", "authenticity_warnings", "workflow_exists", "exit_code", "codes"),
+    [
+        (0, [], True, 0, ["ready"]),
+        (1, [], True, 1, ["not_ready", "incomplete_fixture"]),
+        (0, ["mock seam"], True, 1, ["not_ready", "invalid_execution_seam"]),
+        (0, ["mock seam"], True, 0, ["ready", "invalid_execution_seam"]),
+        (0, [], False, 0, ["ready", "missing_ci"]),
+        (0, [], True, 1, ["not_ready"]),
+        (
+            1,
+            ["mock seam"],
+            False,
+            1,
+            ["not_ready", "invalid_execution_seam", "incomplete_fixture", "missing_ci"],
+        ),
+    ],
+)
+def test_doctor_diagnostics_return_stable_codes_for_repository_states(
+    smoke_returncode: int,
+    authenticity_warnings: list[str],
+    workflow_exists: bool,
+    exit_code: int,
+    codes: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = tmp_path / ".github" / "workflows" / "kensa.yml"
+    if workflow_exists:
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: Kensa\n")
+    monkeypatch.setattr(cli, "_init_workflow_target", lambda: (workflow, None))
+    result = {
+        "exit_code": exit_code,
+        "harness_authenticity_warnings": authenticity_warnings,
+        "smoke": {"returncode": smoke_returncode},
+    }
+
+    assert cli._doctor_diagnostics(result) == {
+        "schema_version": "kensa.doctor_diagnostics.v1",
+        "codes": codes,
+    }
 
 
 def test_doctor_allows_suspicious_harness_with_explicit_opt_out(
@@ -1193,6 +1256,7 @@ def kensa_run(case):
     assert code == 1
     assert payload["ok"] is False
     assert payload["data"]["harness_authenticity_warnings"]
+    assert "invalid_execution_seam" in payload["data"]["diagnostics"]["codes"]
     assert "Harness authenticity check failed" in payload["errors"][0]
 
 
@@ -2634,6 +2698,414 @@ def test_init_scaffolds_local_agent_and_ci_files(tmp_path: Path, monkeypatch, ca
     assert "Kensa lifecycle" in output
 
 
+def test_init_non_interactive_json_uses_explicit_root_and_reports_changed_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+    monkeypatch.setattr(
+        cli,
+        "_select_interactive_choice",
+        lambda *args, **kwargs: pytest.fail("non-interactive init prompted"),
+    )
+    before = _file_hash_snapshot(tmp_path)
+
+    code = main(
+        [
+            "init",
+            "--non-interactive",
+            "--json",
+            "--project-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == "kensa.cli.v1"
+    assert payload["command"] == "init"
+    assert payload["warnings"]
+    assert "No agent skill files installed" in payload["warnings"][0]
+    assert payload["next_steps"] == cli._setup_handoff_next_steps()
+    manifest = payload["data"]["manifest"]
+    assert manifest["schema_version"] == "kensa.init_manifest.v1"
+    assert manifest["project_root"] == str(tmp_path)
+    changed = {entry["path"]: entry for entry in manifest["changed_files"]}
+    after = _file_hash_snapshot(tmp_path)
+    actual_changed = {
+        path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+    }
+    assert set(changed) == actual_changed
+    assert {entry["change"] for entry in changed.values()} == {"created"}
+    assert all(entry["reason"] for entry in changed.values())
+
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["data"]["manifest"]["changed_files"] == []
+
+
+def test_full_local_lifecycle_runs_without_provider_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    redaction_ready: Any,
+) -> None:
+    """Materialize generation as the agent skill would, then finish the local lifecycle."""
+    del redaction_ready
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL",
+        "OPENAI_API_KEY",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name in cli._non_local_endpoint_markers():
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(cli.shutil, "which", lambda command: None)
+
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(tmp_path),
+                "--agent",
+                "other",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    source = tmp_path / "local-spans.jsonl"
+    source.write_text(json.dumps({"id": "local-run", "input": "hello"}) + "\n")
+    assert main(["import", "--from", "jsonl", "--source", str(source), "--json"]) == 0
+    imported = json.loads(capsys.readouterr().out)
+    artifact = tmp_path / imported["data"]["artifact"]
+    trace_id = json.loads(artifact.read_text())["id"]
+
+    queue_dir = tmp_path / ".kensa" / "inspect"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "local.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": "kensa.inspect.v1",
+                "items": [
+                    {
+                        "id": "local-response",
+                        "trace_ids": [trace_id],
+                        "source": "jsonl",
+                        "status": "generated",
+                        "failure_pattern": "agent does not return a local response",
+                        "expected_outcome": "agent returns the local response",
+                        "expected_current_behavior": "pass",
+                    }
+                ],
+            }
+        )
+    )
+    assert main(["inspect", "lint", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    eval_dir = tmp_path / "tests" / "evals"
+    _write_ready_harness(eval_dir)
+    (eval_dir / "test_local_response.py").write_text(
+        """import pytest
+from kensa.pytest import kensa_case
+
+
+@pytest.mark.kensa(trials=1)
+@pytest.mark.parametrize("case", [kensa_case(id="local_response", input="hello")])
+def test_local_response(case, kensa_run):
+    assert case.run(kensa_run).output == {"ok": "hello"}
+"""
+    )
+
+    assert main(["doctor", "--json"]) == 0
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["data"]["diagnostics"]["codes"] == ["ready"]
+    assert doctor_payload["data"]["non_local_endpoint_markers"] == []
+
+    assert main(["eval", "--workers", "1", "--no-judge", "--json"]) == 0
+    eval_payload = json.loads(capsys.readouterr().out)
+    assert eval_payload["ok"] is True
+    assert eval_payload["data"]["evals_readiness"]["passing_eval_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["init", "--non-interactive", "--json"], "--project-root is required"),
+        (["init", "--json"], "--json requires --non-interactive"),
+    ],
+)
+def test_init_json_reports_machine_readable_argument_errors(
+    argv: list[str],
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(argv) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "init"
+    assert payload["exit_code"] == 2
+    assert message in payload["errors"][0]
+
+
+def test_init_rejects_invalid_project_root_in_json_and_terminal_modes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing"
+
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(missing),
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert "project root is not a directory" in payload["errors"][0]
+
+    assert main(["init", "--non-interactive", "--project-root", str(missing)]) == 2
+    assert "project root is not a directory" in capsys.readouterr().err
+
+
+def test_init_non_interactive_terminal_mode_uses_explicit_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, bool]] = []
+
+    def fake_init(*args: Any, non_interactive: bool, **kwargs: Any) -> int:
+        calls.append((Path.cwd(), non_interactive))
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_init", fake_init)
+
+    assert main(["init", "--non-interactive", "--project-root", str(tmp_path)]) == 0
+    assert calls == [(tmp_path, True)]
+
+
+def test_init_json_reports_click_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*args: Any, **kwargs: Any) -> int:
+        cli._write_if_missing(Path("partial.txt"), "partial\n")
+        raise click.ClickException("invalid setup")
+
+    monkeypatch.setattr(cli, "_cmd_init", fail)
+
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["errors"] == ["invalid setup"]
+    assert payload["data"]["manifest"]["changed_files"] == [
+        {
+            "path": "partial.txt",
+            "change": "created",
+            "reason": "update project setup",
+        }
+    ]
+
+
+def test_init_json_reports_non_exception_failure_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*args: Any, **kwargs: Any) -> int:
+        click.echo("missing required setup input", err=True)
+        return 1
+
+    monkeypatch.setattr(cli, "_cmd_init", fail)
+
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["errors"] == ["missing required setup input"]
+
+    monkeypatch.setattr(cli, "_cmd_init", lambda *args, **kwargs: 1)
+    assert (
+        main(
+            [
+                "init",
+                "--non-interactive",
+                "--json",
+                "--project-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["errors"] == ["Kensa init returned a non-zero exit code."]
+
+
+def test_captured_init_messages_strip_presentation_markup() -> None:
+    stream = io.StringIO("\n  ✗ setup failed\nraw subprocess detail\n")
+
+    assert cli._captured_init_messages(stream) == ["setup failed", "raw subprocess detail"]
+
+
+def test_captured_init_messages_preserve_long_cli_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = io.StringIO()
+    message = (
+        "redaction model bootstrap failed: the pinned model could not be downloaded "
+        "from the configured local model directory"
+    )
+    monkeypatch.setattr(
+        cli_output,
+        "ERR_CONSOLE",
+        Console(file=stream, highlight=False, width=80),
+    )
+
+    cli_output.item(message, ok=False, err=True)
+
+    assert cli._captured_init_messages(stream) == [message]
+
+
+def test_init_changed_file_manifest_reports_create_update_delete_and_symlinks(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original.txt"
+    updated = tmp_path / "updated.txt"
+    deleted = tmp_path / "deleted.txt"
+    original.write_text("original")
+    updated.write_text("before")
+    deleted.write_text("deleted")
+    created = tmp_path / "created.txt"
+    linked = tmp_path / "linked.txt"
+    deleted_dir = tmp_path / "references"
+    deleted_dir.mkdir()
+    nested_deleted = deleted_dir / "nested.txt"
+    nested_deleted.write_text("nested")
+    recorder = cli._InitChangeRecorder(tmp_path)
+    for path in (updated, deleted, created, linked, deleted_dir):
+        recorder.observe(path)
+
+    updated.write_text("after")
+    deleted.unlink()
+    created.write_text("created")
+    linked.symlink_to(original)
+    shutil.rmtree(deleted_dir)
+    (tmp_path / "concurrent.txt").write_text("not changed by init")
+    manifest = recorder.manifest()
+
+    changes = {entry["path"]: entry["change"] for entry in manifest["changed_files"]}
+    assert changes == {
+        "created.txt": "created",
+        "deleted.txt": "deleted",
+        "linked.txt": "created",
+        "references/nested.txt": "deleted",
+        "updated.txt": "updated",
+    }
+    assert "concurrent.txt" not in changes
+
+
+def test_project_file_snapshot_skips_unreadable_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unreadable = tmp_path / "unreadable.txt"
+    unreadable.write_text("unreadable")
+
+    def read_bytes(path: Path) -> bytes:
+        raise OSError(f"unreadable: {path}")
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    assert cli._init_file_digest(unreadable) is None
+
+
+def test_init_change_recorder_includes_files_outside_explicit_subproject(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "packages" / "agent"
+    project.mkdir(parents=True)
+    workflow = tmp_path / ".github" / "workflows" / "kensa.yml"
+    recorder = cli._InitChangeRecorder(project)
+    recorder.observe(workflow)
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: Kensa\n")
+
+    assert recorder.manifest()["changed_files"] == [
+        {
+            "path": "../../.github/workflows/kensa.yml",
+            "change": "created",
+            "reason": "install the Kensa CI workflow",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [
+        (Path(".github/workflows/kensa.yml"), "CI workflow"),
+        (Path("tests/evals/conftest.py"), "harness fixture"),
+        (Path("tests/evals/test_kensa_smoke.py"), "smoke eval"),
+        (Path(".agents/skills/kensa-evals/SKILL.md"), "coding-agent instructions"),
+        (Path(".kensa/.gitignore"), "out of version control"),
+        (Path("pyproject.toml"), "project configuration"),
+        (Path("uv.lock"), "resolved setup dependency"),
+        (Path(".env.local"), "local setup credentials"),
+        (Path(".gitignore"), "exclude local setup credentials"),
+        (Path(".kensa/connections/langfuse.json"), "connection metadata"),
+        (Path("custom.txt"), "update project setup"),
+    ],
+)
+def test_init_change_reason_covers_manifest_categories(path: Path, reason: str) -> None:
+    assert reason in cli._init_change_reason(path)
+
+
 def test_init_without_new_choices_preserves_project_configuration(
     tmp_path: Path,
     monkeypatch,
@@ -3237,7 +3709,11 @@ def test_init_interactive_agent_choice_scaffolds_selected_file(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli,
+        "_configure_trace_source_connection",
+        lambda steps, source, **kwargs: "ready",
+    )
     monkeypatch.setattr(
         cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
     )
@@ -3287,7 +3763,11 @@ def test_init_interactive_agent_choice_other_installs_agents_tree(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: "/bin/codex")
-    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli,
+        "_configure_trace_source_connection",
+        lambda steps, source, **kwargs: "ready",
+    )
     monkeypatch.setattr(
         cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
     )
@@ -3312,7 +3792,11 @@ def test_init_interactive_keyboard_menu_defaults_to_first_agent(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_is_interactive", lambda: True)
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
-    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli,
+        "_configure_trace_source_connection",
+        lambda steps, source, **kwargs: "ready",
+    )
     monkeypatch.setattr(
         cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
     )
@@ -3353,7 +3837,11 @@ def test_init_explicit_auto_agent_summary_uses_resolved_agent(
         "which",
         lambda command: "/bin/codex" if command == "codex" else None,
     )
-    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli,
+        "_configure_trace_source_connection",
+        lambda steps, source, **kwargs: "ready",
+    )
     monkeypatch.setattr(
         cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
     )
@@ -3431,6 +3919,26 @@ def test_select_trace_source_noninteractive_has_no_default(monkeypatch) -> None:
     monkeypatch.setattr(cli, "_is_interactive", lambda: False)
 
     assert cli._select_trace_source() is None
+
+
+def test_non_interactive_init_skips_trace_connection_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "_configure_init_credentials",
+        lambda *args, **kwargs: pytest.fail("non-interactive init prompted for credentials"),
+    )
+
+    assert (
+        cli._configure_trace_source_connection(
+            None,
+            "langfuse",
+            non_interactive=True,
+        )
+        == "ready"
+    )
 
 
 def test_select_interactive_choice_without_tty_uses_prompt(monkeypatch) -> None:
@@ -4514,7 +5022,11 @@ def test_init_interactive_trace_source_choice_prints_two_step_handoff(
         "which",
         lambda command: "/bin/codex" if command == "codex" else None,
     )
-    monkeypatch.setattr(cli, "_configure_trace_source_connection", lambda steps, source: "ready")
+    monkeypatch.setattr(
+        cli,
+        "_configure_trace_source_connection",
+        lambda steps, source, **kwargs: "ready",
+    )
     monkeypatch.setattr(
         cli, "_configure_redaction_readiness", lambda steps, source, **kwargs: "ready"
     )
@@ -5106,7 +5618,14 @@ def test_configure_redaction_readiness_statuses(
 def test_init_accepts_large_redaction_model_flag(monkeypatch) -> None:
     calls: list[tuple[Any, Any, str | None]] = []
 
-    def fake_init(evidence_source=None, agent_choice=None, *, redaction_model=None):
+    def fake_init(
+        evidence_source=None,
+        agent_choice=None,
+        *,
+        redaction_model=None,
+        non_interactive=False,
+    ):
+        assert non_interactive is False
         calls.append((evidence_source, agent_choice, redaction_model))
         return 0
 

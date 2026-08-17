@@ -123,6 +123,43 @@ KENSA_TRACE_DIR=.kensa/traces python my_agent.py
 kensa import --from jsonl --source .kensa/traces/spans.jsonl
 ```
 
+### OTLP HTTP export
+
+Opt in with `otlp_endpoint=` or `KENSA_OTLP_ENDPOINT`. Local JSONL capture stays on, so each span
+lands both locally and at the endpoint:
+
+```python
+from kensa import instrument
+
+instrument(
+    trace_dir=".kensa/traces",
+    otlp_endpoint="http://localhost:4318/v1/traces",
+    otlp_headers={"authorization": "Bearer local-token"},
+)
+```
+
+Or from the environment:
+
+```bash
+KENSA_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
+KENSA_OTLP_HEADERS=authorization=Bearer\ local-token \
+python my_agent.py
+```
+
+Standard `OTEL_EXPORTER_OTLP_*` variables never enable export, so `instrument()` stays a no-op in a
+process that only configures OpenTelemetry for its own exporter. Credentials come from
+`otlp_headers=` or `KENSA_OTLP_HEADERS` only; your application's `OTEL_EXPORTER_OTLP_HEADERS` is
+never sent to a Kensa endpoint. Timeout, compression, and certificate settings still read the
+standard variables.
+
+Without a local directory, spans also go to `.kensa/traces/spans.jsonl`. An unreachable endpoint is
+logged and does not discard the local span or raise. Requests default to a two-second timeout,
+overridable with `otlp_timeout_s` or the standard timeout variables, which the Python exporter reads
+in seconds. Both exporters ship the same spans, so expect duplicates if your application already
+exports to the same collector.
+
+<Warning>OTLP export sends raw telemetry before Kensa's import-time redaction. Treat the endpoint as sensitive, use TLS for non-local collectors, and configure authentication through OTLP headers.</Warning>
+
 <Warning>Local capture files are raw telemetry and can contain sensitive payloads. Treat only successfully imported artifacts with valid redaction manifests as safe evidence.</Warning>
 
 Inside an eval, the same helpers feed the live `result.trace` accessor on successful runs. The

@@ -120,6 +120,12 @@ Each trial is one pytest item with its own trace. Kensa aggregates the trials pe
 
 When you have trace evidence, your coding agent (the `kensa-inspect` skill) mines it into reviewable **eval ideas** - proposed evals recorded as a YAML review queue under `.kensa/inspect/`. You approve the ones worth keeping by changing `status: pending` to `status: approved`, validate the queue with `kensa inspect lint`, then the `kensa-generate` skill materializes them as `tests/evals/test_<id>.py`. Materialized evals are plain pytest files you own and edit.
 
+For integrations, `BehaviorCandidate.from_inspect_idea(...)` publishes an idea as the strict
+`kensa.behavior_candidate.v1` contract. Its `semantic_fingerprint` hashes only the normalized
+failure pattern and expected outcome, under the separately versioned
+`kensa.behavior_fingerprint.v1` algorithm. Equivalent behaviors must therefore use the same
+canonical wording; the fingerprint does not infer equivalence between differently worded prose.
+
 ## Pipeline
 
 ```mermaid

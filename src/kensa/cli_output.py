@@ -50,7 +50,7 @@ def step(title: str) -> None:
 def item(text: str, *, ok: bool = True, err: bool = False) -> None:
     marker = "[green]✓[/green]" if ok else "[red]✗[/red]"
     console = ERR_CONSOLE if err else CONSOLE
-    console.print(f"  {marker} {rich_escape(text)}")
+    console.print(f"  {marker} {rich_escape(text)}", soft_wrap=True)
 
 
 def notice(text: str) -> None:

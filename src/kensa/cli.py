@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -14,7 +15,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.resources import files
 from importlib.resources.abc import Traversable
@@ -117,6 +119,8 @@ _ENV_SAFETY_WARNING = (
     "tests/evals/conftest.py::kensa_run(case). Use local, staging, mocked, or "
     "sandboxed dependencies."
 )
+_INIT_MANIFEST_SCHEMA_VERSION = "kensa.init_manifest.v1"
+_DOCTOR_DIAGNOSTICS_SCHEMA_VERSION = "kensa.doctor_diagnostics.v1"
 _CONTROL_PATH_OPTION = "--kensa-control-path"
 _CONTROL_PATH_OVERRIDE_UNSUPPORTED = (
     f"{_CONTROL_PATH_OPTION} is reserved for kensa eval and cannot be passed to pytest."
@@ -627,10 +631,25 @@ def import_command(
     default=None,
     help="Pinned spaCy model used for mandatory redaction.",
 )
+@click.option(
+    "--project-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project directory to set up.",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    help="Run setup without prompting. Requires --project-root.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit an agent-readable JSON envelope.")
 def init(
     agent_choice: str | None,
     trace_source: str | None,
     redaction_model: str | None,
+    project_root: Path | None,
+    non_interactive: bool,
+    json_output: bool,
 ) -> None:
     """Set up Kensa."""
     selected_agent = cast(
@@ -642,7 +661,84 @@ def init(
         RedactionModelChoice | None,
         redaction_model.lower() if redaction_model else None,
     )
-    code = _cmd_init(selected_source, selected_agent, redaction_model=selected_model)
+    if non_interactive and project_root is None:
+        raise click.exceptions.Exit(
+            _init_argument_error(
+                "--project-root is required with --non-interactive.",
+                json_output=json_output,
+            )
+        )
+    if json_output and not non_interactive:
+        raise click.exceptions.Exit(
+            _init_argument_error(
+                "--json requires --non-interactive.",
+                json_output=True,
+            )
+        )
+    resolved_root = (project_root or Path.cwd()).expanduser().resolve()
+    if not resolved_root.is_dir():
+        raise click.exceptions.Exit(
+            _init_argument_error(
+                f"project root is not a directory: {resolved_root}",
+                json_output=json_output,
+            )
+        )
+    if json_output:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        recorder = _InitChangeRecorder(resolved_root)
+        details = _InitJSONDetails()
+        try:
+            with (
+                contextlib.chdir(resolved_root),
+                _record_init_changes(recorder),
+                _record_init_json_details(details),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = _cmd_init(
+                    selected_source,
+                    selected_agent,
+                    redaction_model=selected_model,
+                    non_interactive=True,
+                )
+        except click.ClickException as exc:
+            errors = [exc.format_message(), *_captured_init_messages(stderr)]
+            cli_output.print_json_envelope(
+                command="init",
+                ok=False,
+                exit_code=int(exc.exit_code),
+                summary="Kensa init failed.",
+                data={
+                    "project_root": str(resolved_root),
+                    "manifest": recorder.manifest(),
+                },
+                warnings=details.warnings,
+                errors=list(dict.fromkeys(errors)),
+                next_steps=details.next_steps,
+            )
+            raise click.exceptions.Exit(exc.exit_code) from None
+        errors = _captured_init_messages(stderr) if code != 0 else []
+        if code != 0 and not errors:
+            errors = ["Kensa init returned a non-zero exit code."]
+        cli_output.print_json_envelope(
+            command="init",
+            ok=code == 0,
+            exit_code=code,
+            summary="Kensa setup files created." if code == 0 else "Kensa setup incomplete.",
+            data={"project_root": str(resolved_root), "manifest": recorder.manifest()},
+            warnings=details.warnings,
+            errors=errors,
+            next_steps=details.next_steps,
+        )
+        raise click.exceptions.Exit(code)
+    with contextlib.chdir(resolved_root):
+        code = _cmd_init(
+            selected_source,
+            selected_agent,
+            redaction_model=selected_model,
+            non_interactive=non_interactive,
+        )
     raise click.exceptions.Exit(code)
 
 
@@ -1219,6 +1315,7 @@ def _cmd_doctor(args: Any) -> int:
                 "harness_readiness": result["harness_readiness"],
                 "evals_readiness": result["evals_readiness"],
                 "smoke": result["smoke"],
+                "diagnostics": _doctor_diagnostics(result),
             },
             warnings=list(result["warnings"]),
             errors=list(result["problems"]),
@@ -1729,6 +1826,21 @@ def _doctor_result(args: Any) -> dict[str, Any]:
     }
 
 
+def _doctor_diagnostics(result: dict[str, Any]) -> dict[str, Any]:
+    codes = ["ready" if int(result["exit_code"]) == 0 else "not_ready"]
+    if result["harness_authenticity_warnings"]:
+        codes.append("invalid_execution_seam")
+    if int(result["smoke"]["returncode"]) != 0:
+        codes.append("incomplete_fixture")
+    workflow_path, _working_directory = _init_workflow_target()
+    if not workflow_path.exists():
+        codes.append("missing_ci")
+    return {
+        "schema_version": _DOCTOR_DIAGNOSTICS_SCHEMA_VERSION,
+        "codes": codes,
+    }
+
+
 def _non_local_endpoint_markers() -> set[str]:
     markers: set[str] = set()
     for key, value in os.environ.items():
@@ -1781,8 +1893,167 @@ def _ensure_kensa_gitignore(kensa_dir: Path) -> bool:
     managed = {"*", "!.gitignore", "!settings.json", "readiness.json", "results/", "traces/"}
     existing = gitignore.read_text().splitlines() if gitignore.exists() else []
     preserved = [line for line in existing if line and line not in managed]
+    _record_init_path(gitignore)
     gitignore.write_text("\n".join([*desired, *preserved]) + "\n")
     return created
+
+
+@dataclass(frozen=True)
+class _ObservedInitFile:
+    before_digest: str | None
+    display_path: Path
+    reason: str
+
+
+@dataclass
+class _InitJSONDetails:
+    warnings: list[str] = field(default_factory=list)
+    next_steps: list[str] = field(default_factory=list)
+
+
+class _InitChangeRecorder:
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self._observed: dict[Path, _ObservedInitFile] = {}
+
+    def observe(self, path: Path) -> None:
+        resolved = path.absolute()
+        try:
+            display_path = resolved.relative_to(self.root)
+        except ValueError:
+            display_path = Path(os.path.relpath(resolved, self.root))
+        if path.is_dir() and not path.is_symlink():
+            for child in path.rglob("*"):
+                if child.is_file() or child.is_symlink():
+                    self.observe(child)
+            return
+        self._observed.setdefault(
+            resolved,
+            _ObservedInitFile(
+                before_digest=_init_file_digest(path),
+                display_path=display_path,
+                reason=_init_change_reason(display_path),
+            ),
+        )
+
+    def manifest(self) -> dict[str, Any]:
+        changes: list[dict[str, str]] = []
+        for absolute_path, observed in sorted(
+            self._observed.items(),
+            key=lambda item: item[1].display_path.as_posix(),
+        ):
+            after_digest = _init_file_digest(absolute_path)
+            if observed.before_digest == after_digest:
+                continue
+            if observed.before_digest is None:
+                change = "created"
+            elif after_digest is None:
+                change = "deleted"
+            else:
+                change = "updated"
+            changes.append(
+                {
+                    "path": observed.display_path.as_posix(),
+                    "change": change,
+                    "reason": observed.reason,
+                }
+            )
+        return {
+            "schema_version": _INIT_MANIFEST_SCHEMA_VERSION,
+            "project_root": str(self.root),
+            "changed_files": changes,
+        }
+
+
+_ACTIVE_INIT_CHANGE_RECORDER: ContextVar[_InitChangeRecorder | None] = ContextVar(
+    "kensa_active_init_change_recorder",
+    default=None,
+)
+_ACTIVE_INIT_JSON_DETAILS: ContextVar[_InitJSONDetails | None] = ContextVar(
+    "kensa_active_init_json_details",
+    default=None,
+)
+
+
+@contextlib.contextmanager
+def _record_init_changes(recorder: _InitChangeRecorder) -> Iterator[None]:
+    token = _ACTIVE_INIT_CHANGE_RECORDER.set(recorder)
+    try:
+        yield
+    finally:
+        _ACTIVE_INIT_CHANGE_RECORDER.reset(token)
+
+
+@contextlib.contextmanager
+def _record_init_json_details(details: _InitJSONDetails) -> Iterator[None]:
+    token = _ACTIVE_INIT_JSON_DETAILS.set(details)
+    try:
+        yield
+    finally:
+        _ACTIVE_INIT_JSON_DETAILS.reset(token)
+
+
+def _record_init_path(path: Path) -> None:
+    recorder = _ACTIVE_INIT_CHANGE_RECORDER.get()
+    if recorder is not None:
+        recorder.observe(path)
+
+
+def _init_file_digest(path: Path) -> str | None:
+    try:
+        payload = os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _captured_init_messages(stream: io.StringIO) -> list[str]:
+    messages: list[str] = []
+    for raw_line in click.unstyle(stream.getvalue()).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        messages.append(line.removeprefix("✗").strip())
+    return messages
+
+
+def _init_change_reason(path: Path) -> str:
+    normalized = path.as_posix()
+    if normalized.endswith(".github/workflows/kensa.yml"):
+        return "install the Kensa CI workflow"
+    if normalized.endswith("tests/evals/conftest.py"):
+        return "install the eval harness fixture"
+    if normalized.endswith("tests/evals/test_kensa_smoke.py"):
+        return "install the persistent smoke eval"
+    if "skills" in path.parts:
+        return "install Kensa coding-agent instructions"
+    if path == Path(".kensa/.gitignore"):
+        return "keep local Kensa artifacts out of version control"
+    if path.name == "pyproject.toml":
+        return "record Kensa project configuration"
+    if path.name == "uv.lock":
+        return "record the resolved setup dependency"
+    if path.name.startswith(".env"):
+        return "record local setup credentials"
+    if path.name == ".gitignore":
+        return "exclude local setup credentials"
+    if ".kensa" in path.parts and "connections" in path.parts:
+        return "record non-secret trace-provider connection metadata"
+    return "update project setup"
+
+
+def _init_argument_error(message: str, *, json_output: bool) -> int:
+    if json_output:
+        cli_output.print_json_envelope(
+            command="init",
+            ok=False,
+            exit_code=2,
+            summary="Invalid init arguments.",
+            errors=[message],
+        )
+    else:
+        cli_output.item(f"error: {message}", ok=False, err=True)
+    return 2
 
 
 def _record_project_choices(
@@ -1800,6 +2071,8 @@ def _record_project_choices(
         updates["evidence_source"] = evidence_source
     if redaction_model is not None:
         updates["redaction_model"] = redaction_model
+    project_path = kensa_config.find_pyproject(Path.cwd()) or Path.cwd() / "pyproject.toml"
+    _record_init_path(project_path)
     try:
         result = kensa_config.update_project_config(updates)
     except kensa_config.KensaConfigError as exc:
@@ -1816,8 +2089,9 @@ def _cmd_init(
     agent_choice: AgentInstructionChoice | None = None,
     *,
     redaction_model: RedactionModelChoice | None = None,
+    non_interactive: bool = False,
 ) -> int:
-    steps = _Steps() if _is_interactive() else None
+    steps = _Steps() if _is_interactive() and not non_interactive else None
     if steps is None:
         cli_output.step("kensa init")
     else:
@@ -1828,6 +2102,7 @@ def _cmd_init(
             evidence_source,
             agent_choice,
             redaction_model=redaction_model,
+            non_interactive=non_interactive,
         )
     except KeyboardInterrupt:
         _init_item(steps, "interrupted.", ok=False, err=True)
@@ -1842,6 +2117,7 @@ def _cmd_init_inner(
     explicit_agent_choice: AgentInstructionChoice | None = None,
     *,
     redaction_model: RedactionModelChoice | None = None,
+    non_interactive: bool = False,
 ) -> int:
     project_config = _read_project_config()
     if explicit_agent_choice == "auto" and _detected_agent_instruction_key() is None:
@@ -1849,8 +2125,12 @@ def _cmd_init_inner(
     added_files, notices, instruction_key = _scaffold_init_files(
         steps,
         agent_choice=explicit_agent_choice,
+        non_interactive=non_interactive,
     )
-    evidence_source = explicit_evidence_source or _select_trace_source(steps)
+    evidence_source = explicit_evidence_source or _select_trace_source(
+        steps,
+        non_interactive=non_interactive,
+    )
     redaction_source = evidence_source
     if redaction_model is not None and redaction_source is None:
         redaction_source = project_config.evidence_source
@@ -1865,7 +2145,11 @@ def _cmd_init_inner(
         model=effective_model,
         required=redaction_model is not None,
     )
-    connection_status = _configure_trace_source_connection(steps, evidence_source)
+    connection_status = _configure_trace_source_connection(
+        steps,
+        evidence_source,
+        non_interactive=non_interactive,
+    )
     _print_init_added_files(added_files, updated_paths=updated_files, steps=steps)
     for notice in notices:
         _init_notice(steps, notice)
@@ -1903,6 +2187,10 @@ def _ensure_redaction_dependencies(steps: _Steps | None) -> bool:
     if not missing:
         return True
     command = _redaction_install_command()
+    if command.startswith("uv "):
+        project_root = _project_config_root()
+        _record_init_path(_find_pyproject(project_root) or project_root / "pyproject.toml")
+        _record_init_path(project_root / "uv.lock")
     try:
         with cli_output.wait_status("Installing redaction dependencies"):
             completed = subprocess.run(
@@ -2023,6 +2311,7 @@ def _scaffold_init_files(
     steps: _Steps | None = None,
     *,
     agent_choice: AgentInstructionChoice | None = None,
+    non_interactive: bool = False,
 ) -> tuple[list[Path], list[str], str | None]:
     added: list[Path] = []
     notices: list[str] = []
@@ -2041,6 +2330,7 @@ def _scaffold_init_files(
     agent_files, agent_notice, instruction_key = _scaffold_agent_files(
         steps,
         agent_choice=agent_choice,
+        non_interactive=non_interactive,
     )
     added.extend(agent_files)
     if agent_notice is not None:
@@ -2052,8 +2342,13 @@ def _scaffold_agent_files(
     steps: _Steps | None = None,
     *,
     agent_choice: AgentInstructionChoice | None = None,
+    non_interactive: bool = False,
 ) -> tuple[list[Path], str | None, str | None]:
-    choice, targets = _select_agent_instruction(steps, explicit_choice=agent_choice)
+    choice, targets = _select_agent_instruction(
+        steps,
+        explicit_choice=agent_choice,
+        non_interactive=non_interactive,
+    )
     if not targets:
         if agent_choice == "auto":
             raise _auto_agent_detection_error()
@@ -2072,8 +2367,10 @@ def _scaffold_agent_files(
 def _configure_trace_source_connection(
     steps: _Steps | None,
     trace_source: EvidenceSource | None,
+    *,
+    non_interactive: bool = False,
 ) -> _InitConnectionStatus:
-    if not _is_interactive() or trace_source != "langfuse":
+    if non_interactive or not _is_interactive() or trace_source != "langfuse":
         return "ready"
     provider = str(trace_source)
     label = _TRACE_SOURCE_LABELS[provider]
@@ -2516,6 +2813,7 @@ def _write_dotenv_values(path: Path, values: dict[str, str]) -> None:
     for key, value in values.items():
         if key not in updated:
             lines.append(_dotenv_line(key, value))
+    _record_init_path(path)
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -2531,6 +2829,7 @@ def _ensure_gitignored(path: Path) -> None:
     lines = gitignore.read_text().splitlines() if gitignore.exists() else []
     if entry not in lines:
         lines.append(entry)
+        _record_init_path(gitignore)
         gitignore.write_text("\n".join(lines) + "\n")
 
 
@@ -2541,6 +2840,7 @@ def _record_pyproject_dotenv(path: Path, *, replace: bool = False) -> None:
     if existing is not None and not replace:
         return
     rendered_path = str(_path_relative_to(path, pyproject.parent))
+    _record_init_path(pyproject)
     try:
         kensa_config.update_project_config({"dotenv": rendered_path}, start=root)
     except kensa_config.KensaConfigError as exc:
@@ -2610,9 +2910,10 @@ def _select_agent_instruction(
     steps: _Steps | None = None,
     *,
     explicit_choice: AgentInstructionChoice | None = None,
+    non_interactive: bool = False,
 ) -> tuple[AgentInstructionChoice, tuple[tuple[AgentInstruction, Path], ...]]:
     choice: AgentInstructionChoice = explicit_choice or "auto"
-    if explicit_choice is None and _is_interactive():
+    if explicit_choice is None and _is_interactive() and not non_interactive:
         label = "Which coding agent?"
         default = _default_agent_instruction_choice()
         choice = cast(
@@ -2626,8 +2927,12 @@ def _select_agent_instruction(
     return choice, _agent_instruction_targets_for_choice(choice)
 
 
-def _select_trace_source(steps: _Steps | None = None) -> EvidenceSource | None:
-    if not _is_interactive():
+def _select_trace_source(
+    steps: _Steps | None = None,
+    *,
+    non_interactive: bool = False,
+) -> EvidenceSource | None:
+    if not _is_interactive() or non_interactive:
         return None
     label = "Where should Kensa get traces from?"
     return cast(
@@ -2797,6 +3102,9 @@ def _init_item(
 
 
 def _init_notice(steps: _Steps | None, text: str) -> None:
+    details = _ACTIVE_INIT_JSON_DETAILS.get()
+    if details is not None and text not in details.warnings:
+        details.warnings.append(text)
     if steps is None:
         cli_output.notice(text)
         return
@@ -2922,6 +3230,7 @@ def _connect_provider(args: Any) -> tuple[dict[str, Any], Path, _ConnectionCheck
             check = _check_connection(args, metadata)
     path = _CONNECTIONS_DIR / f"{provider}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    _record_init_path(path)
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     return metadata, path, check
 
@@ -3261,6 +3570,7 @@ def _write_if_missing(path: Path, text: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         return False
+    _record_init_path(path)
     path.write_text(text)
     return True
 
@@ -3272,11 +3582,13 @@ def _write_if_missing_or_kensa_generated(
 ) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
+        _record_init_path(path)
         path.write_text(text)
         return True
     existing = path.read_text()
     if not is_kensa_generated(existing) or existing == text:
         return False
+    _record_init_path(path)
     path.write_text(text)
     return True
 
@@ -3320,6 +3632,7 @@ def _copy_skill_template_files(source: Traversable, destination: Path) -> list[P
 def _remove_stale_skill_template_paths(source: Traversable, destination: Path) -> None:
     references = destination / "references"
     if references.exists() and not _template_tree_has_files(source / "references"):
+        _record_init_path(references)
         shutil.rmtree(references)
 
 
@@ -3333,6 +3646,7 @@ def _write_text_if_changed(path: Path, text: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_text() == text:
         return False
+    _record_init_path(path)
     path.write_text(text)
     return True
 
@@ -3441,12 +3755,16 @@ def _print_setup_handoff(
 ) -> None:
     if steps is None:
         prompt = _setup_handoff_prompt()
+        next_steps = _setup_handoff_next_steps()
+        details = _ACTIVE_INIT_JSON_DETAILS.get()
+        if details is not None:
+            details.next_steps.extend(step for step in next_steps if step not in details.next_steps)
         cli_output.CONSOLE.print()
         cli_output.CONSOLE.print("[bold]Copyable setup prompt[/bold]")
         cli_output.CONSOLE.print(cli_output.rich_escape(prompt), soft_wrap=True)
         cli_output.CONSOLE.print()
         cli_output.CONSOLE.print("[bold]Next steps[/bold]")
-        for index, step in enumerate(_setup_handoff_next_steps(), start=1):
+        for index, step in enumerate(next_steps, start=1):
             cli_output.CONSOLE.print(f"  {index}. {cli_output.rich_escape(step)}", soft_wrap=True)
         return
 

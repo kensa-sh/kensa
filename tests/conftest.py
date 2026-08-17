@@ -8,8 +8,12 @@ from typing import Any
 
 import pytest
 
-from kensa import redact
-from kensa.config import update_project_config
+for _environment_name in tuple(os.environ):
+    if _environment_name.startswith("OTEL_"):
+        os.environ.pop(_environment_name)
+
+from kensa import redact  # noqa: E402
+from kensa.config import update_project_config  # noqa: E402
 
 pytest_plugins = ("pytester",)
 
@@ -231,6 +235,13 @@ def redaction_ready(
     monkeypatch.chdir(tmp_path)
     fake_redaction.make_ready(tmp_path, monkeypatch)
     return fake_redaction
+
+
+@pytest.fixture(autouse=True)
+def _isolate_opentelemetry_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("OTEL_"):
+            monkeypatch.delenv(name)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
