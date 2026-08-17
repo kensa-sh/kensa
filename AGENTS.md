@@ -47,18 +47,20 @@ Do not lower the coverage threshold; run `uv run python -m coverage report` befo
 
 ## Commit & Pull Request Guidelines
 
-Use conventional imperative-style commits with `feat:`, `fix:`, or `chore:`. Append `!` for
-breaking changes, for example `feat!:`. Keep messages concise, for example:
+Use scoped conventional imperative-style commits: `type(scope): description`, with `feat`, `fix`,
+or `chore`. Append `!` after the scope for breaking changes, for example `feat(runner)!:`. Keep
+messages concise, for example:
 
 ```bash
-git commit -m "fix: cover trace imports"
+git commit -m "fix(tracing): cover trace imports"
 ```
 
 `git-cliff` groups the canonical changelog from conventional commit messages, so use `feat`, `fix`,
-or `chore` consistently and append `!` for breaking changes. PR labels mirror those prefixes for
-repository triage; add `breaking` when a PR changes user-facing behavior or install/API
-compatibility. PRs should include a short summary, motivation, implementation notes, and a test
-plan. Link issues when applicable.
+or `chore` consistently and append `!` for breaking changes. PR titles use the same scoped form
+(`type(scope): description`, `!` after the scope for breaking changes). PR labels mirror those
+prefixes for repository triage; add `breaking` when a PR changes user-facing behavior or
+install/API compatibility. PRs should include a short summary, motivation, implementation notes,
+and a test plan. Link issues when applicable.
 
 ## Security & Configuration Tips
 
