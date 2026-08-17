@@ -128,10 +128,11 @@ Use `kensa-inspect` to create a YAML review queue, approve ideas by changing `st
 with `kensa.instrument()` and import the JSONL.
 
 `kensa.instrument()` can also dual-export spans over standard OTLP HTTP while retaining local
-JSONL. Export is opt-in: set `KENSA_OTLP_EXPORT=1` or pass `otlp_endpoint=` explicitly. Standard
-`OTEL_EXPORTER_OTLP_*` variables supply the endpoint but never enable export on their own. Export
-failures are reported without terminating the traced program or removing its local trace. OTLP
-sends raw telemetry before import-time redaction, so use a trusted endpoint and TLS off-machine.
+JSONL. Export is opt-in: set `KENSA_OTLP_ENDPOINT` or pass `otlp_endpoint=` explicitly. Standard
+`OTEL_EXPORTER_OTLP_*` variables never enable export on their own, and your application's collector
+credentials are never forwarded to a Kensa endpoint. Export failures are reported without
+terminating the traced program or removing its local trace. OTLP sends raw telemetry before
+import-time redaction, so use a trusted endpoint and TLS off-machine.
 
 ## Core commands
 

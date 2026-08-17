@@ -32,8 +32,12 @@ GenAIOperationName = Literal["chat", "embeddings", "generate_content", "text_com
 _LOGGER = logging.getLogger(__name__)
 _MISSING_TOOL_PAYLOAD = object()
 _DEFAULT_OTLP_TIMEOUT_S = 2.0
-_OTLP_EXPORT_ENV = "KENSA_OTLP_EXPORT"
-_OTLP_EXPORT_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_OTLP_ENDPOINT_ENV = "KENSA_OTLP_ENDPOINT"
+_OTLP_HEADERS_ENV = "KENSA_OTLP_HEADERS"
+_APPLICATION_OTLP_HEADER_ENVS = (
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+)
 _REGISTERED_PROCESSORS: WeakKeyDictionary[Any, set[tuple[str, str]]] = WeakKeyDictionary()
 _REGISTERED_PROCESSORS_LOCK = Lock()
 _JSON_VALUE_ADAPTER = TypeAdapter(
@@ -164,20 +168,21 @@ def instrument(
 ) -> None:
     """Attach local JSONL and optional OTLP HTTP exporters for this process.
 
-    OTLP export is opt-in: pass ``otlp_endpoint`` or set ``KENSA_OTLP_EXPORT``.
-    Standard OpenTelemetry ``OTEL_EXPORTER_OTLP_*`` variables still supply the
-    endpoint, headers, and timeout, but never enable export on their own, so
-    this function stays a no-op in processes that only configure OpenTelemetry
-    for their own exporter. When OTLP is enabled without an explicit local
-    directory, JSONL spans are retained under ``.kensa/traces``. The default
-    OTLP request timeout is two seconds unless a standard OpenTelemetry timeout
-    environment variable or ``otlp_timeout_s`` supplies another value; the
-    Python OTLP exporter interprets each timeout in seconds.
+    OTLP export is enabled only by ``otlp_endpoint`` or ``KENSA_OTLP_ENDPOINT``,
+    so this function stays a no-op in processes that merely configure standard
+    OpenTelemetry variables for their own exporter. Credentials come from
+    ``otlp_headers`` or ``KENSA_OTLP_HEADERS``; application
+    ``OTEL_EXPORTER_OTLP_HEADERS`` values are never forwarded to a Kensa
+    endpoint. When OTLP is enabled without an explicit local directory, JSONL
+    spans are retained under ``.kensa/traces``. The default OTLP request timeout
+    is two seconds unless a standard OpenTelemetry timeout environment variable
+    or ``otlp_timeout_s`` supplies another value; the Python OTLP exporter
+    interprets each timeout in seconds.
     """
 
     configured = trace_dir if trace_dir is not None else os.environ.get("KENSA_TRACE_DIR")
-    otlp_enabled = _otlp_http_enabled(otlp_endpoint)
-    if not configured and not otlp_enabled:
+    resolved_otlp_endpoint = _resolved_otlp_endpoint(otlp_endpoint)
+    if not configured and resolved_otlp_endpoint is None:
         return
     configured = configured or Path(".kensa/traces")
     configured_run_id = run_id or os.environ.get("KENSA_TRACE_RUN_ID")
@@ -198,11 +203,12 @@ def instrument(
             ),
         )
     ]
-    if otlp_enabled:
+    if resolved_otlp_endpoint is not None:
         resolved_otlp_timeout = _resolved_otlp_timeout(otlp_timeout_s)
+        resolved_otlp_headers = _resolved_otlp_headers(otlp_headers)
         otlp_key = _otlp_registration_key(
-            endpoint=otlp_endpoint,
-            headers=otlp_headers,
+            endpoint=resolved_otlp_endpoint,
+            headers=resolved_otlp_headers,
             timeout_s=resolved_otlp_timeout,
         )
         processor_factories.append(
@@ -210,8 +216,8 @@ def instrument(
                 "otlp-http",
                 otlp_key,
                 lambda: _build_otlp_http_processor(
-                    endpoint=otlp_endpoint,
-                    headers=otlp_headers,
+                    endpoint=resolved_otlp_endpoint,
+                    headers=resolved_otlp_headers,
                     timeout_s=resolved_otlp_timeout,
                 ),
             )
@@ -317,11 +323,12 @@ def _build_otlp_http_processor(
 ) -> SpanProcessor | None:
     exporter: SpanExporter | None = None
     try:
-        exporter = _otlp_span_exporter_class()(
-            endpoint=endpoint,
-            headers=dict(headers) if headers is not None else None,
-            timeout=timeout_s,
-        )
+        with _application_otlp_headers_hidden():
+            exporter = _otlp_span_exporter_class()(
+                endpoint=endpoint,
+                headers=dict(headers) if headers else None,
+                timeout=timeout_s,
+            )
         return BatchSpanProcessor(_ReportingSpanExporter(exporter))
     except Exception:
         if exporter is not None:
@@ -337,10 +344,31 @@ def _otlp_span_exporter_class() -> Callable[..., SpanExporter]:
     return OTLPSpanExporter
 
 
-def _otlp_http_enabled(endpoint: str | None) -> bool:
-    if endpoint:
-        return True
-    return os.environ.get(_OTLP_EXPORT_ENV, "").strip().lower() in _OTLP_EXPORT_TRUTHY
+def _resolved_otlp_endpoint(endpoint: str | None) -> str | None:
+    return endpoint or os.environ.get(_OTLP_ENDPOINT_ENV, "").strip() or None
+
+
+def _resolved_otlp_headers(headers: Mapping[str, str] | None) -> Mapping[str, str] | None:
+    if headers is not None:
+        return headers
+    configured = os.environ.get(_OTLP_HEADERS_ENV, "").strip()
+    if not configured:
+        return None
+    from opentelemetry.util.re import parse_env_headers
+
+    return parse_env_headers(configured, liberal=True)
+
+
+@contextmanager
+def _application_otlp_headers_hidden() -> Iterator[None]:
+    """Keep application collector credentials out of a Kensa-owned endpoint."""
+    saved = {
+        name: os.environ.pop(name) for name in _APPLICATION_OTLP_HEADER_ENVS if name in os.environ
+    }
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def _otlp_registration_key(

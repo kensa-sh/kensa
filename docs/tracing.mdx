@@ -138,17 +138,24 @@ instrument(
 )
 ```
 
-To configure it from the environment instead, opt in with `KENSA_OTLP_EXPORT` and let the standard
-OpenTelemetry variables supply the endpoint:
+To configure it from the environment instead, set a Kensa-owned endpoint:
 
 ```bash
-KENSA_OTLP_EXPORT=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python my_agent.py
+KENSA_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
+KENSA_OTLP_HEADERS=authorization=Bearer\ local-token \
+python my_agent.py
 ```
 
-`KENSA_OTLP_EXPORT` accepts `1`, `true`, `yes`, or `on`. The standard `OTEL_EXPORTER_OTLP_*`
-variables never enable export on their own, so `instrument()` stays a no-op in a process that only
-configures OpenTelemetry for its own exporter. Opt in only where you want Kensa to export in
-addition to whatever your application already sends, since both exporters ship the same spans.
+The standard `OTEL_EXPORTER_OTLP_*` variables never enable export on their own, so `instrument()`
+stays a no-op in a process that only configures OpenTelemetry for its own exporter. Set the Kensa
+endpoint only where you want Kensa to export in addition to whatever your application already
+sends, since both exporters ship the same spans.
+
+Credentials come from `otlp_headers=` or `KENSA_OTLP_HEADERS` only. Kensa never forwards your
+application's `OTEL_EXPORTER_OTLP_HEADERS` to a Kensa endpoint, so a collector API key set for your
+own exporter is not sent to a different host. Transport settings that carry no credentials
+(`OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, certificate paths) are still read
+from the standard variables.
 
 When no local directory is supplied, enabling OTLP writes the local copy to
 `.kensa/traces/spans.jsonl`. An unreachable endpoint is logged as an export failure; it does not

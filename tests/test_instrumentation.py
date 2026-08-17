@@ -4,6 +4,7 @@ import gc
 import hashlib
 import json
 import math
+import os
 import socket
 import subprocess
 import sys
@@ -125,7 +126,7 @@ with record_span("local-survives"):
     assert "OTLP HTTP span export failed" in completed.stderr
 
 
-def test_otlp_opt_in_environment_enables_export_and_default_local_capture(
+def test_otlp_endpoint_environment_enables_export_and_default_local_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,7 +134,7 @@ def test_otlp_opt_in_environment_enables_export_and_default_local_capture(
 
     class Exporter:
         def __init__(self, **kwargs: Any) -> None:
-            assert kwargs["endpoint"] is None
+            assert kwargs["endpoint"] == "http://kensa-collector.example/v1/traces"
             assert kwargs["timeout"] == tracing._DEFAULT_OTLP_TIMEOUT_S
 
         def export(self, spans: Any) -> Any:
@@ -148,7 +149,7 @@ def test_otlp_opt_in_environment_enables_export_and_default_local_capture(
             return True
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KENSA_OTLP_EXPORT", "1")
+    monkeypatch.setenv("KENSA_OTLP_ENDPOINT", "http://kensa-collector.example/v1/traces")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.example")
     monkeypatch.setattr(tracing, "_otlp_span_exporter_class", lambda: Exporter)
 
@@ -162,22 +163,25 @@ def test_otlp_opt_in_environment_enables_export_and_default_local_capture(
 
 
 @pytest.mark.parametrize(
-    ("opt_in", "explicit_endpoint", "expected_processor_count"),
+    ("endpoint_env", "explicit_endpoint", "expected_endpoint"),
     [
-        (None, None, 1),
-        ("0", None, 1),
-        ("false", None, 1),
-        ("1", None, 2),
-        ("Yes", None, 2),
-        (None, "http://explicit.example/v1/traces", 2),
+        (None, None, None),
+        ("   ", None, None),
+        ("http://from-env.example/v1/traces", None, "http://from-env.example/v1/traces"),
+        (None, "http://explicit.example/v1/traces", "http://explicit.example/v1/traces"),
+        (
+            "http://from-env.example/v1/traces",
+            "http://explicit.example/v1/traces",
+            "http://explicit.example/v1/traces",
+        ),
     ],
 )
-def test_otlp_export_requires_kensa_opt_in_or_explicit_endpoint(
+def test_otlp_export_requires_a_kensa_owned_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    opt_in: str | None,
+    endpoint_env: str | None,
     explicit_endpoint: str | None,
-    expected_processor_count: int,
+    expected_endpoint: str | None,
 ) -> None:
     class Provider:
         def __init__(self) -> None:
@@ -188,20 +192,21 @@ def test_otlp_export_requires_kensa_opt_in_or_explicit_endpoint(
 
     provider = Provider()
     remote_processor = object()
+    seen: list[Any] = []
     monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: provider)
     monkeypatch.setattr(
         tracing,
         "_build_otlp_http_processor",
-        lambda **kwargs: cast(Any, remote_processor),
+        lambda **kwargs: (seen.append(kwargs["endpoint"]), cast(Any, remote_processor))[1],
     )
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://injected.example")
-    if opt_in is not None:
-        monkeypatch.setenv("KENSA_OTLP_EXPORT", opt_in)
+    if endpoint_env is not None:
+        monkeypatch.setenv("KENSA_OTLP_ENDPOINT", endpoint_env)
 
     kensa.instrument(tmp_path, otlp_endpoint=explicit_endpoint)
 
-    assert len(provider.processors) == expected_processor_count
-    assert (remote_processor in provider.processors) is (expected_processor_count == 2)
+    assert len(provider.processors) == (2 if expected_endpoint else 1)
+    assert seen == ([expected_endpoint] if expected_endpoint else [])
 
 
 def test_standard_otel_environment_alone_does_not_instrument(
@@ -228,6 +233,68 @@ def test_standard_otel_environment_alone_does_not_instrument(
 
     assert provider.processors == []
     assert not (tmp_path / ".kensa").exists()
+
+
+@pytest.mark.parametrize(
+    ("headers_env", "explicit_headers", "expected_headers"),
+    [
+        (None, None, None),
+        ("   ", None, None),
+        ("authorization=Bearer kensa-token", None, {"authorization": "Bearer kensa-token"}),
+        ("authorization=Bearer kensa-token", {"x-api-key": "explicit"}, {"x-api-key": "explicit"}),
+    ],
+)
+def test_otlp_headers_come_only_from_kensa_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    headers_env: str | None,
+    explicit_headers: dict[str, str] | None,
+    expected_headers: dict[str, str] | None,
+) -> None:
+    seen: list[Any] = []
+
+    class Exporter:
+        def __init__(self, **kwargs: Any) -> None:
+            seen.append(
+                {
+                    "headers": kwargs["headers"],
+                    "application_headers_visible": os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"),
+                }
+            )
+
+        def export(self, spans: Any) -> Any:
+            del spans
+            return tracing.SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            del timeout_millis
+            return True
+
+    class Provider:
+        def __init__(self) -> None:
+            self.processors: list[Any] = []
+
+        def add_span_processor(self, processor: Any) -> None:
+            self.processors.append(processor)
+
+    monkeypatch.setattr(tracing.trace, "get_tracer_provider", lambda: Provider())
+    monkeypatch.setattr(tracing, "_otlp_span_exporter_class", lambda: Exporter)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-honeycomb-team=application-secret")
+    if headers_env is not None:
+        monkeypatch.setenv("KENSA_OTLP_HEADERS", headers_env)
+
+    kensa.instrument(
+        tmp_path,
+        otlp_endpoint="http://kensa-collector.example/v1/traces",
+        otlp_headers=explicit_headers,
+    )
+
+    assert seen[0]["headers"] == expected_headers
+    assert seen[0]["application_headers_visible"] is None
+    assert os.environ["OTEL_EXPORTER_OTLP_HEADERS"] == "x-honeycomb-team=application-secret"
 
 
 def test_unavailable_local_capture_does_not_disable_otlp(
