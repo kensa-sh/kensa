@@ -29,10 +29,9 @@ inside the fixture.
 Before manual tracing, run the bundled read-only detector from the target repository:
 
 ```bash
-python <agent-root>/skills/kensa-setup/scripts/detect_frameworks.py --root .
+python scripts/detect_frameworks.py --root .
 ```
 
-Replace `<agent-root>` with the active agent directory, such as `.agents`, `.claude`, or `.cursor`.
 The identity data used by the detector is in `assets/frameworks.json`.
 
 Every detector match is an unconfirmed candidate. The detector provides import evidence only; it
