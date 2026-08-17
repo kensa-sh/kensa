@@ -1,0 +1,338 @@
+{
+  "entries": [
+    {
+      "id": "ag2",
+      "kind": "framework",
+      "distributions": ["ag2"],
+      "import_roots": ["ag2", "autogen"],
+      "documentation": "https://docs.ag2.ai/"
+    },
+    {
+      "id": "agency-swarm",
+      "kind": "framework",
+      "distributions": ["agency-swarm"],
+      "import_roots": ["agency_swarm"],
+      "documentation": "https://agency-swarm.ai/"
+    },
+    {
+      "id": "agent-s",
+      "kind": "framework",
+      "distributions": ["gui-agents"],
+      "import_roots": ["gui_agents"],
+      "documentation": "https://github.com/simular-ai/Agent-S#readme"
+    },
+    {
+      "id": "agentscope",
+      "kind": "framework",
+      "distributions": ["agentscope"],
+      "import_roots": ["agentscope"],
+      "documentation": "https://doc.agentscope.io/"
+    },
+    {
+      "id": "agno",
+      "kind": "framework",
+      "distributions": ["agno", "phidata"],
+      "import_roots": ["agno", "phi"],
+      "documentation": "https://docs.agno.com/"
+    },
+    {
+      "id": "amazon-bedrock",
+      "kind": "client",
+      "distributions": ["aioboto3", "bedrock-agentcore", "boto3"],
+      "import_roots": ["aioboto3", "bedrock_agentcore", "boto3"],
+      "documentation": "https://docs.aws.amazon.com/bedrock/"
+    },
+    {
+      "id": "anthropic",
+      "kind": "client",
+      "distributions": ["anthropic"],
+      "import_roots": ["anthropic"],
+      "documentation": "https://docs.claude.com/en/api/overview"
+    },
+    {
+      "id": "atomic-agents",
+      "kind": "framework",
+      "distributions": ["atomic-agents"],
+      "import_roots": ["atomic_agents"],
+      "documentation": "https://brainblend-ai.github.io/atomic-agents/"
+    },
+    {
+      "id": "autogen",
+      "kind": "framework",
+      "distributions": ["autogen-agentchat", "autogen-core", "autogen-ext", "pyautogen"],
+      "import_roots": ["autogen", "autogen_agentchat", "autogen_core", "autogen_ext"],
+      "documentation": "https://microsoft.github.io/autogen/stable/"
+    },
+    {
+      "id": "beeai-framework",
+      "kind": "framework",
+      "distributions": ["beeai-framework"],
+      "import_roots": ["beeai_framework"],
+      "documentation": "https://framework.beeai.dev/"
+    },
+    {
+      "id": "browser-use",
+      "kind": "framework",
+      "distributions": ["browser-use"],
+      "import_roots": ["browser_use"],
+      "documentation": "https://docs.browser-use.com/"
+    },
+    {
+      "id": "camel",
+      "kind": "framework",
+      "distributions": ["camel-ai"],
+      "import_roots": ["camel"],
+      "documentation": "https://docs.camel-ai.org/"
+    },
+    {
+      "id": "chatdev",
+      "kind": "framework",
+      "distributions": [],
+      "import_roots": ["chatdev"],
+      "documentation": "https://github.com/OpenBMB/ChatDev#readme"
+    },
+    {
+      "id": "claude-agent-sdk",
+      "kind": "framework",
+      "distributions": ["claude-agent-sdk", "claude-code-sdk"],
+      "import_roots": ["claude_agent_sdk", "claude_code_sdk"],
+      "documentation": "https://docs.claude.com/en/api/agent-sdk/python"
+    },
+    {
+      "id": "cohere",
+      "kind": "client",
+      "distributions": ["cohere"],
+      "import_roots": ["cohere"],
+      "documentation": "https://docs.cohere.com/"
+    },
+    {
+      "id": "crewai",
+      "kind": "framework",
+      "distributions": ["crewai", "crewai-tools"],
+      "import_roots": ["crewai", "crewai_tools"],
+      "documentation": "https://docs.crewai.com/"
+    },
+    {
+      "id": "deep-agents",
+      "kind": "framework",
+      "distributions": ["deepagents"],
+      "import_roots": ["deepagents"],
+      "documentation": "https://docs.langchain.com/labs/deep-agents/overview"
+    },
+    {
+      "id": "dspy",
+      "kind": "framework",
+      "distributions": ["dspy", "dspy-ai"],
+      "import_roots": ["dspy"],
+      "documentation": "https://dspy.ai/"
+    },
+    {
+      "id": "google-adk",
+      "kind": "framework",
+      "distributions": ["google-adk"],
+      "import_roots": ["google.adk"],
+      "documentation": "https://google.github.io/adk-docs/"
+    },
+    {
+      "id": "google-genai",
+      "kind": "client",
+      "distributions": ["google-genai", "google-generativeai"],
+      "import_roots": ["google.genai", "google.generativeai"],
+      "documentation": "https://googleapis.github.io/python-genai/"
+    },
+    {
+      "id": "haystack",
+      "kind": "framework",
+      "distributions": ["farm-haystack", "haystack-ai"],
+      "import_roots": ["haystack"],
+      "documentation": "https://docs.haystack.deepset.ai/docs/intro"
+    },
+    {
+      "id": "langchain",
+      "kind": "framework",
+      "distributions": [
+        "langchain",
+        "langchain-classic",
+        "langchain-community",
+        "langchain-core"
+      ],
+      "import_roots": ["langchain", "langchain_community", "langchain_core"],
+      "documentation": "https://docs.langchain.com/oss/python/langchain/overview"
+    },
+    {
+      "id": "langgraph",
+      "kind": "framework",
+      "distributions": ["langgraph"],
+      "import_roots": ["langgraph"],
+      "documentation": "https://docs.langchain.com/oss/python/langgraph/overview"
+    },
+    {
+      "id": "langroid",
+      "kind": "framework",
+      "distributions": ["langroid"],
+      "import_roots": ["langroid"],
+      "documentation": "https://langroid.github.io/langroid/"
+    },
+    {
+      "id": "letta",
+      "kind": "framework",
+      "distributions": ["letta", "letta-client", "pymemgpt"],
+      "import_roots": ["letta", "letta_client", "memgpt"],
+      "documentation": "https://docs.letta.com/"
+    },
+    {
+      "id": "litellm",
+      "kind": "client",
+      "distributions": ["litellm"],
+      "import_roots": ["litellm"],
+      "documentation": "https://docs.litellm.ai/"
+    },
+    {
+      "id": "livekit-agents",
+      "kind": "framework",
+      "distributions": ["livekit-agents"],
+      "import_roots": ["livekit.agents"],
+      "documentation": "https://docs.livekit.io/agents/"
+    },
+    {
+      "id": "llamaindex",
+      "kind": "framework",
+      "distributions": ["gpt-index", "llama-index", "llama-index-core"],
+      "import_roots": ["llama_index"],
+      "documentation": "https://developers.llamaindex.ai/python/framework/"
+    },
+    {
+      "id": "marvin",
+      "kind": "framework",
+      "distributions": ["marvin"],
+      "import_roots": ["marvin"],
+      "documentation": "https://askmarvin.ai/"
+    },
+    {
+      "id": "mcp-agent",
+      "kind": "framework",
+      "distributions": ["mcp-agent"],
+      "import_roots": ["mcp_agent"],
+      "documentation": "https://docs.mcp-agent.com/"
+    },
+    {
+      "id": "metagpt",
+      "kind": "framework",
+      "distributions": ["metagpt"],
+      "import_roots": ["metagpt"],
+      "documentation": "https://docs.deepwisdom.ai/main/en/"
+    },
+    {
+      "id": "microsoft-agent-framework",
+      "kind": "framework",
+      "distributions": ["agent-framework", "agent-framework-core"],
+      "import_roots": ["agent_framework"],
+      "documentation": "https://learn.microsoft.com/en-us/agent-framework/"
+    },
+    {
+      "id": "mirascope",
+      "kind": "framework",
+      "distributions": ["mirascope"],
+      "import_roots": ["mirascope"],
+      "documentation": "https://mirascope.com/docs/mirascope"
+    },
+    {
+      "id": "mistral",
+      "kind": "client",
+      "distributions": ["mistralai"],
+      "import_roots": ["mistralai"],
+      "documentation": "https://docs.mistral.ai/"
+    },
+    {
+      "id": "nvidia-nemo-agent-toolkit",
+      "kind": "framework",
+      "distributions": ["agentiq", "aiqtoolkit", "nvidia-nat", "nvidia-nat-core"],
+      "import_roots": ["aiq", "nat"],
+      "documentation": "https://docs.nvidia.com/nemo/agent-toolkit/latest/index.html"
+    },
+    {
+      "id": "openai",
+      "kind": "client",
+      "distributions": ["openai"],
+      "import_roots": ["openai"],
+      "documentation": "https://platform.openai.com/docs/api-reference"
+    },
+    {
+      "id": "openai-agents-sdk",
+      "kind": "framework",
+      "distributions": ["openai-agents"],
+      "import_roots": ["agents"],
+      "documentation": "https://openai.github.io/openai-agents-python/"
+    },
+    {
+      "id": "openai-swarm",
+      "kind": "framework",
+      "distributions": [],
+      "import_roots": ["swarm"],
+      "documentation": "https://github.com/openai/swarm#readme"
+    },
+    {
+      "id": "parlant",
+      "kind": "framework",
+      "distributions": ["parlant"],
+      "import_roots": ["parlant"],
+      "documentation": "https://parlant.io/docs/quickstart/introduction"
+    },
+    {
+      "id": "pipecat",
+      "kind": "framework",
+      "distributions": ["pipecat-ai"],
+      "import_roots": ["pipecat"],
+      "documentation": "https://docs.pipecat.ai/"
+    },
+    {
+      "id": "pydantic-ai",
+      "kind": "framework",
+      "distributions": ["pydantic-ai", "pydantic-ai-slim"],
+      "import_roots": ["pydantic_ai"],
+      "documentation": "https://ai.pydantic.dev/"
+    },
+    {
+      "id": "rasa",
+      "kind": "framework",
+      "distributions": ["rasa", "rasa-pro"],
+      "import_roots": ["rasa"],
+      "documentation": "https://rasa.com/docs/"
+    },
+    {
+      "id": "semantic-kernel",
+      "kind": "framework",
+      "distributions": ["semantic-kernel"],
+      "import_roots": ["semantic_kernel"],
+      "documentation": "https://learn.microsoft.com/en-us/semantic-kernel/"
+    },
+    {
+      "id": "smolagents",
+      "kind": "framework",
+      "distributions": ["smolagents"],
+      "import_roots": ["smolagents"],
+      "documentation": "https://huggingface.co/docs/smolagents/index"
+    },
+    {
+      "id": "strands-agents",
+      "kind": "framework",
+      "distributions": ["strands-agents", "strands-agents-tools"],
+      "import_roots": ["strands", "strands_tools"],
+      "documentation": "https://strandsagents.com/"
+    },
+    {
+      "id": "swarms",
+      "kind": "framework",
+      "distributions": ["swarms"],
+      "import_roots": ["swarms"],
+      "documentation": "https://docs.swarms.world/"
+    },
+    {
+      "id": "taskweaver",
+      "kind": "framework",
+      "distributions": [],
+      "import_roots": ["taskweaver"],
+      "documentation": "https://microsoft.github.io/TaskWeaver/"
+    }
+  ]
+}

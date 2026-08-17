@@ -24,6 +24,30 @@ Kensa owns execution after fixture resolution: simulated turns, trial isolation,
 tracing, judging, artifacts, reports, and readiness. Never reconstruct missing production behavior
 inside the fixture.
 
+## Framework discovery
+
+Before manual tracing, run the bundled read-only detector from the target repository:
+
+```bash
+python <agent-root>/skills/kensa-setup/scripts/detect_frameworks.py --root .
+```
+
+Replace `<agent-root>` with the active agent directory, such as `.agents`, `.claude`, or `.cursor`.
+The identity data used by the detector is in `assets/frameworks.json`.
+
+Every detector match is an unconfirmed candidate. The detector provides import evidence only; it
+never selects a production target or establishes relevance, confidence, safety, or readiness.
+Multiple candidates may be emitted for one import and must not be ranked or resolved by the
+detector output.
+
+Confirm candidates against actual application control flow before any version or documentation
+lookup. Resolve versions only for confirmed candidates, using installed package metadata or the
+repository's dependency and lock data. Read version-matched official documentation only for
+confirmed candidates, starting from that candidate's registry URL.
+
+If no candidate is confirmed, or discovery is empty or incomplete, continue the generic forward
+and backward source tracing in the workflow below. Discovery never blocks that path.
+
 ## Workflow
 
 1. Inspect read-only, in order: documented run paths, application entrypoints, tests and factories,
