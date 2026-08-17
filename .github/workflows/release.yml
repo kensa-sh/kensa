@@ -34,9 +34,14 @@ jobs:
         id: release
         env:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          source scripts/release.sh
+          assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"
+
           version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
           lock_version="$(grep -A1 '^name = "kensa"$' uv.lock | grep -m1 '^version = ' | sed -E 's/^version = "(.*)"$/\1/')"
           tag="v$version"

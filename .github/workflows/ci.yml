@@ -27,6 +27,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Verify release notes match pull request base
+        if: >-
+          github.event_name == 'pull_request' &&
+          startsWith(github.event.pull_request.head.ref, 'chore/release-v') &&
+          startsWith(github.event.pull_request.title, 'chore: release ')
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          source scripts/release.sh
+          assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"
       - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.11
       - run: uv sync --group dev --python 3.11

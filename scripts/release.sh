@@ -169,9 +169,21 @@ generate_release_notes() {
     --jq .body
 }
 
+assert_release_notes_base() {
+  local pr_body="$1"
+  local current_base="$2"
+  local generated_base
+
+  generated_base="$(printf '%s\n' "$pr_body" | sed -nE 's/^<!-- release-notes-base: ([0-9a-f]{40}) -->$/\1/p')"
+  if [ "$generated_base" != "$current_base" ]; then
+    die "release notes must be regenerated from the current PR base ($current_base)"
+  fi
+}
+
 release_pr_body() {
   local version="$1"
   local release_notes="$2"
+  local target_commitish="$3"
   cat <<EOF
 Release PR for v$version.
 
@@ -183,6 +195,8 @@ ${release_notes%$'\n'}
 
 Merge this PR manually after CI passes. Merging publishes \`kensa==$version\` to PyPI and creates
 the GitHub Release for \`v$version\`.
+
+<!-- release-notes-base: $target_commitish -->
 EOF
 }
 
@@ -249,7 +263,7 @@ prepare_release_pr() {
   git -C "$ROOT" add pyproject.toml uv.lock CHANGELOG.md docs/changelog.mdx
   git -C "$ROOT" commit -m "$title"
   git -C "$ROOT" push -u origin "$branch"
-  release_pr_body "$version" "$release_notes" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
+  release_pr_body "$version" "$release_notes" "$target_commitish" | gh pr create --base main --head "$branch" --title "$title" --body-file - --label ignore-for-release
 
   echo "opened release PR for $tag"
   echo "review the changelog, wait for CI, then merge manually to publish"
