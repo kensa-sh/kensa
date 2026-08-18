@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.22.0
+
+The `kensa-setup` skill can now discover which agent frameworks a repository imports before manual tracing begins.
+
+- `detect_frameworks.py --root .` scans a repository read-only for imports of 47 known agent frameworks and returns each match as an unconfirmed candidate alongside that framework's documentation URL.
+- Detector output is import evidence only: it never ranks candidates, selects a production target, or establishes relevance, confidence, or readiness, and an empty or incomplete result never blocks the existing source-tracing workflow.
+- Version and documentation lookups run only after a candidate is confirmed against actual application control flow, resolved from installed package metadata or the repository's dependency and lock data.
+
+[View the 0.22.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.22.0).
+
 ## 0.21.0
 
 Traces can now dual-export to any OTLP HTTP collector, and setup, inspect, and doctor output carry versioned contracts for other tooling to consume.

@@ -4,6 +4,18 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.22.0
+### Features
+* feat: framework-discovery ([4204eb9](https://github.com/kensa-sh/kensa/commit/4204eb9e499926d9c8fc82485615606f285cb602))
+### Bug Fixes
+* fix(kensa-setup): invoke detector script with skill-root-relative path ([8f273f3](https://github.com/kensa-sh/kensa/commit/8f273f39cc06938cce54b3a05ae91d898b4afc44))
+* fix: update test assertion for relative detector script path ([30f0a9d](https://github.com/kensa-sh/kensa/commit/30f0a9dd5b988bfe07abf1e6e799be5d139fe1f6))
+### Chores
+* chore(agents): require scoped conventional commits ([c571d23](https://github.com/kensa-sh/kensa/commit/c571d23c4267dcd3e6657581a82fbd0647db14f2))
+* chore(docs): remove inline PR links from changelog ([df96569](https://github.com/kensa-sh/kensa/commit/df965697cef5f617be2786ce68e7acd258530c86))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.21.0...v0.22.0
+
 ## 0.21.0
 ### Features
 * feat: add interoperable tooling contracts ([be943de](https://github.com/kensa-sh/kensa/commit/be943de7e0ff9436f6fe37ef489d4c51b70a3dc1))
