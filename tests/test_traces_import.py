@@ -588,7 +588,12 @@ def test_import_redacts_values_with_stable_instance_aliases(
         limit=1,
         max_payload_bytes=source.stat().st_size,
     )
-    assert _read_jsonl(rerun_out) == [row]
+    rerun_row = _read_jsonl(rerun_out)[0]
+    # Import timestamps are second-granularity wall clock and differ across runs.
+    for trace in (row, rerun_row):
+        trace["source"].pop("import_run_id")
+        trace["source"].pop("imported_at")
+    assert rerun_row == row
     # The value-to-alias map is never persisted anywhere in the artifact or manifest.
     assert result.manifest_path is not None
     persisted = out.read_text() + result.manifest_path.read_text()
