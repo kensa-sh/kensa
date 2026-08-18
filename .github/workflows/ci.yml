@@ -52,18 +52,6 @@ jobs:
           startsWith(github.event.pull_request.title, 'chore: release ')
         run: |
           version="$(uv version --short)"
-
-          # One-release exception for 0.22.0. The framework-discovery commits are siblings of the
-          # v0.21.0 tag commit rather than descendants, because the feature branch merged main into
-          # itself before merging back. Topological order is undefined between siblings, so git-cliff
-          # falls back to commit time and files those commits under the already-released 0.21.0.
-          # CHANGELOG.md is corrected by hand here and cannot match generated output. Delete this
-          # branch once 0.22.0 ships; later releases verify normally.
-          if [ "$version" = "0.22.0" ]; then
-            echo "::warning::skipping changelog verification for 0.22.0; CHANGELOG.md is corrected by hand"
-            exit 0
-          fi
-
           uv run git-cliff \
             --config cliff.toml \
             --repository . \
