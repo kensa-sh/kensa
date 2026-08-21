@@ -1040,7 +1040,7 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
             content=json.dumps(payload),
             provider=provider,
             model=model,
-            metadata=metadata or {},
+            metadata={**(metadata or {}), "attempt_count": 2},
             parsed=payload,
         )
 
@@ -1057,6 +1057,7 @@ def test_judge_uses_builtin_llm_provider(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.provider == "openai"
     assert result.model == "gpt-5.4-mini"
     assert result.evidence == ["safe response"]
+    assert result.metadata == {"task": "judge", "attempt_count": 2}
     assert calls[0]["model"] == "gpt-5.4-mini"
     assert calls[0]["provider"] == "openai"
     assert calls[0]["timeout_s"] == 30

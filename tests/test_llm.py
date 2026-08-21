@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from any_llm.constants import LLMProvider as AnyLLMProvider
-from any_llm.exceptions import ProviderError
+from any_llm.exceptions import InvalidRequestError, ProviderError, RateLimitError
 from pydantic import BaseModel
 
 from kensa import KensaTimeoutError
@@ -240,6 +240,161 @@ def test_complete_passes_provider_deadline_without_retries(
 
     assert result.content == "ok"
     assert calls[0]["client_args"] == {"timeout": 12.5, "max_retries": 0}
+
+
+def test_complete_retries_rate_limit_with_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    sleeps: list[float] = []
+    monotonic = iter([100.0, 100.1, 100.35])
+
+    def flaky_completion(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RateLimitError("rate limited", provider_name="openai")
+        return _chat_response()
+
+    monkeypatch.setattr("kensa.llm._completion", flaky_completion)
+    monkeypatch.setattr("kensa.llm.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("kensa.llm.sleep", sleeps.append)
+
+    result = complete(
+        [{"role": "user", "content": "hello"}],
+        metadata={"task": "judge", "attempt_count": 99},
+        timeout_s=10,
+    )
+
+    assert result.content == "ok"
+    assert result.metadata == {"task": "judge", "attempt_count": 2}
+    assert sleeps == [0.25]
+    assert calls[0]["client_args"] == {"timeout": 10, "max_retries": 0}
+    assert calls[1]["client_args"]["max_retries"] == 0
+    assert calls[1]["client_args"]["timeout"] == pytest.approx(9.65)
+
+
+@pytest.mark.asyncio
+async def test_acomplete_retries_server_error_with_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ServerError(Exception):
+        status_code = 503
+
+    calls: list[dict[str, Any]] = []
+    sleeps: list[float] = []
+    monotonic = iter([200.0, 200.0, 200.25])
+
+    async def flaky_completion(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ServerError("unavailable")
+        return _chat_response()
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("kensa.llm._acompletion", flaky_completion)
+    monkeypatch.setattr("kensa.llm.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("kensa.llm.asyncio.sleep", fake_sleep)
+
+    result = await acomplete(
+        [{"role": "user", "content": "hello"}],
+        timeout_s=5,
+    )
+
+    assert result.metadata == {"attempt_count": 2}
+    assert sleeps == [0.25]
+    assert calls[0]["client_args"] == {"timeout": 5, "max_retries": 0}
+    assert calls[1]["client_args"]["max_retries"] == 0
+    assert calls[1]["client_args"]["timeout"] == pytest.approx(4.75)
+
+
+@pytest.mark.parametrize(
+    ("error", "times", "timeout_s", "expected_calls", "expected_sleeps"),
+    [
+        (
+            type("ClientError", (Exception,), {"status_code": 400})("bad request"),
+            [0.0],
+            10,
+            1,
+            [],
+        ),
+        (RateLimitError("rate limited"), [0.0, 0.9], 1, 1, []),
+        (RateLimitError("rate limited"), [0.0, 0.0, 1.1], 1, 1, [0.25]),
+        (
+            RateLimitError("rate limited"),
+            [0.0, 0.0, 0.25, 0.25, 0.75],
+            10,
+            3,
+            [0.25, 0.5],
+        ),
+    ],
+)
+def test_complete_stops_when_retry_policy_denies_next_attempt(
+    error: Exception,
+    times: list[float],
+    timeout_s: float,
+    expected_calls: int,
+    expected_sleeps: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+    monotonic = iter(times)
+
+    def failing_completion(**kwargs: Any) -> Any:
+        nonlocal calls
+        del kwargs
+        calls += 1
+        raise error
+
+    monkeypatch.setattr("kensa.llm._completion", failing_completion)
+    monkeypatch.setattr("kensa.llm.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("kensa.llm.sleep", sleeps.append)
+
+    with pytest.raises(type(error), match=str(error)):
+        complete([{"role": "user", "content": "hello"}], timeout_s=timeout_s)
+
+    assert calls == expected_calls
+    assert sleeps == expected_sleeps
+
+
+def test_complete_does_not_retry_structured_output_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def malformed_completion(**kwargs: Any) -> Any:
+        nonlocal calls
+        del kwargs
+        calls += 1
+        return _chat_response(content='{"answer":"ok"}', parsed=None)
+
+    monkeypatch.setattr("kensa.llm._completion", malformed_completion)
+
+    with pytest.raises(LLMProviderError, match="parsed structured output"):
+        complete(
+            [{"role": "user", "content": "hello"}],
+            response_format=StructuredAnswer,
+            timeout_s=10,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ProviderError("provider failed"), True),
+        (type("APIConnectionError", (Exception,), {"__module__": "openai"})("down"), True),
+        (InvalidRequestError("invalid"), False),
+        (KensaTimeoutError("timed out"), False),
+    ],
+)
+def test_retryable_error_classification(error: Exception, expected: bool) -> None:
+    from kensa.llm import _is_retryable_error
+
+    assert _is_retryable_error(error) is expected
 
 
 def test_complete_rejects_json_object_response_format(

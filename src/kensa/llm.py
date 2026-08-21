@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
+from time import monotonic, sleep
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -12,6 +14,15 @@ from kensa.errors import KensaTimeoutError
 from kensa.models import LLMConfig, LLMModel, LLMProvider
 
 DEFAULT_LLM_MODEL = LLMModel.GPT_5_4_MINI.value
+_MAX_LLM_ATTEMPTS = 3
+_LLM_RETRY_BASE_DELAY_S = 0.25
+_RETRYABLE_ANY_LLM_ERRORS = frozenset(
+    {"GatewayTimeoutError", "ProviderError", "RateLimitError", "UpstreamProviderError"}
+)
+_RETRYABLE_CONNECTION_ERRORS = frozenset(
+    {"APIConnectionError", "ConnectError", "ConnectionError", "RemoteProtocolError"}
+)
+_PROVIDER_MODULES = frozenset({"anthropic", "httpcore", "httpx", "openai"})
 
 LLMModelInput = LLMModel | str | None
 LLMProviderInput = LLMProvider | str | None
@@ -72,8 +83,13 @@ def complete(
         response_format=response_format,
         timeout_s=timeout_s,
     )
-    response = _completion(**kwargs)
-    return _completion_result(response, config, response_format, metadata)
+    response, attempt_count = _completion_with_retries(kwargs, timeout_s)
+    return _completion_result(
+        response,
+        config,
+        response_format,
+        _completion_metadata(metadata, attempt_count),
+    )
 
 
 async def acomplete(
@@ -96,8 +112,13 @@ async def acomplete(
         response_format=response_format,
         timeout_s=timeout_s,
     )
-    response = await _acompletion(**kwargs)
-    return _completion_result(response, config, response_format, metadata)
+    response, attempt_count = await _acompletion_with_retries(kwargs, timeout_s)
+    return _completion_result(
+        response,
+        config,
+        response_format,
+        _completion_metadata(metadata, attempt_count),
+    )
 
 
 def _completion_args(
@@ -123,6 +144,115 @@ def _completion_args(
     if timeout_s is not None:
         kwargs["client_args"] = {"timeout": timeout_s, "max_retries": 0}
     return validated_format, config, kwargs
+
+
+def _completion_with_retries(
+    kwargs: dict[str, Any],
+    timeout_s: float | None,
+) -> tuple[Any, int]:
+    if timeout_s is None:
+        return _completion(**kwargs), 1
+    deadline = monotonic() + timeout_s
+    attempt = 1
+    attempt_kwargs = kwargs
+    while True:
+        try:
+            return _completion(**attempt_kwargs), attempt
+        except Exception as exc:
+            delay = _retry_delay_or_raise(exc, attempt, deadline)
+            sleep(delay)
+            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, exc)
+            attempt += 1
+
+
+async def _acompletion_with_retries(
+    kwargs: dict[str, Any],
+    timeout_s: float | None,
+) -> tuple[Any, int]:
+    if timeout_s is None:
+        return await _acompletion(**kwargs), 1
+    deadline = monotonic() + timeout_s
+    attempt = 1
+    attempt_kwargs = kwargs
+    while True:
+        try:
+            return await _acompletion(**attempt_kwargs), attempt
+        except Exception as exc:
+            delay = _retry_delay_or_raise(exc, attempt, deadline)
+            await asyncio.sleep(delay)
+            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, exc)
+            attempt += 1
+
+
+def _retry_delay_or_raise(exc: Exception, attempt: int, deadline: float) -> float:
+    if attempt >= _MAX_LLM_ATTEMPTS or not _is_retryable_error(exc):
+        raise exc
+    delay = _LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1))
+    if deadline - monotonic() <= delay:
+        raise exc
+    return delay
+
+
+def _retry_kwargs_or_raise(
+    kwargs: dict[str, Any],
+    deadline: float,
+    exc: Exception,
+) -> dict[str, Any]:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise exc
+    client_args = dict(kwargs["client_args"])
+    client_args["timeout"] = remaining
+    return {**kwargs, "client_args": client_args}
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, KensaTimeoutError):
+        return False
+    chain = _exception_chain(exc)
+    statuses = [
+        status for current in chain if type(status := getattr(current, "status_code", None)) is int
+    ]
+    if statuses:
+        return any(status == 429 or status >= 500 for status in statuses)
+    identities = {(type(current).__module__, type(current).__name__) for current in chain}
+    if any(
+        module.startswith("any_llm") and name in _RETRYABLE_ANY_LLM_ERRORS
+        for module, name in identities
+    ):
+        return True
+    return any(
+        module.partition(".")[0] in _PROVIDER_MODULES and name in _RETRYABLE_CONNECTION_ERRORS
+        for module, name in identities
+    )
+
+
+def _exception_chain(exc: Exception) -> list[Exception]:
+    chain: list[Exception] = []
+    current: Exception | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        original = getattr(current, "original_exception", None)
+        cause = current.__cause__
+        current = (
+            original
+            if isinstance(original, Exception)
+            else cause
+            if isinstance(cause, Exception)
+            else None
+        )
+    return chain
+
+
+def _completion_metadata(
+    metadata: dict[str, Any] | None,
+    attempt_count: int,
+) -> dict[str, Any] | None:
+    if attempt_count == 1:
+        return metadata
+    return {**(metadata or {}), "attempt_count": attempt_count}
 
 
 def _completion_result(
