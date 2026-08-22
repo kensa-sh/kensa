@@ -9,6 +9,14 @@ from time import monotonic, sleep
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from kensa.errors import KensaTimeoutError
 from kensa.models import LLMConfig, LLMModel, LLMProvider
@@ -16,6 +24,7 @@ from kensa.models import LLMConfig, LLMModel, LLMProvider
 DEFAULT_LLM_MODEL = LLMModel.GPT_5_4_MINI.value
 _MAX_LLM_ATTEMPTS = 3
 _LLM_RETRY_BASE_DELAY_S = 0.25
+_STOP_AFTER_LLM_ATTEMPTS = stop_after_attempt(_MAX_LLM_ATTEMPTS)
 _RETRYABLE_ANY_LLM_ERRORS = frozenset(
     {"GatewayTimeoutError", "ProviderError", "RateLimitError", "UpstreamProviderError"}
 )
@@ -153,16 +162,34 @@ def _completion_with_retries(
     if timeout_s is None:
         return _completion(**kwargs), 1
     deadline = monotonic() + timeout_s
-    attempt = 1
+    last_error: Exception | None = None
     attempt_kwargs = kwargs
-    while True:
+    attempt_count = 1
+
+    def prepare_attempt(state: RetryCallState) -> None:
+        nonlocal attempt_count, attempt_kwargs
+        attempt_count = state.attempt_number
+        if attempt_count > 1:
+            assert last_error is not None
+            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, last_error)
+
+    def run_completion() -> Any:
+        nonlocal last_error
         try:
-            return _completion(**attempt_kwargs), attempt
+            return _completion(**attempt_kwargs)
         except Exception as exc:
-            delay = _retry_delay_or_raise(exc, attempt, deadline)
-            sleep(delay)
-            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, exc)
-            attempt += 1
+            last_error = exc
+            raise
+
+    response = Retrying(
+        sleep=sleep,
+        retry=retry_if_exception(_is_retryable_error),
+        stop=lambda state: _retry_should_stop(state, deadline),
+        wait=wait_exponential(multiplier=_LLM_RETRY_BASE_DELAY_S),
+        before=prepare_attempt,
+        reraise=True,
+    )(run_completion)
+    return response, attempt_count
 
 
 async def _acompletion_with_retries(
@@ -172,42 +199,55 @@ async def _acompletion_with_retries(
     if timeout_s is None:
         return await _acompletion(**kwargs), 1
     deadline = monotonic() + timeout_s
-    attempt = 1
+    last_error: Exception | None = None
     attempt_kwargs = kwargs
-    while True:
+    attempt_count = 1
+
+    def prepare_attempt(state: RetryCallState) -> None:
+        nonlocal attempt_count, attempt_kwargs
+        attempt_count = state.attempt_number
+        if attempt_count > 1:
+            assert last_error is not None
+            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, last_error)
+
+    async def run_completion() -> Any:
+        nonlocal last_error
         try:
-            return await _acompletion(**attempt_kwargs), attempt
+            return await _acompletion(**attempt_kwargs)
         except Exception as exc:
-            delay = _retry_delay_or_raise(exc, attempt, deadline)
-            await asyncio.sleep(delay)
-            attempt_kwargs = _retry_kwargs_or_raise(kwargs, deadline, exc)
-            attempt += 1
+            last_error = exc
+            raise
+
+    response = await AsyncRetrying(
+        sleep=asyncio.sleep,
+        retry=retry_if_exception(_is_retryable_error),
+        stop=lambda state: _retry_should_stop(state, deadline),
+        wait=wait_exponential(multiplier=_LLM_RETRY_BASE_DELAY_S),
+        before=prepare_attempt,
+        reraise=True,
+    )(run_completion)
+    return response, attempt_count
 
 
-def _retry_delay_or_raise(exc: Exception, attempt: int, deadline: float) -> float:
-    if attempt >= _MAX_LLM_ATTEMPTS or not _is_retryable_error(exc):
-        raise exc
-    delay = _LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1))
-    if deadline - monotonic() <= delay:
-        raise exc
-    return delay
+def _retry_should_stop(state: RetryCallState, deadline: float) -> bool:
+    return _STOP_AFTER_LLM_ATTEMPTS(state) or deadline - monotonic() <= state.upcoming_sleep
 
 
 def _retry_kwargs_or_raise(
     kwargs: dict[str, Any],
     deadline: float,
-    exc: Exception,
+    last_error: Exception,
 ) -> dict[str, Any]:
     remaining = deadline - monotonic()
     if remaining <= 0:
-        raise exc
+        raise last_error
     client_args = dict(kwargs["client_args"])
     client_args["timeout"] = remaining
     return {**kwargs, "client_args": client_args}
 
 
-def _is_retryable_error(exc: Exception) -> bool:
-    if isinstance(exc, KensaTimeoutError):
+def _is_retryable_error(exc: BaseException) -> bool:
+    if not isinstance(exc, Exception) or isinstance(exc, KensaTimeoutError):
         return False
     chain = _exception_chain(exc)
     statuses = [
