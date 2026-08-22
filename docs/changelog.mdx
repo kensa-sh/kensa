@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.23.0
+
+Judge calls now recover from transient LLM provider failures without exceeding the configured evaluation deadline.
+
+- Synchronous and asynchronous completions retry rate limits, server errors, and recognized provider connection failures up to three total attempts with exponential backoff.
+- Each retry receives only the remaining timeout budget, while invalid requests, Kensa timeouts, and other non-retryable errors fail immediately.
+- Successful retried completions record their attempt count in result metadata for observability.
+
+[View the 0.23.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.23.0).
+
 ## 0.22.0
 
 The `kensa-setup` skill can now discover which agent frameworks a repository imports before manual tracing begins.
