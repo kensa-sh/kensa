@@ -164,4 +164,5 @@ def test_required_lint_check_rejects_stale_release_notes() -> None:
     assert "uv run git-cliff" in workflow
     assert "--config cliff.toml" in workflow
     assert '--tag "v$version"' in workflow
+    assert '"$PR_BASE_SHA"' in workflow
     assert "diff --unified CHANGELOG.md /tmp/CHANGELOG.md" in workflow

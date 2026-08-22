@@ -4,21 +4,30 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
-## 0.22.0
-### Features
-* feat: framework-discovery ([4204eb9](https://github.com/kensa-sh/kensa/commit/4204eb9e499926d9c8fc82485615606f285cb602))
+## 0.23.0
 ### Bug Fixes
-* fix(kensa-setup): invoke detector script with skill-root-relative path ([8f273f3](https://github.com/kensa-sh/kensa/commit/8f273f39cc06938cce54b3a05ae91d898b4afc44))
-* fix: update test assertion for relative detector script path ([30f0a9d](https://github.com/kensa-sh/kensa/commit/30f0a9dd5b988bfe07abf1e6e799be5d139fe1f6))
+* fix(traces): stop asserting on volatile import timestamps ([8c6f685](https://github.com/kensa-sh/kensa/commit/8c6f68502e7486431cb4d1eeae4a8735f58917e8))
+* fix(judge): retry transient provider failures ([a945bd0](https://github.com/kensa-sh/kensa/commit/a945bd0da08d3b3bcde747a6f339bc3430c181ab))
+* fix(llm): use tenacity for provider retries ([0577659](https://github.com/kensa-sh/kensa/commit/0577659d55a4730c74c3a4b7eb7b6574a6c6052d))
+### Chores
+* chore(ci): remove spent 0.22.0 changelog verification skip ([71cae96](https://github.com/kensa-sh/kensa/commit/71cae9679798fad4d2a28fff344a1a981fb0f605))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.22.0...v0.23.0
+
+## 0.22.0
+### Bug Fixes
+* fix(changelog): file framework discovery under 0.22.0 ([1bfa5a7](https://github.com/kensa-sh/kensa/commit/1bfa5a7b3ef849228850921c948af146a4f1b831))
 ### Chores
 * chore(agents): require scoped conventional commits ([c571d23](https://github.com/kensa-sh/kensa/commit/c571d23c4267dcd3e6657581a82fbd0647db14f2))
 * chore(docs): remove inline PR links from changelog ([df96569](https://github.com/kensa-sh/kensa/commit/df965697cef5f617be2786ce68e7acd258530c86))
+* chore(ci): skip changelog verification for 0.22.0 only ([6af235d](https://github.com/kensa-sh/kensa/commit/6af235d6d1a30785e8fd5d103f63cd478f2857dd))
 
 **Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.21.0...v0.22.0
 
 ## 0.21.0
 ### Features
 * feat: add interoperable tooling contracts ([be943de](https://github.com/kensa-sh/kensa/commit/be943de7e0ff9436f6fe37ef489d4c51b70a3dc1))
+* feat: framework-discovery ([4204eb9](https://github.com/kensa-sh/kensa/commit/4204eb9e499926d9c8fc82485615606f285cb602))
 ### Bug Fixes
 * fix: cover changelog failure gates ([cdf3560](https://github.com/kensa-sh/kensa/commit/cdf3560a8750ec727fcac227bc822f020d90e4c9))
 * fix: bind release notes to base commit ([279e410](https://github.com/kensa-sh/kensa/commit/279e41078d23426103a896559dc71300ac8ed70f))
@@ -28,6 +37,8 @@ Release notes for Kensa. Full notes are available on [GitHub Releases](https://g
 * fix: generate changelog with git-cliff ([d959358](https://github.com/kensa-sh/kensa/commit/d95935883d65b7987dc195674738bfa734011967))
 * fix: require explicit opt-in for OTLP HTTP export ([af0211b](https://github.com/kensa-sh/kensa/commit/af0211bebb704b7bb2cf151635d942a4e12caf5b))
 * fix: key OTLP export on a Kensa-owned endpoint and scope credentials ([2da1b6e](https://github.com/kensa-sh/kensa/commit/2da1b6ebb4166c3e7fc92895a2cfe3078c0329de))
+* fix(kensa-setup): invoke detector script with skill-root-relative path ([8f273f3](https://github.com/kensa-sh/kensa/commit/8f273f39cc06938cce54b3a05ae91d898b4afc44))
+* fix: update test assertion for relative detector script path ([30f0a9d](https://github.com/kensa-sh/kensa/commit/30f0a9dd5b988bfe07abf1e6e799be5d139fe1f6))
 ### Chores
 * chore: synchronize release changelogs ([a180806](https://github.com/kensa-sh/kensa/commit/a180806512b3b4cd6c3ae80e5927e77e812f64f9))
 * chore: tighten instrument docstring and OTLP documentation prose ([4346ff1](https://github.com/kensa-sh/kensa/commit/4346ff10fc1a2ea07b4746904c0f11e5f4a54072))

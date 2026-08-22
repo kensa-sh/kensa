@@ -50,13 +50,16 @@ jobs:
           github.event_name == 'pull_request' &&
           startsWith(github.event.pull_request.head.ref, 'chore/release-v') &&
           startsWith(github.event.pull_request.title, 'chore: release ')
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           version="$(uv version --short)"
           uv run git-cliff \
             --config cliff.toml \
             --repository . \
             --tag "v$version" \
-            --output /tmp/CHANGELOG.md
+            --output /tmp/CHANGELOG.md \
+            "$PR_BASE_SHA"
           diff --unified CHANGELOG.md /tmp/CHANGELOG.md
       - run: uv run ruff check .
       - run: uv run ruff format --check .
