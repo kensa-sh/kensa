@@ -114,47 +114,8 @@ def test_generate_changelog_runs_git_cliff_for_pending_tag(tmp_path: Path) -> No
         str(ROOT),
         "--tag",
         "v1.2.3",
-        "--prepend",
+        "--output",
         str(ROOT / "CHANGELOG.md"),
-        "--unreleased",
-    ]
-
-
-def test_generate_changelog_uses_explicit_release_base_range(tmp_path: Path) -> None:
-    uv = tmp_path / "uv"
-    uv.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$UV_ARGS_FILE"\n')
-    uv.chmod(0o755)
-    args_file = tmp_path / "args"
-    changelog = tmp_path / "CHANGELOG.md"
-    env = os.environ.copy()
-    env["UV_ARGS_FILE"] = str(args_file)
-    env["PATH"] = f"{tmp_path}:{env['PATH']}"
-    env["RELEASE_SCRIPT"] = str(RELEASE_SCRIPT)
-
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$RELEASE_SCRIPT"; generate_changelog 1.2.3 "$CHANGELOG" v1.2.2..abc123',
-        ],
-        check=True,
-        capture_output=True,
-        env={**env, "CHANGELOG": str(changelog)},
-        text=True,
-    )
-
-    assert args_file.read_text().splitlines() == [
-        "run",
-        "git-cliff",
-        "--config",
-        str(ROOT / "cliff.toml"),
-        "--repository",
-        str(ROOT),
-        "--tag",
-        "v1.2.3",
-        "--prepend",
-        str(changelog),
-        "v1.2.2..abc123",
     ]
 
 
@@ -200,8 +161,8 @@ def test_required_lint_check_rejects_stale_release_notes() -> None:
     assert "scripts/changelog.py sync" not in workflow
     assert 'assert_release_notes_base "$PR_BODY" "$PR_BASE_SHA"' in workflow
     assert "Verify generated release changelog" in workflow
-    assert 'git show "$PR_BASE_SHA:CHANGELOG.md" > /tmp/CHANGELOG.md' in workflow
-    assert 'git describe --tags --abbrev=0 "$PR_BASE_SHA"' in workflow
-    assert 'generate_changelog "$version" /tmp/CHANGELOG.md' in workflow
-    assert '"$previous_tag..$PR_BASE_SHA"' in workflow
+    assert "uv run git-cliff" in workflow
+    assert "--config cliff.toml" in workflow
+    assert '--tag "v$version"' in workflow
+    assert '"$PR_BASE_SHA"' in workflow
     assert "diff --unified CHANGELOG.md /tmp/CHANGELOG.md" in workflow

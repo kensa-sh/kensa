@@ -54,10 +54,12 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           version="$(uv version --short)"
-          previous_tag="$(git describe --tags --abbrev=0 "$PR_BASE_SHA")"
-          git show "$PR_BASE_SHA:CHANGELOG.md" > /tmp/CHANGELOG.md
-          source scripts/release.sh
-          generate_changelog "$version" /tmp/CHANGELOG.md "$previous_tag..$PR_BASE_SHA"
+          uv run git-cliff \
+            --config cliff.toml \
+            --repository . \
+            --tag "v$version" \
+            --output /tmp/CHANGELOG.md \
+            "$PR_BASE_SHA"
           diff --unified CHANGELOG.md /tmp/CHANGELOG.md
       - run: uv run ruff check .
       - run: uv run ruff format --check .
