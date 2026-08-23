@@ -157,12 +157,15 @@ run_local_checks() {
 
 generate_changelog() {
   local version="$1"
+  local changelog_path="${2:-$ROOT/CHANGELOG.md}"
+  local range="${3:---unreleased}"
 
   uv run git-cliff \
     --config "$ROOT/cliff.toml" \
     --repository "$ROOT" \
     --tag "v$version" \
-    --output "$ROOT/CHANGELOG.md"
+    --prepend "$changelog_path" \
+    "$range"
 }
 
 assert_release_notes_base() {
@@ -220,7 +223,7 @@ prepare_release_pr() {
     echo "would require available tag: $tag"
     echo "would update pyproject.toml, uv.lock, and CHANGELOG.md"
     echo "would require user-facing notes in docs/changelog.mdx before merge"
-    echo "would rebuild CHANGELOG.md from Git history with git-cliff through $tag"
+    echo "would prepend the $tag section to the published CHANGELOG.md with git-cliff"
     if [ "$run_tests" = true ]; then
       echo "would run local ruff, ty, and pytest checks"
     else

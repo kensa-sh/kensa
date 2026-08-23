@@ -4,6 +4,17 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.23.0
+### Bug Fixes
+* fix(traces): stop asserting on volatile import timestamps ([8c6f685](https://github.com/kensa-sh/kensa/commit/8c6f68502e7486431cb4d1eeae4a8735f58917e8))
+* fix(judge): retry transient provider failures ([a945bd0](https://github.com/kensa-sh/kensa/commit/a945bd0da08d3b3bcde747a6f339bc3430c181ab))
+* fix(llm): use tenacity for provider retries ([0577659](https://github.com/kensa-sh/kensa/commit/0577659d55a4730c74c3a4b7eb7b6574a6c6052d))
+### Chores
+* chore(ci): remove spent 0.22.0 changelog verification skip ([71cae96](https://github.com/kensa-sh/kensa/commit/71cae9679798fad4d2a28fff344a1a981fb0f605))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.22.0...v0.23.0
+
+
 ## 0.22.0
 ### Features
 * feat: framework-discovery ([4204eb9](https://github.com/kensa-sh/kensa/commit/4204eb9e499926d9c8fc82485615606f285cb602))

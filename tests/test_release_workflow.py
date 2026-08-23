@@ -114,8 +114,9 @@ def test_generate_changelog_runs_git_cliff_for_pending_tag(tmp_path: Path) -> No
         str(ROOT),
         "--tag",
         "v1.2.3",
-        "--output",
+        "--prepend",
         str(ROOT / "CHANGELOG.md"),
+        "--unreleased",
     ]
 
 
@@ -164,4 +165,9 @@ def test_required_lint_check_rejects_stale_release_notes() -> None:
     assert "uv run git-cliff" in workflow
     assert "--config cliff.toml" in workflow
     assert '--tag "v$version"' in workflow
+    assert 'git show "$PR_BASE_SHA:CHANGELOG.md" > /tmp/CHANGELOG.md' in workflow
+    assert 'previous_tag="$(git describe --tags --abbrev=0 "$PR_BASE_SHA")"' in workflow
+    assert "--prepend /tmp/CHANGELOG.md" in workflow
+    assert '"$previous_tag..$PR_BASE_SHA"' in workflow
+    assert '"$PR_BASE_SHA"' in workflow
     assert "diff --unified CHANGELOG.md /tmp/CHANGELOG.md" in workflow
