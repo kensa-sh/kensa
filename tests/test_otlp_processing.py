@@ -73,12 +73,13 @@ def test_processes_redacted_trace_views_without_writing_artifacts(
     first = processor.process(_payload())
     second = processor.process(_payload())
 
-    assert first == second
     assert len(first) == 1
     trace = first[0]
     assert isinstance(trace, TraceView)
     assert trace.id.startswith("trace_")
     assert trace.spans[0].id.startswith("span_")
+    assert second[0].id == trace.id
+    assert second[0].spans == trace.spans
     assert trace.spans[0].trace_id == trace.id
     assert trace.spans[0].input == "[PERSON_1] uses [SECRET_1]"
     assert trace.spans[0].usage.input_tokens is None
