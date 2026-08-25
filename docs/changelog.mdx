@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.24.0
+
+Kensa can now process raw OTLP traces safely in memory.
+
+- Converts OTLP protobuf payloads into redacted trace views without writing trace data to disk.
+- Keeps trace and span IDs stable with a caller-provided key, with an option to remove usage and cost values.
+- Rejects malformed or oversized payloads without returning partial results, and can be reused safely across concurrent calls.
+
+[View the 0.24.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.24.0).
+
 ## 0.23.0
 
 Judge calls now recover from transient LLM provider failures without exceeding the configured evaluation deadline.
