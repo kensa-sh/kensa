@@ -111,6 +111,13 @@ def test_rejects_invalid_limits(value: int) -> None:
         OtlpTraceProcessor(pseudonym_key=b"k" * 32, limits=limits)
 
 
+def test_rejects_invalid_attribute_depth_limit() -> None:
+    limits = replace(OtlpTraceLimits(), max_attribute_depth=0)
+
+    with pytest.raises(OtlpTraceProcessingError, match="max_attribute_depth"):
+        OtlpTraceProcessor(pseudonym_key=b"k" * 32, limits=limits)
+
+
 @pytest.mark.parametrize(
     ("payload", "limits", "message"),
     [
@@ -218,6 +225,65 @@ def test_enforces_nested_limits_before_json_expansion(
     processor = OtlpTraceProcessor(pseudonym_key=b"k" * 32, limits=limits)
 
     with pytest.raises(OtlpTraceProcessingError, match="too many"):
+        processor.process(request.SerializeToString())
+
+
+@pytest.mark.parametrize("nested_kind", ["array", "key_value_list"])
+def test_counts_nested_attribute_values_before_json_expansion(
+    nested_kind: str,
+    redaction_ready: FakeRedactionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    span = request.resource_spans[0].scope_spans[0].spans[0]
+    span.ClearField("attributes")
+    span.ClearField("events")
+    span.ClearField("links")
+    attribute = span.attributes.add(key="nested")
+    if nested_kind == "array":
+        attribute.value.array_value.values.add().string_value = "one"
+        attribute.value.array_value.values.add().string_value = "two"
+    else:
+        attribute.value.kvlist_value.values.add(key="one").value.string_value = "one"
+        attribute.value.kvlist_value.values.add(key="two").value.string_value = "two"
+
+    def fail_json_expansion(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("protobuf-to-JSON expansion must not run")
+
+    monkeypatch.setattr(traces_module, "_otlp_message_to_dict", fail_json_expansion)
+    processor = OtlpTraceProcessor(
+        pseudonym_key=b"k" * 32,
+        limits=OtlpTraceLimits(max_attributes=2),
+    )
+
+    with pytest.raises(OtlpTraceProcessingError, match="too many attribute values"):
+        processor.process(request.SerializeToString())
+
+
+def test_rejects_deeply_nested_attribute_values_before_json_expansion(
+    redaction_ready: FakeRedactionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    span = request.resource_spans[0].scope_spans[0].spans[0]
+    span.ClearField("attributes")
+    span.ClearField("events")
+    span.ClearField("links")
+    value = span.attributes.add(key="nested").value
+    value = value.array_value.values.add()
+    value = value.array_value.values.add()
+    value.string_value = "too deep"
+
+    def fail_json_expansion(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("protobuf-to-JSON expansion must not run")
+
+    monkeypatch.setattr(traces_module, "_otlp_message_to_dict", fail_json_expansion)
+    processor = OtlpTraceProcessor(
+        pseudonym_key=b"k" * 32,
+        limits=OtlpTraceLimits(max_attribute_depth=2),
+    )
+
+    with pytest.raises(OtlpTraceProcessingError, match="too deeply nested"):
         processor.process(request.SerializeToString())
 
 

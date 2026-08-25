@@ -10,6 +10,7 @@ import re
 import secrets
 import tempfile
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
         ExportTraceServiceRequest,
     )
+    from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
 TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v2"
@@ -333,6 +335,7 @@ class OtlpTraceLimits:
     max_scope_spans: int = 512
     max_spans: int = 10_000
     max_attributes: int = 10_000
+    max_attribute_depth: int = 16
     max_events: int = 1_000
     max_links: int = 1_000
 
@@ -587,13 +590,19 @@ def _validate_otlp_request(
     event_count = 0
     link_count = 0
     for resource_spans in request.resource_spans:
-        attribute_count += len(resource_spans.resource.attributes)
-        _check_otlp_count(attribute_count, limits.max_attributes, "attributes")
+        attribute_count = _count_otlp_attributes(
+            resource_spans.resource.attributes,
+            count=attribute_count,
+            limits=limits,
+        )
         scope_span_count += len(resource_spans.scope_spans)
         _check_otlp_count(scope_span_count, limits.max_scope_spans, "scope spans")
         for scope_spans in resource_spans.scope_spans:
-            attribute_count += len(scope_spans.scope.attributes)
-            _check_otlp_count(attribute_count, limits.max_attributes, "attributes")
+            attribute_count = _count_otlp_attributes(
+                scope_spans.scope.attributes,
+                count=attribute_count,
+                limits=limits,
+            )
             span_count += len(scope_spans.spans)
             _check_otlp_count(span_count, limits.max_spans, "spans")
             for span in scope_spans.spans:
@@ -606,24 +615,81 @@ def _validate_otlp_request(
                         label="parent span ID",
                     )
                 trace_ids.add(bytes(span.trace_id))
-                attribute_count += len(span.attributes)
-                _check_otlp_count(attribute_count, limits.max_attributes, "attributes")
+                attribute_count = _count_otlp_attributes(
+                    span.attributes,
+                    count=attribute_count,
+                    limits=limits,
+                )
                 event_count += len(span.events)
                 _check_otlp_count(event_count, limits.max_events, "events")
                 link_count += len(span.links)
                 _check_otlp_count(link_count, limits.max_links, "links")
                 for event in span.events:
-                    attribute_count += len(event.attributes)
-                    _check_otlp_count(attribute_count, limits.max_attributes, "attributes")
+                    attribute_count = _count_otlp_attributes(
+                        event.attributes,
+                        count=attribute_count,
+                        limits=limits,
+                    )
                 for link in span.links:
                     _validate_otlp_identifier(link.trace_id, size=16, label="link trace ID")
                     _validate_otlp_identifier(link.span_id, size=8, label="link span ID")
-                    attribute_count += len(link.attributes)
-                    _check_otlp_count(attribute_count, limits.max_attributes, "attributes")
+                    attribute_count = _count_otlp_attributes(
+                        link.attributes,
+                        count=attribute_count,
+                        limits=limits,
+                    )
 
     if not trace_ids:
         raise OtlpTraceProcessingError("OTLP protobuf contains no traces")
     _check_otlp_count(len(trace_ids), limits.max_traces, "traces")
+
+
+def _count_otlp_attributes(
+    attributes: Iterable[KeyValue],
+    *,
+    count: int,
+    limits: OtlpTraceLimits,
+    value_depth: int = 1,
+) -> int:
+    for attribute in attributes:
+        count += 1
+        _check_otlp_count(count, limits.max_attributes, "attribute values")
+        count = _count_otlp_attribute_value(
+            attribute.value,
+            count=count,
+            depth=value_depth,
+            limits=limits,
+        )
+    return count
+
+
+def _count_otlp_attribute_value(
+    value: AnyValue,
+    *,
+    count: int,
+    depth: int,
+    limits: OtlpTraceLimits,
+) -> int:
+    if depth > limits.max_attribute_depth:
+        raise OtlpTraceProcessingError("OTLP protobuf attribute values are too deeply nested")
+    if value.HasField("array_value"):
+        count += len(value.array_value.values)
+        _check_otlp_count(count, limits.max_attributes, "attribute values")
+        for item in value.array_value.values:
+            count = _count_otlp_attribute_value(
+                item,
+                count=count,
+                depth=depth + 1,
+                limits=limits,
+            )
+    elif value.HasField("kvlist_value"):
+        count = _count_otlp_attributes(
+            value.kvlist_value.values,
+            count=count,
+            limits=limits,
+            value_depth=depth + 1,
+        )
+    return count
 
 
 def _validate_otlp_identifier(value: bytes, *, size: int, label: str) -> None:
