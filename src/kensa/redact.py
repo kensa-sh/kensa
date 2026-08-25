@@ -943,6 +943,9 @@ class Redactor:
     ) -> None:
         self._readiness = assert_redaction_ready(root=root)
         self._engine = _load_engine(self._readiness)
+        self._reset_run()
+
+    def _reset_run(self) -> None:
         self._alias_map: dict[tuple[str, str], str] = {}
         self._instance_counts: Counter[str] = Counter()
         self._span_count = 0
