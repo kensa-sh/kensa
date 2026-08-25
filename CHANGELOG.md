@@ -4,6 +4,19 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.24.0
+### Features
+* feat(traces): process OTLP protobuf in memory ([5fbc58b](https://github.com/kensa-sh/kensa/commit/5fbc58b4061edfdb659f5a830cf25211f481db2d))
+### Bug Fixes
+* fix(traces): avoid timestamp-sensitive stability assertion ([bdfa252](https://github.com/kensa-sh/kensa/commit/bdfa252665bfdcd13ab52abfdf13f69da5d26713))
+* fix(traces): bound nested OTLP attribute values ([f41d95f](https://github.com/kensa-sh/kensa/commit/f41d95f569f66077faf4cd2f9579d836ee885f6a))
+* fix(traces): close OTLP protobuf boundary gaps ([4460fda](https://github.com/kensa-sh/kensa/commit/4460fda82920120c3dab3a9fd50a26da51165a7a))
+### Chores
+* chore(docs): remove OTLP processor guide ([81cb0f3](https://github.com/kensa-sh/kensa/commit/81cb0f3386b0eb6d4ac3d19bd8a50aa86f6c2eee))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.23.0...v0.24.0
+
+
 ## 0.23.0
 ### Bug Fixes
 * fix(traces): stop asserting on volatile import timestamps ([8c6f685](https://github.com/kensa-sh/kensa/commit/8c6f68502e7486431cb4d1eeae4a8735f58917e8))
