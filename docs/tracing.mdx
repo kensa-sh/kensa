@@ -52,38 +52,6 @@ kensa import --from langfuse --source langfuse-export.json
 
 Imports are normalized to Kensa's TraceView schema and written to `.kensa/traces/imports/<provider>-<timestamp>.jsonl`, with a `.manifest.json` recording provenance and redaction, and a `latest.json` pointer.
 
-## Processing OTLP protobuf in memory
-
-Library users can convert an OTLP/HTTP protobuf request body directly into typed, redacted
-`TraceView` records:
-
-```python
-import os
-
-from kensa.traces import OtlpTraceProcessingError, OtlpTraceProcessor
-
-processor = OtlpTraceProcessor(
-    pseudonym_key=bytes.fromhex(os.environ["KENSA_PSEUDONYM_KEY"]),
-    omit_usage_metrics=True,
-)
-
-try:
-    traces = processor.process(request_body)
-except OtlpTraceProcessingError:
-    # The entire batch is rejected. No partial result is returned.
-    raise
-```
-
-`pseudonym_key` must decode to exactly 32 bytes. Reusing the same caller-managed key produces
-stable pseudonymous trace and span IDs. Keep the key secret and load it from secure configuration.
-The processor applies payload and nested OTLP limits before protobuf-to-JSON expansion, reuses one
-initialized redaction engine across calls, and writes no trace artifacts. Pass `OtlpTraceLimits`
-to set stricter bounds. `omit_usage_metrics=True` removes token counts and cost values while
-preserving the `TraceView` schema.
-
-The processor requires the `kensa[redaction]` dependencies and a prepared redaction model, as
-described below.
-
 ## Evidence minimization and redaction
 
 Import has two privacy boundaries:
