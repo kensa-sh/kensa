@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_
 
 from kensa.constants import KENSA_DIR
 from kensa.redact import (
+    REDACTED_PLACEHOLDER,
     RedactionGateError,
     Redactor,
     _safe_url_netloc,
@@ -556,6 +557,7 @@ def _decode_otlp_protobuf(
     except DecodeError as exc:
         raise OtlpTraceProcessingError("OTLP protobuf payload is malformed") from exc
     _validate_otlp_request(request, limits=limits)
+    _redact_otlp_byte_values(request)
     decoded = _otlp_message_to_dict(request)
     imported_at = trace_timestamp()
     return _import_otlp_trace_views(
@@ -589,6 +591,7 @@ def _validate_otlp_request(
     attribute_count = 0
     event_count = 0
     link_count = 0
+    span_ids: set[tuple[bytes, bytes]] = set()
     for resource_spans in request.resource_spans:
         attribute_count = _count_otlp_attributes(
             resource_spans.resource.attributes,
@@ -608,6 +611,12 @@ def _validate_otlp_request(
             for span in scope_spans.spans:
                 _validate_otlp_identifier(span.trace_id, size=16, label="trace ID")
                 _validate_otlp_identifier(span.span_id, size=8, label="span ID")
+                span_key = (bytes(span.trace_id), bytes(span.span_id))
+                if span_key in span_ids:
+                    raise OtlpTraceProcessingError(
+                        "OTLP protobuf has a duplicate span ID within a trace"
+                    )
+                span_ids.add(span_key)
                 if span.parent_span_id:
                     _validate_otlp_identifier(
                         span.parent_span_id,
@@ -690,6 +699,34 @@ def _count_otlp_attribute_value(
             value_depth=depth + 1,
         )
     return count
+
+
+def _redact_otlp_byte_values(request: ExportTraceServiceRequest) -> None:
+    for resource_spans in request.resource_spans:
+        _redact_otlp_attribute_bytes(resource_spans.resource.attributes)
+        for scope_spans in resource_spans.scope_spans:
+            _redact_otlp_attribute_bytes(scope_spans.scope.attributes)
+            for span in scope_spans.spans:
+                _redact_otlp_attribute_bytes(span.attributes)
+                for event in span.events:
+                    _redact_otlp_attribute_bytes(event.attributes)
+                for link in span.links:
+                    _redact_otlp_attribute_bytes(link.attributes)
+
+
+def _redact_otlp_attribute_bytes(attributes: Iterable[KeyValue]) -> None:
+    for attribute in attributes:
+        _redact_otlp_attribute_value_bytes(attribute.value)
+
+
+def _redact_otlp_attribute_value_bytes(value: AnyValue) -> None:
+    if value.HasField("bytes_value"):
+        value.string_value = REDACTED_PLACEHOLDER
+    elif value.HasField("array_value"):
+        for item in value.array_value.values:
+            _redact_otlp_attribute_value_bytes(item)
+    elif value.HasField("kvlist_value"):
+        _redact_otlp_attribute_bytes(value.kvlist_value.values)
 
 
 def _validate_otlp_identifier(value: bytes, *, size: int, label: str) -> None:

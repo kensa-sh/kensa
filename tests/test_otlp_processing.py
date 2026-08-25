@@ -95,6 +95,35 @@ def test_keeps_usage_metrics_by_default(redaction_ready: FakeRedactionEnv) -> No
 
 
 @pytest.mark.parametrize(
+    ("value_kind", "expected"),
+    [
+        ("bytes", "[REDACTED]"),
+        ("array", ["[REDACTED]"]),
+        ("key_value_list", {"payload": "[REDACTED]"}),
+    ],
+)
+def test_redacts_byte_valued_evidence(
+    value_kind: str,
+    expected: Any,
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    request = _request()
+    prompt = request.resource_spans[0].scope_spans[0].spans[0].attributes[0]
+    prompt.value.Clear()
+    sensitive = b"Alice uses tok_live"
+    if value_kind == "bytes":
+        prompt.value.bytes_value = sensitive
+    elif value_kind == "array":
+        prompt.value.array_value.values.add().bytes_value = sensitive
+    else:
+        prompt.value.kvlist_value.values.add(key="payload").value.bytes_value = sensitive
+
+    trace = OtlpTraceProcessor(pseudonym_key=b"k" * 32).process(request.SerializeToString())[0]
+
+    assert trace.spans[0].input == expected
+
+
+@pytest.mark.parametrize(
     "key",
     [b"", b"x" * 31, b"x" * 33, cast(Any, bytearray(b"x" * 32))],
 )
@@ -171,6 +200,23 @@ def test_rejects_invalid_identifiers(
         setattr(span, target, value)
 
     with pytest.raises(OtlpTraceProcessingError, match="invalid"):
+        OtlpTraceProcessor(pseudonym_key=b"k" * 32).process(request.SerializeToString())
+
+
+def test_rejects_duplicate_span_ids_before_json_expansion(
+    redaction_ready: FakeRedactionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    scope_spans = request.resource_spans[0].scope_spans[0]
+    scope_spans.spans.add().CopyFrom(scope_spans.spans[0])
+
+    def fail_json_expansion(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("protobuf-to-JSON expansion must not run")
+
+    monkeypatch.setattr(traces_module, "_otlp_message_to_dict", fail_json_expansion)
+
+    with pytest.raises(OtlpTraceProcessingError, match="duplicate span ID"):
         OtlpTraceProcessor(pseudonym_key=b"k" * 32).process(request.SerializeToString())
 
 
