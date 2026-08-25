@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.24.0
+
+Raw OTLP/HTTP protobuf traces can now be converted into redacted `TraceView` records entirely in memory.
+
+- `OtlpTraceProcessor` processes bounded protobuf payloads into typed trace views without writing trace artifacts to disk.
+- A caller-supplied 32-byte key produces stable pseudonymous trace and span identifiers, while mandatory redaction removes PII and secrets; callers can also omit usage and cost metrics.
+- `OtlpTraceLimits` bounds payload size and nested resources, and invalid input fails atomically with `OtlpTraceProcessingError`; processor instances are safe to reuse across concurrent calls.
+
+[View the 0.24.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.24.0).
+
 ## 0.23.0
 
 Judge calls now recover from transient LLM provider failures without exceeding the configured evaluation deadline.
