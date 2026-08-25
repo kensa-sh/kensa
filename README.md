@@ -248,8 +248,7 @@ access stay blocked until `kensa init` fixes it.
 - Read the [Kensa documentation](https://kensa.sh/docs).
 - Find a bug or request a feature in [GitHub Issues](https://github.com/kensa-sh/kensa/issues).
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-- Follow the [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and report vulnerabilities through
-  [SECURITY.md](SECURITY.md).
+- Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 
 ## License
 
