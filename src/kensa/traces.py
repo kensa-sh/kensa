@@ -10,22 +10,30 @@ import re
 import secrets
 import tempfile
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from threading import Lock
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
 
 from kensa.constants import KENSA_DIR
 from kensa.redact import (
+    REDACTED_PLACEHOLDER,
     RedactionGateError,
-    RedactionResult,
     Redactor,
     _safe_url_netloc,
     assert_safe_manifest,
 )
+
+if TYPE_CHECKING:
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
 TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v2"
@@ -300,6 +308,9 @@ class TraceView:
         }
 
 
+_TRACE_VIEW_ADAPTER = TypeAdapter(TraceView)
+
+
 @dataclass(frozen=True)
 class ImportResult:
     provider: str
@@ -311,6 +322,64 @@ class ImportResult:
     manifest_path: Path | None = None
     redaction: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+
+class OtlpTraceProcessingError(ValueError):
+    """OTLP protobuf could not be processed safely."""
+
+
+@dataclass(frozen=True)
+class OtlpTraceLimits:
+    max_payload_bytes: int = 256 * 1024
+    max_traces: int = 1_000
+    max_resource_spans: int = 128
+    max_scope_spans: int = 512
+    max_spans: int = 10_000
+    max_attributes: int = 10_000
+    max_attribute_depth: int = 16
+    max_events: int = 1_000
+    max_links: int = 1_000
+
+
+class OtlpTraceProcessor:
+    """Process bounded OTLP protobuf into redacted in-memory trace views."""
+
+    def __init__(
+        self,
+        *,
+        pseudonym_key: bytes,
+        limits: OtlpTraceLimits | None = None,
+        omit_usage_metrics: bool = False,
+        redaction_root: Path | str | None = None,
+    ) -> None:
+        self._pseudonym_key = _validated_otlp_pseudonym_key(pseudonym_key)
+        self._limits = limits or OtlpTraceLimits()
+        _validate_otlp_limits(self._limits)
+        self._omit_usage_metrics = omit_usage_metrics
+        try:
+            self._redactor = Redactor(root=redaction_root)
+        except (OSError, ValueError) as exc:
+            raise OtlpTraceProcessingError("trace redaction is unavailable") from exc
+        self._lock = Lock()
+
+    def process(self, payload: bytes) -> tuple[TraceView, ...]:
+        """Return one atomic batch of redacted trace views."""
+
+        try:
+            trace_views = _decode_otlp_protobuf(payload, limits=self._limits)
+            with self._lock:
+                self._redactor._reset_run()
+                rows = _redact_trace_views(
+                    trace_views,
+                    redactor=self._redactor,
+                    pseudonym_key=self._pseudonym_key,
+                    omit_usage_metrics=self._omit_usage_metrics,
+                )
+                return tuple(_TRACE_VIEW_ADAPTER.validate_python(row) for row in rows)
+        except OtlpTraceProcessingError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise OtlpTraceProcessingError("OTLP protobuf could not be processed safely") from exc
 
 
 def trace_timestamp() -> str:
@@ -450,6 +519,260 @@ def _validated_import_arguments(
     return normalized_provider
 
 
+def _validated_otlp_pseudonym_key(key: bytes) -> bytes:
+    if not isinstance(key, bytes) or len(key) != 32:
+        raise OtlpTraceProcessingError("pseudonym key must be exactly 32 bytes")
+    return bytes(key)
+
+
+def _validate_otlp_limits(limits: OtlpTraceLimits) -> None:
+    for name in OtlpTraceLimits.__dataclass_fields__:
+        value = getattr(limits, name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise OtlpTraceProcessingError(f"{name} must be a positive integer")
+
+
+def _decode_otlp_protobuf(
+    payload: bytes,
+    *,
+    limits: OtlpTraceLimits,
+) -> list[TraceView]:
+    from google.protobuf.message import DecodeError
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+
+    if not isinstance(payload, bytes):
+        raise OtlpTraceProcessingError("OTLP protobuf payload must be bytes")
+    if not payload:
+        raise OtlpTraceProcessingError("OTLP protobuf payload is empty")
+    if len(payload) > limits.max_payload_bytes:
+        raise OtlpTraceProcessingError(
+            f"OTLP protobuf payload exceeds {limits.max_payload_bytes} bytes"
+        )
+
+    request = ExportTraceServiceRequest()
+    try:
+        request.ParseFromString(payload)
+    except DecodeError as exc:
+        raise OtlpTraceProcessingError("OTLP protobuf payload is malformed") from exc
+    _validate_otlp_request(request, limits=limits)
+    _redact_otlp_byte_values(request)
+    decoded = _otlp_message_to_dict(request)
+    imported_at = trace_timestamp()
+    return _import_otlp_trace_views(
+        decoded,
+        limits.max_traces,
+        TraceSource(
+            provider="otlp",
+            import_run_id=f"import-{imported_at.replace(':', '-')}",
+            imported_at=imported_at,
+        ),
+    )
+
+
+def _otlp_message_to_dict(request: ExportTraceServiceRequest) -> dict[str, Any]:
+    from google.protobuf.json_format import MessageToDict
+
+    return MessageToDict(request, preserving_proto_field_name=False)
+
+
+def _validate_otlp_request(
+    request: ExportTraceServiceRequest,
+    *,
+    limits: OtlpTraceLimits,
+) -> None:
+    trace_ids: set[bytes] = set()
+    if len(request.resource_spans) > limits.max_resource_spans:
+        raise OtlpTraceProcessingError("OTLP protobuf has too many resource spans")
+
+    scope_span_count = 0
+    span_count = 0
+    attribute_count = 0
+    event_count = 0
+    link_count = 0
+    span_ids: set[tuple[bytes, bytes]] = set()
+    for resource_spans in request.resource_spans:
+        attribute_count = _count_otlp_attributes(
+            resource_spans.resource.attributes,
+            count=attribute_count,
+            limits=limits,
+        )
+        scope_span_count += len(resource_spans.scope_spans)
+        _check_otlp_count(scope_span_count, limits.max_scope_spans, "scope spans")
+        for scope_spans in resource_spans.scope_spans:
+            attribute_count = _count_otlp_attributes(
+                scope_spans.scope.attributes,
+                count=attribute_count,
+                limits=limits,
+            )
+            span_count += len(scope_spans.spans)
+            _check_otlp_count(span_count, limits.max_spans, "spans")
+            for span in scope_spans.spans:
+                _validate_otlp_identifier(span.trace_id, size=16, label="trace ID")
+                _validate_otlp_identifier(span.span_id, size=8, label="span ID")
+                span_key = (bytes(span.trace_id), bytes(span.span_id))
+                if span_key in span_ids:
+                    raise OtlpTraceProcessingError(
+                        "OTLP protobuf has a duplicate span ID within a trace"
+                    )
+                span_ids.add(span_key)
+                if span.parent_span_id:
+                    _validate_otlp_identifier(
+                        span.parent_span_id,
+                        size=8,
+                        label="parent span ID",
+                    )
+                trace_ids.add(bytes(span.trace_id))
+                attribute_count = _count_otlp_attributes(
+                    span.attributes,
+                    count=attribute_count,
+                    limits=limits,
+                )
+                event_count += len(span.events)
+                _check_otlp_count(event_count, limits.max_events, "events")
+                link_count += len(span.links)
+                _check_otlp_count(link_count, limits.max_links, "links")
+                for event in span.events:
+                    attribute_count = _count_otlp_attributes(
+                        event.attributes,
+                        count=attribute_count,
+                        limits=limits,
+                    )
+                for link in span.links:
+                    _validate_otlp_identifier(link.trace_id, size=16, label="link trace ID")
+                    _validate_otlp_identifier(link.span_id, size=8, label="link span ID")
+                    attribute_count = _count_otlp_attributes(
+                        link.attributes,
+                        count=attribute_count,
+                        limits=limits,
+                    )
+
+    if not trace_ids:
+        raise OtlpTraceProcessingError("OTLP protobuf contains no traces")
+    _check_otlp_count(len(trace_ids), limits.max_traces, "traces")
+
+
+def _count_otlp_attributes(
+    attributes: Iterable[KeyValue],
+    *,
+    count: int,
+    limits: OtlpTraceLimits,
+    value_depth: int = 1,
+) -> int:
+    for attribute in attributes:
+        count += 1
+        _check_otlp_count(count, limits.max_attributes, "attribute values")
+        count = _count_otlp_attribute_value(
+            attribute.value,
+            count=count,
+            depth=value_depth,
+            limits=limits,
+        )
+    return count
+
+
+def _count_otlp_attribute_value(
+    value: AnyValue,
+    *,
+    count: int,
+    depth: int,
+    limits: OtlpTraceLimits,
+) -> int:
+    if depth > limits.max_attribute_depth:
+        raise OtlpTraceProcessingError("OTLP protobuf attribute values are too deeply nested")
+    if value.HasField("array_value"):
+        count += len(value.array_value.values)
+        _check_otlp_count(count, limits.max_attributes, "attribute values")
+        for item in value.array_value.values:
+            count = _count_otlp_attribute_value(
+                item,
+                count=count,
+                depth=depth + 1,
+                limits=limits,
+            )
+    elif value.HasField("kvlist_value"):
+        count = _count_otlp_attributes(
+            value.kvlist_value.values,
+            count=count,
+            limits=limits,
+            value_depth=depth + 1,
+        )
+    return count
+
+
+def _redact_otlp_byte_values(request: ExportTraceServiceRequest) -> None:
+    for resource_spans in request.resource_spans:
+        _redact_otlp_attribute_bytes(resource_spans.resource.attributes)
+        for scope_spans in resource_spans.scope_spans:
+            _redact_otlp_attribute_bytes(scope_spans.scope.attributes)
+            for span in scope_spans.spans:
+                _redact_otlp_attribute_bytes(span.attributes)
+                for event in span.events:
+                    _redact_otlp_attribute_bytes(event.attributes)
+                for link in span.links:
+                    _redact_otlp_attribute_bytes(link.attributes)
+
+
+def _redact_otlp_attribute_bytes(attributes: Iterable[KeyValue]) -> None:
+    for attribute in attributes:
+        _redact_otlp_attribute_value_bytes(attribute.value)
+
+
+def _redact_otlp_attribute_value_bytes(value: AnyValue) -> None:
+    if value.HasField("bytes_value"):
+        value.string_value = REDACTED_PLACEHOLDER
+    elif value.HasField("array_value"):
+        for item in value.array_value.values:
+            _redact_otlp_attribute_value_bytes(item)
+    elif value.HasField("kvlist_value"):
+        _redact_otlp_attribute_bytes(value.kvlist_value.values)
+
+
+def _validate_otlp_identifier(value: bytes, *, size: int, label: str) -> None:
+    if len(value) != size or not any(value):
+        raise OtlpTraceProcessingError(f"OTLP protobuf has an invalid {label}")
+
+
+def _check_otlp_count(actual: int, maximum: int, label: str) -> None:
+    if actual > maximum:
+        raise OtlpTraceProcessingError(f"OTLP protobuf has too many {label}")
+
+
+def _omit_usage_metrics(trace: TraceView) -> TraceView:
+    return replace(
+        trace,
+        spans=[
+            replace(
+                span,
+                usage=replace(
+                    span.usage,
+                    input_tokens=None,
+                    output_tokens=None,
+                    total_tokens=None,
+                    cache_read_input_tokens=None,
+                    cache_creation_input_tokens=None,
+                    cost_usd=None,
+                ),
+            )
+            for span in trace.spans
+        ],
+    )
+
+
+def _redact_trace_views(
+    trace_views: list[TraceView],
+    *,
+    redactor: Redactor,
+    pseudonym_key: bytes | None = None,
+    omit_usage_metrics: bool = False,
+) -> list[dict[str, Any]]:
+    projected = _pseudonymize_trace_ids(trace_views, key=pseudonym_key)
+    if omit_usage_metrics:
+        projected = [_omit_usage_metrics(trace) for trace in projected]
+    return [redactor.redact_trace_view(trace.to_dict()).trace for trace in projected]
+
+
 def _write_redacted_import(
     *,
     parse_provider: str,
@@ -475,15 +798,10 @@ def _write_redacted_import(
         limit=limit,
         trace_source=trace_source,
     )
-    trace_views = _pseudonymize_trace_ids(trace_views)
     span_count = sum(len(trace.spans) for trace in trace_views)
     output = Path(out)
-    results: list[RedactionResult] = [
-        redactor.redact_trace_view(trace.to_dict()) for trace in trace_views
-    ]
-    artifact_bytes = "".join(
-        json.dumps(result.trace, sort_keys=True) + "\n" for result in results
-    ).encode("utf-8")
+    rows = _redact_trace_views(trace_views, redactor=redactor)
+    artifact_bytes = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows).encode("utf-8")
     _write_bytes_atomic(output, artifact_bytes)
     redaction_manifest = redactor.manifest()
     manifest_path = _write_import_manifest(
@@ -1180,13 +1498,19 @@ def _coalesce(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
 
 
-def _pseudonymize_trace_ids(traces: list[TraceView]) -> list[TraceView]:
-    key = _pseudonym_key()
+def _pseudonymize_trace_ids(
+    traces: list[TraceView],
+    *,
+    key: bytes | None = None,
+) -> list[TraceView]:
+    active_key = _pseudonym_key() if key is None else key
     projected: list[TraceView] = []
     for trace in traces:
-        trace_alias = _pseudonym(key, "trace", trace.id)
+        trace_alias = _pseudonym(active_key, "trace", trace.id)
         _ensure_unique_span_ids(trace.spans)
-        span_aliases = {span.id: _pseudonym(key, "span", trace.id, span.id) for span in trace.spans}
+        span_aliases = {
+            span.id: _pseudonym(active_key, "span", trace.id, span.id) for span in trace.spans
+        }
         spans = [
             replace(
                 span,
@@ -1562,6 +1886,9 @@ __all__ = [
     "TRACE_MANIFEST_SCHEMA_VERSION",
     "TRACE_VIEW_SCHEMA_VERSION",
     "ImportResult",
+    "OtlpTraceLimits",
+    "OtlpTraceProcessingError",
+    "OtlpTraceProcessor",
     "SpanView",
     "TraceManifest",
     "TraceSource",
