@@ -4,6 +4,15 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.25.0
+### Features
+* feat(traces): fingerprint trace fragments ([69159c3](https://github.com/kensa-sh/kensa/commit/69159c3a5e11d1518097fecba7f4742176e7fe5c))
+### Chores
+* chore(security): simplify vulnerability reporting ([7cce30e](https://github.com/kensa-sh/kensa/commit/7cce30ebb5f305c07d72c7ede4543dd779b83a6a))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.24.0...v0.25.0
+
+
 ## 0.24.0
 ### Features
 * feat(traces): process OTLP protobuf in memory ([5fbc58b](https://github.com/kensa-sh/kensa/commit/5fbc58b4061edfdb659f5a830cf25211f481db2d))
