@@ -15,10 +15,12 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 from kensa import redact
 from kensa import traces as traces_module
 from kensa.traces import (
+    TRACE_FRAGMENT_FINGERPRINT_VERSION,
     OtlpTraceLimits,
     OtlpTraceProcessingError,
     OtlpTraceProcessor,
     TraceView,
+    trace_fragment_fingerprint,
 )
 
 
@@ -80,11 +82,96 @@ def test_processes_redacted_trace_views_without_writing_artifacts(
     assert trace.spans[0].id.startswith("span_")
     assert second[0].id == trace.id
     assert second[0].spans == trace.spans
+    assert trace_fragment_fingerprint(second[0]) == trace_fragment_fingerprint(trace)
     assert trace.spans[0].trace_id == trace.id
     assert trace.spans[0].input == "[PERSON_1] uses [SECRET_1]"
     assert trace.spans[0].usage.input_tokens is None
     assert trace.spans[0].usage.cost_usd is None
     assert not (tmp_path / ".kensa").exists()
+
+
+def test_fragment_fingerprint_uses_only_unordered_trace_and_span_identity(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    trace = OtlpTraceProcessor(pseudonym_key=b"k" * 32).process(_payload())[0]
+    first_span = replace(trace.spans[0], id="span_a", trace_id="trace_a")
+    second_span = replace(trace.spans[0], id="span_b", trace_id="trace_a")
+    fragment = replace(trace, id="trace_a", spans=[second_span, first_span])
+    changed_metadata = replace(
+        fragment,
+        name="different",
+        source=replace(
+            fragment.source,
+            import_run_id="different-run",
+            imported_at="2030-01-01T00:00:00Z",
+        ),
+        started_at_unix_nano=10,
+        ended_at_unix_nano=20,
+        duration_ms=10.0,
+        status="error",
+        input="different input",
+        output="different output",
+        spans=[
+            replace(
+                first_span,
+                name="different first span",
+                status="error",
+                input="redacted input",
+                usage=replace(first_span.usage, input_tokens=None, cost_usd=None),
+            ),
+            replace(second_span, name="different second span", output="redacted output"),
+        ],
+    )
+
+    assert TRACE_FRAGMENT_FINGERPRINT_VERSION == "kensa.trace_fragment_fingerprint.v1"
+    assert trace_fragment_fingerprint(fragment) == (
+        "sha256:75c2491b46c8c1cd74a49e801e8d53bedc47e3a33c01c567f7091f13f06087fc"
+    )
+    assert trace_fragment_fingerprint(changed_metadata) == trace_fragment_fingerprint(fragment)
+    assert "TRACE_FRAGMENT_FINGERPRINT_VERSION" in traces_module.__all__
+    assert "trace_fragment_fingerprint" in traces_module.__all__
+    assert set(fragment.to_dict()) == {
+        "schema_version",
+        "id",
+        "name",
+        "source",
+        "started_at_unix_nano",
+        "ended_at_unix_nano",
+        "duration_ms",
+        "status",
+        "input",
+        "output",
+        "spans",
+    }
+
+
+def test_fragment_fingerprint_changes_with_trace_or_span_membership(
+    redaction_ready: FakeRedactionEnv,
+) -> None:
+    trace = OtlpTraceProcessor(pseudonym_key=b"k" * 32).process(_payload())[0]
+    span_a = replace(trace.spans[0], id="span_a", trace_id="trace_a")
+    span_b = replace(trace.spans[0], id="span_b", trace_id="trace_a")
+    span_c = replace(trace.spans[0], id="span_c", trace_id="trace_a")
+    span_d = replace(trace.spans[0], id="span_d", trace_id="trace_a")
+    fragment = replace(trace, id="trace_a", spans=[span_a, span_b])
+    overlapping = replace(fragment, spans=[span_a, span_c])
+    extended = replace(fragment, spans=[span_a, span_b, span_c])
+    disjoint = replace(fragment, spans=[span_c, span_d])
+    different_trace = replace(
+        fragment,
+        id="trace_b",
+        spans=[
+            replace(span_a, trace_id="trace_b"),
+            replace(span_b, trace_id="trace_b"),
+        ],
+    )
+
+    fingerprints = {
+        trace_fragment_fingerprint(candidate)
+        for candidate in (fragment, overlapping, extended, disjoint, different_trace)
+    }
+
+    assert len(fingerprints) == 5
 
 
 def test_keeps_usage_metrics_by_default(redaction_ready: FakeRedactionEnv) -> None:
