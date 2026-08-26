@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 TRACE_MANIFEST_SCHEMA_VERSION = "kensa.trace_manifest.v1"
 TRACE_VIEW_SCHEMA_VERSION = "kensa.trace_view.v2"
+TRACE_FRAGMENT_FINGERPRINT_VERSION = "kensa.trace_fragment_fingerprint.v1"
 _SECRET_KEY = re.compile(r"(secret|token|password|api[_-]?key|authorization|credential)", re.I)
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _ENDPOINT_PLACEHOLDER = "[redacted]"
@@ -308,6 +309,17 @@ class TraceView:
         }
 
 
+def trace_fragment_fingerprint(trace: TraceView) -> str:
+    """Return a deterministic fingerprint for one request-scoped trace fragment."""
+    payload = {
+        "fingerprint_version": TRACE_FRAGMENT_FINGERPRINT_VERSION,
+        "span_ids": sorted({span.id for span in trace.spans}),
+        "trace_id": trace.id,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
 _TRACE_VIEW_ADAPTER = TypeAdapter(TraceView)
 
 
@@ -342,7 +354,7 @@ class OtlpTraceLimits:
 
 
 class OtlpTraceProcessor:
-    """Process bounded OTLP protobuf into redacted in-memory trace views."""
+    """Process bounded OTLP protobuf into redacted, request-scoped trace fragments."""
 
     def __init__(
         self,
@@ -363,7 +375,7 @@ class OtlpTraceProcessor:
         self._lock = Lock()
 
     def process(self, payload: bytes) -> tuple[TraceView, ...]:
-        """Return one atomic batch of redacted trace views."""
+        """Return one atomic batch of redacted, request-scoped trace fragments."""
 
         try:
             trace_views = _decode_otlp_protobuf(payload, limits=self._limits)
@@ -1883,6 +1895,7 @@ def _float_value(value: Any) -> float | None:
 
 
 __all__ = [
+    "TRACE_FRAGMENT_FINGERPRINT_VERSION",
     "TRACE_MANIFEST_SCHEMA_VERSION",
     "TRACE_VIEW_SCHEMA_VERSION",
     "ImportResult",
@@ -1900,6 +1913,7 @@ __all__ = [
     "load_trace_views",
     "safe_endpoint",
     "safe_import_artifact",
+    "trace_fragment_fingerprint",
     "trace_timestamp",
     "trace_view_summary",
     "write_trace_manifest",
