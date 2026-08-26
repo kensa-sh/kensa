@@ -11,6 +11,15 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.25.0
+
+Trace fragments now have deterministic fingerprints for reliable identity checks.
+
+- Fingerprints stay stable when span order or trace metadata changes.
+- They change when the trace ID or span membership changes.
+
+[View the 0.25.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.25.0).
+
 ## 0.24.0
 
 Kensa can now process raw OTLP traces safely in memory.
