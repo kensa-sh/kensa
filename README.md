@@ -63,9 +63,6 @@ test suite to catch those regressions before they hit prod.
 
 ## Getting started
 
-> [!NOTE]
-> `kensa>=0.9.0` is a ground-up rewrite with a new API. Older releases live [here](https://github.com/satyaborg/kensa).
-
 Paste this into your coding agent (Claude Code, Codex, Cursor):
 
 ```text
