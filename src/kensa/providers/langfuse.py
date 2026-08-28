@@ -5,14 +5,18 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections.abc import Callable, Iterator
+import ssl
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from typing import Any, Literal, TypeVar, cast
 
+import httpcore
 import httpx
 from langfuse import Langfuse
+from langfuse.api import LangfuseAPI
 from langfuse.api.core import ApiError, RequestOptions
 
 LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
@@ -29,6 +33,7 @@ _OBSERVATIONS_V2_DISCOVERY_FIELDS = "core"
 _OBSERVATIONS_V2_FIELDS = "core,basic,io,model,usage,trace_context"
 _SINCE_WINDOW = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
 _RESPONSE_HINT_MAX_CHARS = 300
+_LANGFUSE_SDK_VERSION = version("langfuse")
 
 _T = TypeVar("_T")
 
@@ -73,18 +78,12 @@ class LangfuseFetchBatch:
     next_checkpoint: LangfuseFetchCheckpoint | None
 
 
-class _BudgetedStream(httpx.SyncByteStream):
-    def __init__(self, stream: httpx.SyncByteStream, budget: _ResponseBudget) -> None:
-        self._stream = stream
-        self._budget = budget
+@dataclass(frozen=True)
+class _BatchLangfuseClient:
+    api: LangfuseAPI
 
-    def __iter__(self) -> Iterator[bytes]:
-        for chunk in self._stream:
-            self._budget.consume(len(chunk))
-            yield chunk
 
-    def close(self) -> None:
-        self._stream.close()
+_LangfuseClient = Langfuse | _BatchLangfuseClient
 
 
 class _ResponseBudget:
@@ -102,18 +101,101 @@ class _ResponseBudget:
         self._bytes_read += byte_count
 
 
+class _BudgetedNetworkStream(httpcore.NetworkStream):
+    def __init__(self, stream: httpcore.NetworkStream, budget: _ResponseBudget) -> None:
+        self._stream = stream
+        self._budget = budget
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self._budget.remaining <= 0:
+            raise LangfuseFetchBudgetError("response_byte_limit")
+        data = self._stream.read(min(max_bytes, self._budget.remaining), timeout)
+        self._budget.consume(len(data))
+        return data
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._stream.write(buffer, timeout)
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        return _BudgetedNetworkStream(
+            self._stream.start_tls(ssl_context, server_hostname, timeout),
+            self._budget,
+        )
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+
+class _BudgetedNetworkBackend(httpcore.NetworkBackend):
+    def __init__(self, backend: httpcore.NetworkBackend, budget: _ResponseBudget) -> None:
+        self._backend = backend
+        self._budget = budget
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _BudgetedNetworkStream(
+            self._backend.connect_tcp(host, port, timeout, local_address, socket_options),
+            self._budget,
+        )
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _BudgetedNetworkStream(
+            self._backend.connect_unix_socket(path, timeout, socket_options),
+            self._budget,
+        )
+
+    def sleep(self, seconds: float) -> None:
+        self._backend.sleep(seconds)
+
+
+class _RawBudgetedHTTPTransport(httpx.HTTPTransport):
+    def __init__(
+        self,
+        budget: _ResponseBudget,
+        backend: httpcore.NetworkBackend | None = None,
+    ) -> None:
+        super().__init__(http1=True, http2=False)
+        pool = cast(Any, self._pool)
+        pool._network_backend = _BudgetedNetworkBackend(
+            backend or httpcore.SyncBackend(),
+            budget,
+        )
+
+
 class _BudgetedTransport(httpx.BaseTransport):
     def __init__(
         self,
         *,
         request_limit: int,
         response_byte_limit: int,
-        transport: httpx.BaseTransport | None = None,
+        network_backend: httpcore.NetworkBackend | None = None,
     ) -> None:
         self._request_limit = request_limit
         self._request_count = 0
         self._response_budget = _ResponseBudget(response_byte_limit)
-        self._transport = transport or httpx.HTTPTransport()
+        self._transport = _RawBudgetedHTTPTransport(
+            self._response_budget,
+            network_backend,
+        )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if self._request_count >= self._request_limit:
@@ -128,7 +210,7 @@ class _BudgetedTransport(httpx.BaseTransport):
         return httpx.Response(
             status_code=response.status_code,
             headers=response.headers,
-            stream=_BudgetedStream(response_stream, self._response_budget),
+            stream=response_stream,
             extensions=response.extensions,
             request=request,
         )
@@ -221,6 +303,9 @@ def fetch_langfuse_connected_batch(
     """Fetch one bounded, resumable batch of complete Langfuse traces."""
 
     _validate_batch_arguments(
+        endpoint=endpoint,
+        public_key=public_key,
+        secret_key=secret_key,
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
         trace_limit=trace_limit,
@@ -281,7 +366,7 @@ def fetch_langfuse_connected_batch(
 
 def _fetch_batch_for_checkpoint(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     from_timestamp: datetime,
     to_timestamp: datetime,
@@ -309,7 +394,7 @@ def _fetch_batch_for_checkpoint(
 
 def _fetch_legacy_batch(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     from_timestamp: datetime,
     to_timestamp: datetime,
@@ -346,11 +431,13 @@ def _fetch_legacy_batch(
             if len(page_rows) != 1:
                 raise ValueError("Langfuse trace response ignored its one-trace page limit")
             trace = page_rows[0]
+            trace_id = _langfuse_trace_id(trace)
             trace_observations = _fetch_legacy_observation_rows(
                 client=client,
                 endpoint=endpoint,
-                trace_id=_langfuse_trace_id(trace),
+                trace_id=trace_id,
             )
+            _validate_observation_trace_rows(trace_observations, trace_id, allow_empty=True)
         except LangfuseFetchBudgetError:
             if not traces:
                 raise
@@ -395,7 +482,7 @@ def _legacy_batch_result(
 
 def _fetch_observations_v2_batch(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     from_timestamp: datetime,
     to_timestamp: datetime,
@@ -456,14 +543,14 @@ def _fetch_observations_v2_batch(
             if trace_id in seen_trace_ids:
                 continue
             try:
-                trace_rows = _parse_observations_v2_io(
-                    _fetch_observation_rows(
-                        client=client,
-                        endpoint=endpoint,
-                        trace_id=trace_id,
-                        fields=_OBSERVATIONS_V2_FIELDS,
-                    )
+                raw_trace_rows = _fetch_observation_rows(
+                    client=client,
+                    endpoint=endpoint,
+                    trace_id=trace_id,
+                    fields=_OBSERVATIONS_V2_FIELDS,
                 )
+                _validate_observation_trace_rows(raw_trace_rows, trace_id)
+                trace_rows = _parse_observations_v2_io(raw_trace_rows)
             except LangfuseFetchBudgetError:
                 if not imported_rows:
                     raise
@@ -570,6 +657,9 @@ def sdk_to_plain(value: Any) -> Any:
 
 def _validate_batch_arguments(
     *,
+    endpoint: str,
+    public_key: str,
+    secret_key: str,
     from_timestamp: datetime,
     to_timestamp: datetime,
     trace_limit: int,
@@ -578,6 +668,13 @@ def _validate_batch_arguments(
     checkpoint: LangfuseFetchCheckpoint | None,
     import_mode: LangfuseImportMode,
 ) -> None:
+    for label, value in (
+        ("endpoint", endpoint),
+        ("public key", public_key),
+        ("secret key", secret_key),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Langfuse {label} must be a non-empty string")
     if not _aware_datetime(from_timestamp) or not _aware_datetime(to_timestamp):
         raise ValueError("Langfuse batch timestamps must be timezone-aware")
     if from_timestamp >= to_timestamp:
@@ -647,24 +744,26 @@ def _batch_client(
     secret_key: str,
     request_limit: int,
     response_byte_limit: int,
-) -> Iterator[Langfuse]:
+) -> Iterator[_BatchLangfuseClient]:
     transport = _BudgetedTransport(
         request_limit=request_limit,
         response_byte_limit=response_byte_limit,
     )
-    with httpx.Client(transport=transport) as http_client:
-        client = _build_client(
-            endpoint=endpoint,
-            public_key=public_key,
-            secret_key=secret_key,
+    with httpx.Client(
+        transport=transport,
+        timeout=_CLIENT_TIMEOUT_SECONDS,
+    ) as http_client:
+        api = LangfuseAPI(
+            base_url=endpoint.rstrip("/"),
+            username=public_key,
+            password=secret_key,
+            x_langfuse_sdk_name="python",
+            x_langfuse_sdk_version=_LANGFUSE_SDK_VERSION,
+            x_langfuse_public_key=public_key,
             httpx_client=http_client,
+            timeout=_CLIENT_TIMEOUT_SECONDS,
         )
-        try:
-            yield client
-        finally:
-            shutdown = getattr(client, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
+        yield _BatchLangfuseClient(api=api)
 
 
 def _build_client(
@@ -672,18 +771,14 @@ def _build_client(
     endpoint: str,
     public_key: str,
     secret_key: str,
-    httpx_client: httpx.Client | None = None,
 ) -> Langfuse:
-    arguments: dict[str, Any] = {
-        "base_url": endpoint.rstrip("/"),
-        "public_key": public_key,
-        "secret_key": secret_key,
-        "tracing_enabled": False,
-        "timeout": _CLIENT_TIMEOUT_SECONDS,
-    }
-    if httpx_client is not None:
-        arguments["httpx_client"] = httpx_client
-    return Langfuse(**arguments)
+    return Langfuse(
+        base_url=endpoint.rstrip("/"),
+        public_key=public_key,
+        secret_key=secret_key,
+        tracing_enabled=False,
+        timeout=_CLIENT_TIMEOUT_SECONDS,
+    )
 
 
 def _content_length(response: httpx.Response) -> int | None:
@@ -768,7 +863,7 @@ def _provider_error_from_transport_error(
 
 def _fetch_legacy_trace_export(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     since_filter: _SinceFilter,
     limit: int,
@@ -793,7 +888,7 @@ def _fetch_legacy_trace_export(
 
 def _fetch_trace_rows(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     since_filter: _SinceFilter,
     limit: int,
@@ -831,7 +926,7 @@ def _fetch_trace_rows(
 
 def _fetch_legacy_observation_rows(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     trace_id: str,
 ) -> list[dict[str, Any]]:
@@ -862,7 +957,7 @@ def _fetch_legacy_observation_rows(
 
 def _fetch_observations_v2_export(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     since_filter: _SinceFilter,
     limit: int,
@@ -890,7 +985,7 @@ def _fetch_observations_v2_export(
 
 def _discover_observation_trace_ids(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     since_filter: _SinceFilter,
     limit: int,
@@ -929,7 +1024,7 @@ def _discover_observation_trace_ids(
 
 def _fetch_observation_rows(
     *,
-    client: Langfuse,
+    client: _LangfuseClient,
     endpoint: str,
     trace_id: str,
     fields: str | None = None,
@@ -958,6 +1053,20 @@ def _fetch_observation_rows(
         if cursor is None or not page_rows:
             break
     return rows
+
+
+def _validate_observation_trace_rows(
+    rows: list[dict[str, Any]],
+    trace_id: str,
+    *,
+    allow_empty: bool = False,
+) -> None:
+    if not rows and not allow_empty:
+        raise ValueError("Langfuse observation response omitted the requested trace")
+    for row in rows:
+        value = row.get("traceId") or row.get("trace_id")
+        if value is None or str(value) != trace_id:
+            raise ValueError("Langfuse observation response included a different trace")
 
 
 def _provider_since_filter(since: str | None) -> _SinceFilter:

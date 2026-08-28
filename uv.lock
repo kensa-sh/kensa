@@ -668,6 +668,8 @@ source = { editable = "." }
 dependencies = [
     { name = "any-llm-sdk" },
     { name = "click" },
+    { name = "httpcore" },
+    { name = "httpx" },
     { name = "langfuse" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -706,6 +708,8 @@ requires-dist = [
     { name = "any-llm-sdk", specifier = ">=1.15.0" },
     { name = "click", specifier = ">=8.1,<9" },
     { name = "detect-secrets", marker = "extra == 'redaction'", specifier = "==1.5.0" },
+    { name = "httpcore", specifier = ">=1,<2" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "langfuse", specifier = ">=4,<5" },
     { name = "opentelemetry-api", specifier = ">=1.42.1" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.42.1" },
