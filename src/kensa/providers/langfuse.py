@@ -62,6 +62,7 @@ class LangfuseFetchCheckpoint:
     legacy_page: int = 1
     observations_cursor: str | None = None
     observations_position: int = 0
+    observations_seen_trace_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -405,6 +406,7 @@ def _fetch_observations_v2_batch(
     imported_trace_count = 0
     cursor = checkpoint.observations_cursor
     position = checkpoint.observations_position
+    seen_trace_ids = dict.fromkeys(checkpoint.observations_seen_trace_ids)
     while True:
         try:
             current_cursor = cursor
@@ -431,6 +433,7 @@ def _fetch_observations_v2_batch(
                 imported_trace_count,
                 cursor=cursor,
                 position=position,
+                seen_trace_ids=seen_trace_ids,
             )
 
         trace_ids = _ordered_trace_ids(discovery["data"])
@@ -449,12 +452,15 @@ def _fetch_observations_v2_batch(
             continue
 
         for index in range(position, len(trace_ids)):
+            trace_id = trace_ids[index]
+            if trace_id in seen_trace_ids:
+                continue
             try:
                 trace_rows = _parse_observations_v2_io(
                     _fetch_observation_rows(
                         client=client,
                         endpoint=endpoint,
-                        trace_id=trace_ids[index],
+                        trace_id=trace_id,
                         fields=_OBSERVATIONS_V2_FIELDS,
                     )
                 )
@@ -466,9 +472,11 @@ def _fetch_observations_v2_batch(
                     imported_trace_count,
                     cursor=cursor,
                     position=index,
+                    seen_trace_ids=seen_trace_ids,
                 )
             imported_rows.extend(trace_rows)
             imported_trace_count += 1
+            seen_trace_ids[trace_id] = None
             if imported_trace_count >= trace_limit:
                 if index + 1 < len(trace_ids):
                     return _observations_batch_result(
@@ -476,6 +484,7 @@ def _fetch_observations_v2_batch(
                         imported_trace_count,
                         cursor=cursor,
                         position=index + 1,
+                        seen_trace_ids=seen_trace_ids,
                     )
                 if next_cursor is not None:
                     return _observations_batch_result(
@@ -483,6 +492,7 @@ def _fetch_observations_v2_batch(
                         imported_trace_count,
                         cursor=next_cursor,
                         position=0,
+                        seen_trace_ids=seen_trace_ids,
                     )
                 return _observations_batch_result(
                     imported_rows,
@@ -506,6 +516,7 @@ def _observations_batch_result(
     *,
     cursor: str | None = None,
     position: int = 0,
+    seen_trace_ids: dict[str, None] | None = None,
     complete: bool = False,
 ) -> LangfuseFetchBatch:
     return LangfuseFetchBatch(
@@ -519,6 +530,7 @@ def _observations_batch_result(
                 mode="observations_v2",
                 observations_cursor=cursor,
                 observations_position=position,
+                observations_seen_trace_ids=tuple(seen_trace_ids or ()),
             )
         ),
     )
@@ -601,10 +613,22 @@ def _validate_batch_arguments(
         raise ValueError("Langfuse checkpoint observations position must be a non-negative integer")
     if checkpoint.observations_cursor is not None and not checkpoint.observations_cursor:
         raise ValueError("Langfuse checkpoint observations cursor cannot be empty")
+    if (
+        not isinstance(checkpoint.observations_seen_trace_ids, tuple)
+        or any(
+            not isinstance(trace_id, str) or not trace_id
+            for trace_id in checkpoint.observations_seen_trace_ids
+        )
+        or len(set(checkpoint.observations_seen_trace_ids))
+        != len(checkpoint.observations_seen_trace_ids)
+    ):
+        raise ValueError("Langfuse checkpoint seen trace IDs must be unique non-empty strings")
     if checkpoint.mode == "legacy_traces" and (
         checkpoint.observations_cursor is not None or checkpoint.observations_position != 0
     ):
         raise ValueError("Legacy Langfuse checkpoints cannot include observations state")
+    if checkpoint.mode == "legacy_traces" and checkpoint.observations_seen_trace_ids:
+        raise ValueError("Legacy Langfuse checkpoints cannot include seen trace IDs")
     if checkpoint.mode == "observations_v2" and checkpoint.legacy_page != 1:
         raise ValueError("Observations-v2 Langfuse checkpoints cannot include a legacy page")
 

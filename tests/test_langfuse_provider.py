@@ -843,6 +843,7 @@ def test_observations_batch_resumes_inside_discovery_page_without_duplicates(
     assert first_batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
         mode="observations_v2",
         observations_position=1,
+        observations_seen_trace_ids=("tr_1",),
     )
     first_discovery_call = first.api.observations.calls[0]
     assert first_discovery_call["from_start_time"] == datetime(2026, 6, 1, tzinfo=UTC)
@@ -898,6 +899,7 @@ def test_observations_batch_resumes_at_next_discovery_cursor(
     assert first_batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
         mode="observations_v2",
         observations_cursor="next-cursor",
+        observations_seen_trace_ids=("tr_1",),
     )
 
     second = _FakeLangfuse(
@@ -917,6 +919,59 @@ def test_observations_batch_resumes_at_next_discovery_cursor(
 
     assert resumed.complete is True
     assert second.api.observations.calls[0]["cursor"] == "next-cursor"
+
+
+def test_observations_batch_skips_trace_repeated_on_resumed_discovery_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [
+                    {"id": "discovery_1", "traceId": "tr_1"},
+                    {"id": "discovery_2", "traceId": "tr_2"},
+                ],
+                "meta": {"cursor": "next-cursor"},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+            {"data": [{"id": "obs_2", "traceId": "tr_2"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, first)
+
+    first_batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=2, import_mode="observations_v2"))
+    )
+
+    assert first_batch.trace_count == 2
+    assert first_batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_cursor="next-cursor",
+        observations_seen_trace_ids=("tr_1", "tr_2"),
+    )
+
+    second = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [
+                    {"id": "discovery_3", "traceId": "tr_2"},
+                    {"id": "discovery_4", "traceId": "tr_3"},
+                ],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_3", "traceId": "tr_3"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, second)
+
+    resumed = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(checkpoint=first_batch.next_checkpoint))
+    )
+
+    assert resumed.trace_count == 1
+    assert resumed.payload["data"] == [{"id": "obs_3", "traceId": "tr_3"}]
+    assert resumed.complete is True
+    assert [call.get("trace_id") for call in second.api.observations.calls] == [None, "tr_3"]
 
 
 def test_batch_auto_fallback_returns_active_observations_checkpoint(
@@ -942,6 +997,7 @@ def test_batch_auto_fallback_returns_active_observations_checkpoint(
     assert batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
         mode="observations_v2",
         observations_position=1,
+        observations_seen_trace_ids=("tr_1",),
     )
     assert len(fake.api.trace.calls) == 1
 
@@ -995,6 +1051,7 @@ def test_batch_budget_returns_only_completed_trace_progress(
     assert batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
         mode="observations_v2",
         observations_position=1,
+        observations_seen_trace_ids=("tr_1",),
     )
 
 
@@ -1104,8 +1161,32 @@ def test_budgeted_transport_counts_streams_without_content_length() -> None:
         },
         {
             "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_seen_trace_ids=cast(Any, ["tr_1"]),
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_seen_trace_ids=("tr_1", "tr_1"),
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_seen_trace_ids=(cast(Any, 1),),
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
                 mode="legacy_traces",
                 observations_cursor="cursor",
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="legacy_traces",
+                observations_seen_trace_ids=("tr_1",),
             ),
         },
         {
@@ -1300,6 +1381,7 @@ def test_observations_batch_preserves_progress_when_next_discovery_hits_budget(
     assert result.next_checkpoint == provider.LangfuseFetchCheckpoint(
         mode="observations_v2",
         observations_cursor="next-cursor",
+        observations_seen_trace_ids=("tr_1",),
     )
 
 
