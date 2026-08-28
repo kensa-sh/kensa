@@ -5,7 +5,8 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
@@ -15,6 +16,8 @@ from langfuse import Langfuse
 from langfuse.api.core import ApiError, RequestOptions
 
 LangfuseImportMode = Literal["legacy_traces", "observations_v2", "auto"]
+LangfuseActiveImportMode = Literal["legacy_traces", "observations_v2"]
+LangfuseFetchBudget = Literal["request_limit", "response_byte_limit"]
 
 _CLIENT_TIMEOUT_SECONDS = 30
 _SDK_MAX_RETRIES = 3
@@ -45,6 +48,92 @@ class LangfuseProviderError(ValueError):
         self.status_code = status_code
         self.endpoint = endpoint
         self.response_body = response_body
+
+
+class LangfuseFetchBudgetError(ValueError):
+    def __init__(self, budget: LangfuseFetchBudget) -> None:
+        super().__init__(f"Langfuse fetch exceeded {budget}")
+        self.budget = budget
+
+
+@dataclass(frozen=True)
+class LangfuseFetchCheckpoint:
+    mode: LangfuseActiveImportMode
+    legacy_page: int = 1
+    observations_cursor: str | None = None
+    observations_position: int = 0
+
+
+@dataclass(frozen=True)
+class LangfuseFetchBatch:
+    payload: dict[str, Any]
+    trace_count: int
+    complete: bool
+    next_checkpoint: LangfuseFetchCheckpoint | None
+
+
+class _BudgetedStream(httpx.SyncByteStream):
+    def __init__(self, stream: httpx.SyncByteStream, budget: _ResponseBudget) -> None:
+        self._stream = stream
+        self._budget = budget
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._stream:
+            self._budget.consume(len(chunk))
+            yield chunk
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+class _ResponseBudget:
+    def __init__(self, byte_limit: int) -> None:
+        self._byte_limit = byte_limit
+        self._bytes_read = 0
+
+    @property
+    def remaining(self) -> int:
+        return self._byte_limit - self._bytes_read
+
+    def consume(self, byte_count: int) -> None:
+        if byte_count > self.remaining:
+            raise LangfuseFetchBudgetError("response_byte_limit")
+        self._bytes_read += byte_count
+
+
+class _BudgetedTransport(httpx.BaseTransport):
+    def __init__(
+        self,
+        *,
+        request_limit: int,
+        response_byte_limit: int,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._request_limit = request_limit
+        self._request_count = 0
+        self._response_budget = _ResponseBudget(response_byte_limit)
+        self._transport = transport or httpx.HTTPTransport()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if self._request_count >= self._request_limit:
+            raise LangfuseFetchBudgetError("request_limit")
+        self._request_count += 1
+        response = self._transport.handle_request(request)
+        response_stream = cast(httpx.SyncByteStream, response.stream)
+        content_length = _content_length(response)
+        if content_length is not None and content_length > self._response_budget.remaining:
+            response_stream.close()
+            raise LangfuseFetchBudgetError("response_byte_limit")
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            stream=_BudgetedStream(response_stream, self._response_budget),
+            extensions=response.extensions,
+            request=request,
+        )
+
+    def close(self) -> None:
+        self._transport.close()
 
 
 @dataclass(frozen=True)
@@ -115,6 +204,335 @@ def fetch_langfuse_connected_export(
             raise fallback_exc from exc
 
 
+def fetch_langfuse_connected_batch(
+    *,
+    endpoint: str,
+    public_key: str,
+    secret_key: str,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+    trace_limit: int,
+    request_limit: int,
+    response_byte_limit: int,
+    checkpoint: LangfuseFetchCheckpoint | None = None,
+    import_mode: LangfuseImportMode = "auto",
+) -> LangfuseFetchBatch:
+    """Fetch one bounded, resumable batch of complete Langfuse traces."""
+
+    _validate_batch_arguments(
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        trace_limit=trace_limit,
+        request_limit=request_limit,
+        response_byte_limit=response_byte_limit,
+        checkpoint=checkpoint,
+        import_mode=import_mode,
+    )
+    with _batch_client(
+        endpoint=endpoint,
+        public_key=public_key,
+        secret_key=secret_key,
+        request_limit=request_limit,
+        response_byte_limit=response_byte_limit,
+    ) as client:
+        if checkpoint is not None:
+            return _fetch_batch_for_checkpoint(
+                client=client,
+                endpoint=endpoint,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                trace_limit=trace_limit,
+                checkpoint=checkpoint,
+            )
+        if import_mode == "observations_v2":
+            return _fetch_observations_v2_batch(
+                client=client,
+                endpoint=endpoint,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                trace_limit=trace_limit,
+                checkpoint=LangfuseFetchCheckpoint(mode="observations_v2"),
+            )
+        try:
+            return _fetch_legacy_batch(
+                client=client,
+                endpoint=endpoint,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                trace_limit=trace_limit,
+                checkpoint=LangfuseFetchCheckpoint(mode="legacy_traces"),
+            )
+        except LangfuseProviderError as exc:
+            if import_mode != "auto" or exc.label != "traces" or exc.status_code != 404:
+                raise
+            try:
+                return _fetch_observations_v2_batch(
+                    client=client,
+                    endpoint=endpoint,
+                    from_timestamp=from_timestamp,
+                    to_timestamp=to_timestamp,
+                    trace_limit=trace_limit,
+                    checkpoint=LangfuseFetchCheckpoint(mode="observations_v2"),
+                )
+            except (OSError, RuntimeError, ValueError) as fallback_exc:
+                raise fallback_exc from exc
+
+
+def _fetch_batch_for_checkpoint(
+    *,
+    client: Langfuse,
+    endpoint: str,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+    trace_limit: int,
+    checkpoint: LangfuseFetchCheckpoint,
+) -> LangfuseFetchBatch:
+    if checkpoint.mode == "legacy_traces":
+        return _fetch_legacy_batch(
+            client=client,
+            endpoint=endpoint,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            trace_limit=trace_limit,
+            checkpoint=checkpoint,
+        )
+    return _fetch_observations_v2_batch(
+        client=client,
+        endpoint=endpoint,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        trace_limit=trace_limit,
+        checkpoint=checkpoint,
+    )
+
+
+def _fetch_legacy_batch(
+    *,
+    client: Langfuse,
+    endpoint: str,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+    trace_limit: int,
+    checkpoint: LangfuseFetchCheckpoint,
+) -> LangfuseFetchBatch:
+    traces: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    page = checkpoint.legacy_page
+    meta: dict[str, Any] = {}
+    while len(traces) < trace_limit:
+        try:
+            current_page = page
+            trace_payload = _langfuse_response_envelope(
+                _call_sdk(
+                    lambda current_page=current_page: client.api.trace.list(
+                        page=current_page,
+                        limit=1,
+                        fields=_LEGACY_TRACE_FIELDS,
+                        from_timestamp=from_timestamp,
+                        to_timestamp=to_timestamp,
+                        order_by="timestamp.asc",
+                        request_options=_request_options(),
+                    ),
+                    label="traces",
+                    endpoint=endpoint,
+                ),
+                label="traces",
+            )
+            page_rows = trace_payload["data"]
+            meta = trace_payload["meta"]
+            if not page_rows:
+                return _legacy_batch_result(traces, observations, complete=True)
+            if len(page_rows) != 1:
+                raise ValueError("Langfuse trace response ignored its one-trace page limit")
+            trace = page_rows[0]
+            trace_observations = _fetch_legacy_observation_rows(
+                client=client,
+                endpoint=endpoint,
+                trace_id=_langfuse_trace_id(trace),
+            )
+        except LangfuseFetchBudgetError:
+            if not traces:
+                raise
+            return _legacy_batch_result(
+                traces,
+                observations,
+                complete=False,
+                next_page=page,
+            )
+
+        traces.append(trace)
+        observations.extend(trace_observations)
+        current_page = page
+        page += 1
+        if _trace_page_is_last(meta, current_page):
+            return _legacy_batch_result(traces, observations, complete=True)
+
+    return _legacy_batch_result(traces, observations, complete=False, next_page=page)
+
+
+def _legacy_batch_result(
+    traces: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    *,
+    complete: bool,
+    next_page: int | None = None,
+) -> LangfuseFetchBatch:
+    return LangfuseFetchBatch(
+        payload={"traces": traces, "observations": observations, "meta": {}},
+        trace_count=len(traces),
+        complete=complete,
+        next_checkpoint=(
+            None
+            if complete
+            else LangfuseFetchCheckpoint(
+                mode="legacy_traces",
+                legacy_page=cast(int, next_page),
+            )
+        ),
+    )
+
+
+def _fetch_observations_v2_batch(
+    *,
+    client: Langfuse,
+    endpoint: str,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+    trace_limit: int,
+    checkpoint: LangfuseFetchCheckpoint,
+) -> LangfuseFetchBatch:
+    imported_rows: list[dict[str, Any]] = []
+    imported_trace_count = 0
+    cursor = checkpoint.observations_cursor
+    position = checkpoint.observations_position
+    while True:
+        try:
+            current_cursor = cursor
+            discovery = _langfuse_response_envelope(
+                _call_sdk(
+                    lambda current_cursor=current_cursor: client.api.observations.get_many(
+                        fields=_OBSERVATIONS_V2_DISCOVERY_FIELDS,
+                        limit=_OBSERVATION_PAGE_LIMIT,
+                        cursor=current_cursor,
+                        from_start_time=from_timestamp,
+                        to_start_time=to_timestamp,
+                        request_options=_request_options(),
+                    ),
+                    label="observations",
+                    endpoint=endpoint,
+                ),
+                label="observations",
+            )
+        except LangfuseFetchBudgetError:
+            if not imported_rows:
+                raise
+            return _observations_batch_result(
+                imported_rows,
+                imported_trace_count,
+                cursor=cursor,
+                position=position,
+            )
+
+        trace_ids = _ordered_trace_ids(discovery["data"])
+        next_cursor = _response_cursor(discovery)
+        if position > len(trace_ids):
+            raise ValueError("Langfuse checkpoint position exceeds its observations page")
+        if position == len(trace_ids):
+            if next_cursor is None:
+                return _observations_batch_result(
+                    imported_rows,
+                    imported_trace_count,
+                    complete=True,
+                )
+            cursor = next_cursor
+            position = 0
+            continue
+
+        for index in range(position, len(trace_ids)):
+            try:
+                trace_rows = _parse_observations_v2_io(
+                    _fetch_observation_rows(
+                        client=client,
+                        endpoint=endpoint,
+                        trace_id=trace_ids[index],
+                        fields=_OBSERVATIONS_V2_FIELDS,
+                    )
+                )
+            except LangfuseFetchBudgetError:
+                if not imported_rows:
+                    raise
+                return _observations_batch_result(
+                    imported_rows,
+                    imported_trace_count,
+                    cursor=cursor,
+                    position=index,
+                )
+            imported_rows.extend(trace_rows)
+            imported_trace_count += 1
+            if imported_trace_count >= trace_limit:
+                if index + 1 < len(trace_ids):
+                    return _observations_batch_result(
+                        imported_rows,
+                        imported_trace_count,
+                        cursor=cursor,
+                        position=index + 1,
+                    )
+                if next_cursor is not None:
+                    return _observations_batch_result(
+                        imported_rows,
+                        imported_trace_count,
+                        cursor=next_cursor,
+                        position=0,
+                    )
+                return _observations_batch_result(
+                    imported_rows,
+                    imported_trace_count,
+                    complete=True,
+                )
+
+        if next_cursor is None:
+            return _observations_batch_result(
+                imported_rows,
+                imported_trace_count,
+                complete=True,
+            )
+        cursor = next_cursor
+        position = 0
+
+
+def _observations_batch_result(
+    rows: list[dict[str, Any]],
+    trace_count: int,
+    *,
+    cursor: str | None = None,
+    position: int = 0,
+    complete: bool = False,
+) -> LangfuseFetchBatch:
+    return LangfuseFetchBatch(
+        payload={"data": rows, "meta": {}},
+        trace_count=trace_count,
+        complete=complete,
+        next_checkpoint=(
+            None
+            if complete
+            else LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_cursor=cursor,
+                observations_position=position,
+            )
+        ),
+    )
+
+
+def _ordered_trace_ids(rows: list[dict[str, Any]]) -> list[str]:
+    trace_ids: dict[str, None] = {}
+    for row in rows:
+        value = row.get("traceId") or row.get("trace_id")
+        if value is not None and str(value) != "":
+            trace_ids.setdefault(str(value), None)
+    return list(trace_ids)
+
+
 def sdk_to_plain(value: Any) -> Any:
     if value is None:
         return None
@@ -138,14 +556,120 @@ def sdk_to_plain(value: Any) -> Any:
     return value
 
 
-def _build_client(*, endpoint: str, public_key: str, secret_key: str) -> Langfuse:
-    return Langfuse(
-        base_url=endpoint.rstrip("/"),
-        public_key=public_key,
-        secret_key=secret_key,
-        tracing_enabled=False,
-        timeout=_CLIENT_TIMEOUT_SECONDS,
+def _validate_batch_arguments(
+    *,
+    from_timestamp: datetime,
+    to_timestamp: datetime,
+    trace_limit: int,
+    request_limit: int,
+    response_byte_limit: int,
+    checkpoint: LangfuseFetchCheckpoint | None,
+    import_mode: LangfuseImportMode,
+) -> None:
+    if not _aware_datetime(from_timestamp) or not _aware_datetime(to_timestamp):
+        raise ValueError("Langfuse batch timestamps must be timezone-aware")
+    if from_timestamp >= to_timestamp:
+        raise ValueError("Langfuse batch start timestamp must be before its end timestamp")
+    for label, value in (
+        ("trace_limit", trace_limit),
+        ("request_limit", request_limit),
+        ("response_byte_limit", response_byte_limit),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"Langfuse {label} must be a positive integer")
+    if import_mode not in {"legacy_traces", "observations_v2", "auto"}:
+        raise ValueError(f"Unsupported Langfuse import mode: {import_mode}")
+    if checkpoint is None:
+        return
+    if not isinstance(checkpoint, LangfuseFetchCheckpoint):
+        raise ValueError("Langfuse checkpoint has an invalid type")
+    if checkpoint.mode not in {"legacy_traces", "observations_v2"}:
+        raise ValueError("Langfuse checkpoint has an invalid import mode")
+    if import_mode != "auto" and checkpoint.mode != import_mode:
+        raise ValueError("Langfuse checkpoint mode does not match the requested import mode")
+    if (
+        not isinstance(checkpoint.legacy_page, int)
+        or isinstance(checkpoint.legacy_page, bool)
+        or checkpoint.legacy_page <= 0
+    ):
+        raise ValueError("Langfuse checkpoint legacy page must be a positive integer")
+    if (
+        not isinstance(checkpoint.observations_position, int)
+        or isinstance(checkpoint.observations_position, bool)
+        or checkpoint.observations_position < 0
+    ):
+        raise ValueError("Langfuse checkpoint observations position must be a non-negative integer")
+    if checkpoint.observations_cursor is not None and not checkpoint.observations_cursor:
+        raise ValueError("Langfuse checkpoint observations cursor cannot be empty")
+    if checkpoint.mode == "legacy_traces" and (
+        checkpoint.observations_cursor is not None or checkpoint.observations_position != 0
+    ):
+        raise ValueError("Legacy Langfuse checkpoints cannot include observations state")
+    if checkpoint.mode == "observations_v2" and checkpoint.legacy_page != 1:
+        raise ValueError("Observations-v2 Langfuse checkpoints cannot include a legacy page")
+
+
+def _aware_datetime(value: object) -> bool:
+    return (
+        isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
     )
+
+
+@contextmanager
+def _batch_client(
+    *,
+    endpoint: str,
+    public_key: str,
+    secret_key: str,
+    request_limit: int,
+    response_byte_limit: int,
+) -> Iterator[Langfuse]:
+    transport = _BudgetedTransport(
+        request_limit=request_limit,
+        response_byte_limit=response_byte_limit,
+    )
+    with httpx.Client(transport=transport) as http_client:
+        client = _build_client(
+            endpoint=endpoint,
+            public_key=public_key,
+            secret_key=secret_key,
+            httpx_client=http_client,
+        )
+        try:
+            yield client
+        finally:
+            shutdown = getattr(client, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+
+def _build_client(
+    *,
+    endpoint: str,
+    public_key: str,
+    secret_key: str,
+    httpx_client: httpx.Client | None = None,
+) -> Langfuse:
+    arguments: dict[str, Any] = {
+        "base_url": endpoint.rstrip("/"),
+        "public_key": public_key,
+        "secret_key": secret_key,
+        "tracing_enabled": False,
+        "timeout": _CLIENT_TIMEOUT_SECONDS,
+    }
+    if httpx_client is not None:
+        arguments["httpx_client"] = httpx_client
+    return Langfuse(**arguments)
+
+
+def _content_length(response: httpx.Response) -> int | None:
+    value = response.headers.get("content-length")
+    if value is None:
+        return None
+    with contextlib.suppress(ValueError):
+        length = int(value)
+        return length if length >= 0 else None
+    return None
 
 
 def _request_options(

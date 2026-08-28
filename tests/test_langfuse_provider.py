@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import httpx
 import pytest
 from langfuse.api.commons.types.observation_v2 import ObservationV2
 from langfuse.api.core import ApiError
@@ -77,10 +78,14 @@ class _FakeLangfuse:
             observation_responses=observation_responses,
         )
         self.constructor_calls: list[dict[str, Any]] = []
+        self.shutdown_calls = 0
 
     def constructor(self, **kwargs: Any) -> _FakeLangfuse:
         self.constructor_calls.append(kwargs)
         return self
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
 
 
 def _pop_response(responses: list[Any]) -> Any:
@@ -715,3 +720,616 @@ def test_since_windows_use_native_datetime(monkeypatch: pytest.MonkeyPatch) -> N
         30,
         tzinfo=UTC,
     )
+
+
+def _batch_arguments(**overrides: Any) -> dict[str, Any]:
+    return {
+        "endpoint": "https://langfuse.example.com",
+        "public_key": "public",
+        "secret_key": "secret",
+        "from_timestamp": datetime(2026, 6, 1, tzinfo=UTC),
+        "to_timestamp": datetime(2026, 6, 8, tzinfo=UTC),
+        "trace_limit": 2,
+        "request_limit": 20,
+        "response_byte_limit": 10_000,
+        **overrides,
+    }
+
+
+def test_legacy_batch_resumes_at_complete_trace_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _FakeLangfuse(
+        trace_responses=[{"data": [{"id": "tr_1", "name": "first"}], "meta": {"totalPages": 2}}],
+        observation_responses=[
+            {
+                "data": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+                "meta": {"totalPages": 1},
+            }
+        ],
+    )
+    _install_fake_client(monkeypatch, first)
+
+    first_batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=1, import_mode="legacy_traces"))
+    )
+
+    assert first_batch == provider.LangfuseFetchBatch(
+        payload={
+            "traces": [{"id": "tr_1", "name": "first"}],
+            "observations": [{"id": "obs_1", "traceId": "tr_1", "type": "SPAN"}],
+            "meta": {},
+        },
+        trace_count=1,
+        complete=False,
+        next_checkpoint=provider.LangfuseFetchCheckpoint(
+            mode="legacy_traces",
+            legacy_page=2,
+        ),
+    )
+    trace_call = first.api.trace.calls[0]
+    assert trace_call["from_timestamp"] == datetime(2026, 6, 1, tzinfo=UTC)
+    assert trace_call["to_timestamp"] == datetime(2026, 6, 8, tzinfo=UTC)
+    assert trace_call["order_by"] == "timestamp.asc"
+    assert first.shutdown_calls == 1
+    batch_http_client = first.constructor_calls[0]["httpx_client"]
+    assert isinstance(batch_http_client, httpx.Client)
+    assert batch_http_client.is_closed
+
+    second = _FakeLangfuse(
+        trace_responses=[{"data": [{"id": "tr_2", "name": "second"}], "meta": {"totalPages": 2}}],
+        observation_responses=[
+            {
+                "data": [{"id": "obs_2", "traceId": "tr_2", "type": "GENERATION"}],
+                "meta": {"totalPages": 1},
+            }
+        ],
+    )
+    _install_fake_client(monkeypatch, second)
+
+    second_batch = provider.fetch_langfuse_connected_batch(
+        **cast(
+            Any,
+            _batch_arguments(
+                trace_limit=1,
+                import_mode="legacy_traces",
+                checkpoint=first_batch.next_checkpoint,
+            ),
+        )
+    )
+
+    assert second_batch.trace_count == 1
+    assert second_batch.payload["traces"] == [{"id": "tr_2", "name": "second"}]
+    assert second_batch.complete is True
+    assert second_batch.next_checkpoint is None
+    assert second.api.trace.calls[0]["page"] == 2
+
+
+def test_observations_batch_resumes_inside_discovery_page_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery = {
+        "data": [
+            {"id": "discovery_1", "traceId": "tr_1"},
+            {"id": "discovery_2", "traceId": "tr_2"},
+        ],
+        "meta": {"cursor": None},
+    }
+    first = _FakeLangfuse(
+        observation_responses=[
+            discovery,
+            {
+                "data": [
+                    {
+                        "id": "obs_1",
+                        "traceId": "tr_1",
+                        "input": json.dumps({"prompt": "hello"}),
+                    }
+                ],
+                "meta": {"cursor": None},
+            },
+        ]
+    )
+    _install_fake_client(monkeypatch, first)
+
+    first_batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=1, import_mode="observations_v2"))
+    )
+
+    assert first_batch.payload == {
+        "data": [{"id": "obs_1", "traceId": "tr_1", "input": {"prompt": "hello"}}],
+        "meta": {},
+    }
+    assert first_batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_position=1,
+    )
+    first_discovery_call = first.api.observations.calls[0]
+    assert first_discovery_call["from_start_time"] == datetime(2026, 6, 1, tzinfo=UTC)
+    assert first_discovery_call["to_start_time"] == datetime(2026, 6, 8, tzinfo=UTC)
+
+    second = _FakeLangfuse(
+        observation_responses=[
+            discovery,
+            {
+                "data": [{"id": "obs_2", "traceId": "tr_2", "output": json.dumps(["done"])}],
+                "meta": {"cursor": None},
+            },
+        ]
+    )
+    _install_fake_client(monkeypatch, second)
+
+    second_batch = provider.fetch_langfuse_connected_batch(
+        **cast(
+            Any,
+            _batch_arguments(
+                trace_limit=1,
+                checkpoint=first_batch.next_checkpoint,
+            ),
+        )
+    )
+
+    assert second_batch.payload == {
+        "data": [{"id": "obs_2", "traceId": "tr_2", "output": ["done"]}],
+        "meta": {},
+    }
+    assert second_batch.complete is True
+    assert [call.get("trace_id") for call in second.api.observations.calls] == [None, "tr_2"]
+
+
+def test_observations_batch_resumes_at_next_discovery_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": "next-cursor"},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, first)
+
+    first_batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=1, import_mode="observations_v2"))
+    )
+
+    assert first_batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_cursor="next-cursor",
+    )
+
+    second = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_2", "traceId": "tr_2"}],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_2", "traceId": "tr_2"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, second)
+
+    resumed = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=1, checkpoint=first_batch.next_checkpoint))
+    )
+
+    assert resumed.complete is True
+    assert second.api.observations.calls[0]["cursor"] == "next-cursor"
+
+
+def test_batch_auto_fallback_returns_active_observations_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeLangfuse(
+        trace_responses=[_api_error(404, {"error": "events_only"})],
+        observation_responses=[
+            {
+                "data": [
+                    {"id": "discovery_1", "traceId": "tr_1"},
+                    {"id": "discovery_2", "traceId": "tr_2"},
+                ],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+        ],
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    batch = provider.fetch_langfuse_connected_batch(**cast(Any, _batch_arguments(trace_limit=1)))
+
+    assert batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_position=1,
+    )
+    assert len(fake.api.trace.calls) == 1
+
+
+@pytest.mark.parametrize("budget", ["request_limit", "response_byte_limit"])
+def test_batch_budget_returns_only_completed_trace_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    budget: provider.LangfuseFetchBudget,
+) -> None:
+    legacy = _FakeLangfuse(
+        trace_responses=[
+            {"data": [{"id": "tr_1"}], "meta": {"totalPages": 2}},
+            provider.LangfuseFetchBudgetError(budget),
+        ],
+        observation_responses=[
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"totalPages": 1}}
+        ],
+    )
+    _install_fake_client(monkeypatch, legacy)
+
+    batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(import_mode="legacy_traces"))
+    )
+
+    assert batch.trace_count == 1
+    assert batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="legacy_traces",
+        legacy_page=2,
+    )
+
+    observations = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [
+                    {"id": "discovery_1", "traceId": "tr_1"},
+                    {"id": "discovery_2", "traceId": "tr_2"},
+                ],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+            provider.LangfuseFetchBudgetError(budget),
+        ]
+    )
+    _install_fake_client(monkeypatch, observations)
+
+    batch = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(import_mode="observations_v2"))
+    )
+
+    assert batch.trace_count == 1
+    assert batch.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_position=1,
+    )
+
+
+@pytest.mark.parametrize("mode", ["legacy_traces", "observations_v2"])
+def test_batch_budget_before_complete_trace_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: provider.LangfuseActiveImportMode,
+) -> None:
+    fake = _FakeLangfuse(
+        trace_responses=[provider.LangfuseFetchBudgetError("request_limit")],
+        observation_responses=[provider.LangfuseFetchBudgetError("response_byte_limit")],
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    with pytest.raises(provider.LangfuseFetchBudgetError) as exc_info:
+        provider.fetch_langfuse_connected_batch(**cast(Any, _batch_arguments(import_mode=mode)))
+
+    assert exc_info.value.budget in {"request_limit", "response_byte_limit"}
+
+
+def test_budgeted_transport_enforces_request_and_cumulative_response_limits() -> None:
+    responses = iter((b"abc", b"def"))
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=next(responses), request=request)
+
+    transport = provider._BudgetedTransport(
+        request_limit=2,
+        response_byte_limit=5,
+        transport=httpx.MockTransport(respond),
+    )
+    with httpx.Client(transport=transport) as client:
+        assert client.get("https://langfuse.example.com/one").content == b"abc"
+        with pytest.raises(provider.LangfuseFetchBudgetError) as response_error:
+            client.get("https://langfuse.example.com/two")
+    assert response_error.value.budget == "response_byte_limit"
+
+    transport = provider._BudgetedTransport(
+        request_limit=1,
+        response_byte_limit=10,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"ok")),
+    )
+    with httpx.Client(transport=transport) as client:
+        assert client.get("https://langfuse.example.com/one").content == b"ok"
+        with pytest.raises(provider.LangfuseFetchBudgetError) as request_error:
+            client.get("https://langfuse.example.com/two")
+    assert request_error.value.budget == "request_limit"
+
+
+def test_budgeted_transport_counts_streams_without_content_length() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-length": "invalid"},
+            stream=httpx.ByteStream(b"abc"),
+            request=request,
+        )
+
+    transport = provider._BudgetedTransport(
+        request_limit=1,
+        response_byte_limit=2,
+        transport=httpx.MockTransport(respond),
+    )
+    with (
+        httpx.Client(transport=transport) as client,
+        pytest.raises(provider.LangfuseFetchBudgetError) as exc_info,
+    ):
+        client.get("https://langfuse.example.com")
+    assert exc_info.value.budget == "response_byte_limit"
+    assert provider._content_length(httpx.Response(200, headers={"content-length": "-1"})) is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"from_timestamp": datetime(2026, 6, 1), "to_timestamp": datetime(2026, 6, 8)},
+        {"from_timestamp": datetime(2026, 6, 8, tzinfo=UTC)},
+        {"trace_limit": 0},
+        {"request_limit": False},
+        {"response_byte_limit": cast(Any, "large")},
+        {"import_mode": cast(Any, "invalid")},
+        {"checkpoint": cast(Any, {"mode": "legacy_traces"})},
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(mode=cast(Any, "invalid")),
+        },
+        {
+            "import_mode": "legacy_traces",
+            "checkpoint": provider.LangfuseFetchCheckpoint(mode="observations_v2"),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="legacy_traces",
+                legacy_page=0,
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_position=-1,
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                observations_cursor="",
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="legacy_traces",
+                observations_cursor="cursor",
+            ),
+        },
+        {
+            "checkpoint": provider.LangfuseFetchCheckpoint(
+                mode="observations_v2",
+                legacy_page=2,
+            ),
+        },
+    ],
+)
+def test_batch_validation_fails_before_provider_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, Any],
+) -> None:
+    fake = _FakeLangfuse()
+    _install_fake_client(monkeypatch, fake)
+
+    with pytest.raises(ValueError, match="Langfuse"):
+        provider.fetch_langfuse_connected_batch(**cast(Any, _batch_arguments(**overrides)))
+
+    assert fake.constructor_calls == []
+
+
+def test_batch_rejects_checkpoint_position_beyond_discovery_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": None},
+            }
+        ]
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    with pytest.raises(ValueError, match="position exceeds"):
+        provider.fetch_langfuse_connected_batch(
+            **cast(
+                Any,
+                _batch_arguments(
+                    checkpoint=provider.LangfuseFetchCheckpoint(
+                        mode="observations_v2",
+                        observations_position=2,
+                    )
+                ),
+            )
+        )
+
+
+def test_legacy_batch_handles_empty_and_oversized_provider_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = _FakeLangfuse(trace_responses=[{"data": [], "meta": {"totalPages": 1}}])
+    _install_fake_client(monkeypatch, empty)
+
+    result = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(import_mode="legacy_traces"))
+    )
+
+    assert result == provider.LangfuseFetchBatch(
+        payload={"traces": [], "observations": [], "meta": {}},
+        trace_count=0,
+        complete=True,
+        next_checkpoint=None,
+    )
+
+    oversized = _FakeLangfuse(
+        trace_responses=[{"data": [{"id": "tr_1"}, {"id": "tr_2"}], "meta": {}}]
+    )
+    _install_fake_client(monkeypatch, oversized)
+
+    with pytest.raises(ValueError, match="one-trace page limit"):
+        provider.fetch_langfuse_connected_batch(
+            **cast(Any, _batch_arguments(import_mode="legacy_traces"))
+        )
+
+
+def test_batch_fallback_failure_preserves_cause_and_forced_mode_does_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broken_fallback = _FakeLangfuse(
+        trace_responses=[_api_error(404, {"error": "events_only"})],
+        observation_responses=[{"data": {}, "meta": {}}],
+    )
+    _install_fake_client(monkeypatch, broken_fallback)
+
+    with pytest.raises(ValueError, match="data list") as fallback_error:
+        provider.fetch_langfuse_connected_batch(**cast(Any, _batch_arguments()))
+
+    assert isinstance(fallback_error.value.__cause__, provider.LangfuseProviderError)
+
+    forced = _FakeLangfuse(trace_responses=[_api_error(404)])
+    _install_fake_client(monkeypatch, forced)
+
+    with pytest.raises(provider.LangfuseProviderError):
+        provider.fetch_langfuse_connected_batch(
+            **cast(Any, _batch_arguments(import_mode="legacy_traces"))
+        )
+    assert forced.api.observations.calls == []
+
+
+def test_observations_budget_during_first_trace_raises_without_partial_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": None},
+            },
+            provider.LangfuseFetchBudgetError("request_limit"),
+        ]
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    with pytest.raises(provider.LangfuseFetchBudgetError) as exc_info:
+        provider.fetch_langfuse_connected_batch(
+            **cast(Any, _batch_arguments(import_mode="observations_v2"))
+        )
+
+    assert exc_info.value.budget == "request_limit"
+
+
+def test_observations_checkpoint_at_page_end_advances_or_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    complete = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": None},
+            }
+        ]
+    )
+    _install_fake_client(monkeypatch, complete)
+    checkpoint = provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_position=1,
+    )
+
+    result = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(checkpoint=checkpoint))
+    )
+
+    assert result.complete is True
+    assert result.trace_count == 0
+
+    advance = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": "next-cursor"},
+            },
+            {
+                "data": [{"id": "discovery_2", "traceId": "tr_2"}],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_2", "traceId": "tr_2"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, advance)
+
+    result = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=1, checkpoint=checkpoint))
+    )
+
+    assert result.complete is True
+    assert advance.api.observations.calls[1]["cursor"] == "next-cursor"
+
+
+def test_observations_batch_preserves_progress_when_next_discovery_hits_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": "next-cursor"},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+            provider.LangfuseFetchBudgetError("response_byte_limit"),
+        ]
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    result = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(import_mode="observations_v2"))
+    )
+
+    assert result.trace_count == 1
+    assert result.next_checkpoint == provider.LangfuseFetchCheckpoint(
+        mode="observations_v2",
+        observations_cursor="next-cursor",
+    )
+
+
+def test_observations_batch_completes_when_provider_exhausts_before_trace_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeLangfuse(
+        observation_responses=[
+            {
+                "data": [{"id": "discovery_1", "traceId": "tr_1"}],
+                "meta": {"cursor": "next-cursor"},
+            },
+            {"data": [{"id": "obs_1", "traceId": "tr_1"}], "meta": {"cursor": None}},
+            {
+                "data": [{"id": "discovery_2", "traceId": "tr_2"}],
+                "meta": {"cursor": None},
+            },
+            {"data": [{"id": "obs_2", "traceId": "tr_2"}], "meta": {"cursor": None}},
+        ]
+    )
+    _install_fake_client(monkeypatch, fake)
+
+    result = provider.fetch_langfuse_connected_batch(
+        **cast(Any, _batch_arguments(trace_limit=3, import_mode="observations_v2"))
+    )
+
+    assert result.trace_count == 2
+    assert result.complete is True
+    assert result.next_checkpoint is None
+
+
+def test_content_length_handles_absent_header() -> None:
+    assert provider._content_length(httpx.Response(200)) is None
