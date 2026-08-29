@@ -11,6 +11,16 @@ keywords:
 
 <Note>Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).</Note>
 
+## 0.26.0
+
+Langfuse imports can now fetch complete traces in bounded, resumable batches.
+
+- Each batch is limited by trace count, request count, and response bytes.
+- Checkpoints resume legacy and observations-v2 imports without returning duplicate traces.
+- Budget exhaustion returns completed progress when possible and fails without partial trace data otherwise.
+
+[View the 0.26.0 release notes](https://github.com/kensa-sh/kensa/releases/tag/v0.26.0).
+
 ## 0.25.0
 
 Trace fragments now have deterministic fingerprints for reliable identity checks.

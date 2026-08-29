@@ -4,6 +4,18 @@
 
 Release notes for Kensa. Full notes are available on [GitHub Releases](https://github.com/kensa-sh/kensa/releases).
 
+## 0.26.0
+### Features
+* feat(langfuse): add resumable bounded batch fetching ([153e22a](https://github.com/kensa-sh/kensa/commit/153e22a09a17d1a5208f5359f1fe4ce95eaaaf0b))
+### Bug Fixes
+* fix(langfuse): deduplicate resumed observation traces ([edb6fd7](https://github.com/kensa-sh/kensa/commit/edb6fd724d4dda395a2308f6f49d811a050bae22))
+* fix(langfuse): enforce isolated batch bounds ([1252b5b](https://github.com/kensa-sh/kensa/commit/1252b5b7fcd74f324e0da0bef23e92fca83a51f3))
+### Chores
+* chore(docs): remove legacy repository references ([4fed96c](https://github.com/kensa-sh/kensa/commit/4fed96c35e4a606a22205aba55d17bfe4b8b1dec))
+
+**Full Changelog**: https://github.com/kensa-sh/kensa/compare/v0.25.0...v0.26.0
+
+
 ## 0.25.0
 ### Features
 * feat(traces): fingerprint trace fragments ([69159c3](https://github.com/kensa-sh/kensa/commit/69159c3a5e11d1518097fecba7f4742176e7fe5c))
